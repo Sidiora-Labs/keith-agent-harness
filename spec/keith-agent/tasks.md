@@ -20,7 +20,7 @@
     - Add property tests for round trips, unknown fields/variants, IDs, and time-zone separation
     - Generate human-readable schema documentation from the Rust source
     - _Requirements: 1.1, 2.1, 43.3_
-  - [ ] 1.3 Configuration layering, profile schema, and validation core
+  - [x] 1.3 Configuration layering, profile schema, and validation core
     - Implement defaults, global, profile, workspace, session, and action configuration layers
     - Define explicit replace, merge, append, and prohibition semantics per field
     - Keep previous valid configuration active when a narrower layer fails validation

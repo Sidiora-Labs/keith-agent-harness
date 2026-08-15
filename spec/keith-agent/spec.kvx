@@ -568,7 +568,7 @@ reqs   = ["1.1", "2.1", "43.3"]
 
 [task.1.3]
 title  = "Configuration layering, profile schema, and validation core"
-status = "pending"
+status = "done"
 wave   = 2
 do_1   = "Implement defaults, global, profile, workspace, session, and action configuration layers"
 do_2   = "Define explicit replace, merge, append, and prohibition semantics per field"
