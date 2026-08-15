@@ -580,7 +580,7 @@ requires = ["1.2"]
 
 [task.1.4]
 title  = "Transactional state-store and repository traits"
-status = "pending"
+status = "done"
 wave   = 2
 do_1   = "Define domain repository traits for leases, catalog, actions, goals, plans, commitments, waits, schedules, routes, deliveries, initiatives, refinement, and tool experience"
 do_2   = "Implement a transactional embedded backend with schema migrations and backup hooks"

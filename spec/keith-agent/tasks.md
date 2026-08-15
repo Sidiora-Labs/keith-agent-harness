@@ -27,7 +27,7 @@
     - Add schema versions, migrations, redacted inspection, and change notifications
     - Test deterministic merge, invalid overrides, safety ceilings, and restart
     - _Requirements: 23.1, 43.1-43.6_
-  - [ ] 1.4 Transactional state-store and repository traits
+  - [x] 1.4 Transactional state-store and repository traits
     - Define domain repository traits for leases, catalog, actions, goals, plans, commitments, waits, schedules, routes, deliveries, initiatives, refinement, and tool experience
     - Implement a transactional embedded backend with schema migrations and backup hooks
     - Implement atomic multi-record transitions and fault injection around commit boundaries
