@@ -997,7 +997,7 @@ requires = ["7.2", "8.2"]
 
 [task.8.4]
 title  = "Attention ranking, initiative decisions, quiet hours, and budgets"
-status = "pending"
+status = "done"
 wave   = 16
 do_1   = "Implement initiative candidates and configurable scoring inputs"
 do_2   = "Implement ignore, remember, batch, schedule, ask, start-work, and notify decisions"

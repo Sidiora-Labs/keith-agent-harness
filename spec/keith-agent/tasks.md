@@ -277,7 +277,7 @@
     - Coalesce noise and isolate profiles
     - Test source replay, duplicate events, watcher restart/removal, bounds, and deletion
     - _Requirements: 31.1-31.5_
-  - [ ] 8.4 Attention ranking, initiative decisions, quiet hours, and budgets
+  - [x] 8.4 Attention ranking, initiative decisions, quiet hours, and budgets
     - Implement initiative candidates and configurable scoring inputs
     - Implement ignore, remember, batch, schedule, ask, start-work, and notify decisions
     - Apply quiet hours, workload, duplicates, autonomy mode, channel budgets, and user priorities
