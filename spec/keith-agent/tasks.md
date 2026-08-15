@@ -108,7 +108,7 @@
     - Implement error-class-aware retry/fallback and per-profile real construction
     - Run provider conformance and profile-isolation tests
     - _Requirements: 9.1-9.6_
-  - [ ] 4.2 Production-hardened agent loop
+  - [x] 4.2 Production-hardened agent loop
     - Implement deterministic lifecycle events and normalized streaming assembly
     - Implement tool-call parsing, ID repair, schema handoff, adjacency, and empty-response handling
     - Implement safe read parallelism, serialized effects, output spill, cancellation, and steering
