@@ -791,7 +791,7 @@ requires = ["5.1"]
 
 [task.5.3]
 title  = "Safe web fetch and isolated browser runner"
-status = "pending"
+status = "done"
 wave   = 10
 do_1   = "Implement destination validation across schemes, DNS, redirects, private/special ranges, size, time, and content type"
 do_2   = "Implement isolated browser profiles, semantic observations, bounded downloads, cancellation, and progress"

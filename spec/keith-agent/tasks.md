@@ -154,7 +154,7 @@
     - Implement platform sandbox backends and explicit reduced-isolation state
     - Run traversal, symlink race, device path, environment, process, output flood, cancellation, and cleanup tests
     - _Requirements: 14.1-14.2, 14.5-14.6, 46.2, 47.1_
-  - [ ] 5.3 Safe web fetch and isolated browser runner
+  - [x] 5.3 Safe web fetch and isolated browser runner
     - Implement destination validation across schemes, DNS, redirects, private/special ranges, size, time, and content type
     - Implement isolated browser profiles, semantic observations, bounded downloads, cancellation, and progress
     - Implement configured confirmations for submissions, external communication, deletion, purchases, and account changes
