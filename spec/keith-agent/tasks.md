@@ -263,7 +263,7 @@
     - Project next/last run, attempts, failures, and safe errors
     - Run DST, time-zone, restart, duplicate claim, catch-up, retry, cancellation, and delivery tests
     - _Requirements: 29.1-29.6_
-  - [ ] 8.2 Commitment registry and durable waiting service
+  - [x] 8.2 Commitment registry and durable waiting service
     - Implement Commitment, states, source, trigger, reply route, expiry, and user controls
     - Implement time, schedule, child, process, file, repository, channel, external, and user-response triggers
     - Persist trigger before yielding and deduplicate wake actions

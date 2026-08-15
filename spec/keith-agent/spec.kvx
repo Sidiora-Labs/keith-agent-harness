@@ -973,7 +973,7 @@ requires = ["3.2", "6.1"]
 
 [task.8.2]
 title  = "Commitment registry and durable waiting service"
-status = "pending"
+status = "done"
 wave   = 14
 do_1   = "Implement Commitment, states, source, trigger, reply route, expiry, and user controls"
 do_2   = "Implement time, schedule, child, process, file, repository, channel, external, and user-response triggers"
