@@ -673,7 +673,7 @@ requires = ["3.1"]
 
 [task.3.3]
 title  = "Append-only JSONL session trees and writer leases"
-status = "pending"
+status = "done"
 wave   = 6
 do_1   = "Implement SessionManifest, SessionEntry, payload taxonomy, canonical checksums, and append writer"
 do_2   = "Implement ancestry index, branch creation, selected leaf, labels, archive, and discovery"

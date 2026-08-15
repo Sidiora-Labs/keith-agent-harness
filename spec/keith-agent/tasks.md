@@ -83,7 +83,7 @@
     - Bound queue size and prioritize user work over background candidates
     - Interleave every source across restart and prove deterministic order
     - _Requirements: 6.1-6.6_
-  - [ ] 3.3 Append-only JSONL session trees and writer leases
+  - [x] 3.3 Append-only JSONL session trees and writer leases
     - Implement SessionManifest, SessionEntry, payload taxonomy, canonical checksums, and append writer
     - Implement ancestry index, branch creation, selected leaf, labels, archive, and discovery
     - Implement canonical-path write leases and stale owner rejection

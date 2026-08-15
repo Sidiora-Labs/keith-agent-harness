@@ -1,1 +1,1113 @@
 #![forbid(unsafe_code)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+
+use fs2::FileExt;
+use keith_agent_types::{
+    ArtifactId, CURRENT_SCHEMA_VERSION, ChildId, EntityId, EntryId, Generation, GoalId, ProfileId,
+    RootTreeId, SchemaVersion, SessionId, ToolCallId, UtcTimestamp, WorkerId, WorkspaceId,
+    canonical_json_bytes,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+const MANIFEST_FILE: &str = "manifest.json";
+const HISTORY_FILE: &str = "history.jsonl";
+const WRITER_LOCK_FILE: &str = ".writer.lock";
+const QUARANTINE_FILE: &str = "quarantine.json";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    Root,
+    DurableChild,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewSession {
+    pub kind: SessionKind,
+    pub session_id: SessionId,
+    pub root_tree_id: RootTreeId,
+    pub parent_session_id: Option<SessionId>,
+    pub profile_id: ProfileId,
+    pub workspace_id: WorkspaceId,
+    pub created_at: UtcTimestamp,
+    pub label: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionManifest {
+    pub version: SchemaVersion,
+    pub kind: SessionKind,
+    pub session_id: SessionId,
+    pub root_tree_id: RootTreeId,
+    pub parent_session_id: Option<SessionId>,
+    pub profile_id: ProfileId,
+    pub workspace_id: WorkspaceId,
+    pub created_at: UtcTimestamp,
+    pub active_leaf: Option<EntryId>,
+    pub label: Option<String>,
+    pub branch_labels: BTreeMap<String, EntryId>,
+    pub archived: bool,
+}
+
+impl From<NewSession> for SessionManifest {
+    fn from(value: NewSession) -> Self {
+        Self {
+            version: CURRENT_SCHEMA_VERSION,
+            kind: value.kind,
+            session_id: value.session_id,
+            root_tree_id: value.root_tree_id,
+            parent_session_id: value.parent_session_id,
+            profile_id: value.profile_id,
+            workspace_id: value.workspace_id,
+            created_at: value.created_at,
+            active_leaf: None,
+            label: value.label,
+            branch_labels: BTreeMap::new(),
+            archived: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageRole {
+    User,
+    Assistant,
+    Tool,
+    System,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningVisibility {
+    Hidden,
+    Summary,
+    Visible,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "content")]
+pub enum ContentBlock {
+    Text {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+        visibility: ReasoningVisibility,
+    },
+    Artifact {
+        artifact_id: ArtifactId,
+        media_type: String,
+    },
+    Resource {
+        uri: String,
+        title: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredMessage {
+    pub role: MessageRole,
+    pub content: Vec<ContentBlock>,
+    pub provider_metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "payload")]
+pub enum SessionEntryPayload {
+    UserMessage {
+        message: StoredMessage,
+    },
+    AssistantMessage {
+        message: StoredMessage,
+    },
+    ToolCall {
+        call_id: ToolCallId,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    ToolResult {
+        call_id: ToolCallId,
+        content: Vec<ContentBlock>,
+        is_error: bool,
+    },
+    ModelChanged {
+        provider: String,
+        model: String,
+    },
+    ThinkingChanged {
+        level: String,
+    },
+    Compaction {
+        summary: String,
+        compacted_through: EntryId,
+    },
+    BranchSummary {
+        summary: String,
+    },
+    GoalChanged {
+        goal_id: GoalId,
+        state: String,
+    },
+    PlanChanged {
+        plan_id: EntityId,
+        revision: u64,
+    },
+    ChildLinked {
+        child_id: ChildId,
+        child_session_id: SessionId,
+    },
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_micros: Option<u64>,
+    },
+    Lifecycle {
+        state: String,
+        detail: Option<String>,
+    },
+    Custom {
+        kind: String,
+        value: serde_json::Value,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionEntry {
+    pub version: SchemaVersion,
+    pub id: EntryId,
+    pub parent_id: Option<EntryId>,
+    pub timestamp: UtcTimestamp,
+    pub payload: SessionEntryPayload,
+    pub checksum: String,
+}
+
+#[derive(Serialize)]
+struct ChecksumInput<'a> {
+    version: SchemaVersion,
+    id: &'a EntryId,
+    parent_id: &'a Option<EntryId>,
+    timestamp: UtcTimestamp,
+    payload: &'a SessionEntryPayload,
+}
+
+impl SessionEntry {
+    /// # Errors
+    ///
+    /// Returns an error when the entry cannot be represented canonically as JSON.
+    pub fn new(
+        id: EntryId,
+        parent_id: Option<EntryId>,
+        timestamp: UtcTimestamp,
+        payload: SessionEntryPayload,
+    ) -> Result<Self, SessionStoreError> {
+        let mut entry = Self {
+            version: CURRENT_SCHEMA_VERSION,
+            id,
+            parent_id,
+            timestamp,
+            payload,
+            checksum: String::new(),
+        };
+        entry.checksum = entry.expected_checksum()?;
+        Ok(entry)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when canonical serialization fails or the checksum differs.
+    pub fn verify(&self) -> Result<(), SessionStoreError> {
+        if self.version.major != CURRENT_SCHEMA_VERSION.major
+            || self.version.minor > CURRENT_SCHEMA_VERSION.minor
+        {
+            return Err(SessionStoreError::UnsupportedVersion(self.version));
+        }
+        let expected = self.expected_checksum()?;
+        if self.checksum == expected {
+            Ok(())
+        } else {
+            Err(SessionStoreError::ChecksumMismatch(self.id.clone()))
+        }
+    }
+
+    fn expected_checksum(&self) -> Result<String, SessionStoreError> {
+        let bytes = canonical_json_bytes(&ChecksumInput {
+            version: self.version,
+            id: &self.id,
+            parent_id: &self.parent_id,
+            timestamp: self.timestamp,
+            payload: &self.payload,
+        })?;
+        let digest = Sha256::digest(bytes);
+        let mut checksum = String::with_capacity(64);
+        for byte in digest {
+            write!(&mut checksum, "{byte:02x}").map_err(|_| SessionStoreError::CorruptHistory {
+                line: 0,
+                reason: "checksum formatting failed".into(),
+            })?;
+        }
+        Ok(checksum)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SessionIndex {
+    entries: BTreeMap<EntryId, SessionEntry>,
+    children: BTreeMap<Option<EntryId>, Vec<EntryId>>,
+}
+
+impl SessionIndex {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn get(&self, id: &EntryId) -> Option<&SessionEntry> {
+        self.entries.get(id)
+    }
+
+    pub fn children_of(&self, id: Option<&EntryId>) -> &[EntryId] {
+        self.children.get(&id.cloned()).map_or(&[], Vec::as_slice)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the leaf is missing or its ancestry contains a cycle.
+    pub fn ancestry(&self, leaf: &EntryId) -> Result<Vec<SessionEntry>, SessionStoreError> {
+        let mut current = Some(leaf.clone());
+        let mut seen = BTreeSet::new();
+        let mut entries = Vec::new();
+        while let Some(id) = current.take() {
+            if !seen.insert(id.clone()) {
+                return Err(SessionStoreError::AncestryCycle(id));
+            }
+            let entry = self
+                .entries
+                .get(&id)
+                .ok_or_else(|| SessionStoreError::MissingEntry(id.clone()))?;
+            entries.push(entry.clone());
+            current.clone_from(&entry.parent_id);
+        }
+        entries.reverse();
+        Ok(entries)
+    }
+
+    fn insert(&mut self, entry: SessionEntry) -> Result<(), SessionStoreError> {
+        if self.entries.contains_key(&entry.id) {
+            return Err(SessionStoreError::DuplicateEntry(entry.id));
+        }
+        if let Some(parent_id) = &entry.parent_id {
+            if !self.entries.contains_key(parent_id) {
+                return Err(SessionStoreError::MissingParent {
+                    entry: entry.id,
+                    parent: parent_id.clone(),
+                });
+            }
+        } else if !self.entries.is_empty() {
+            return Err(SessionStoreError::MultipleRoots(entry.id));
+        }
+        self.children
+            .entry(entry.parent_id.clone())
+            .or_default()
+            .push(entry.id.clone());
+        self.entries.insert(entry.id.clone(), entry);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriterIdentity {
+    pub worker_id: WorkerId,
+    pub owner_instance: EntityId,
+    pub generation: Generation,
+    pub acquired_at: UtcTimestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuarantineRecord {
+    pub session_id: SessionId,
+    pub detected_at: UtcTimestamp,
+    pub line: usize,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryReport {
+    pub entries: usize,
+    pub discarded_tail_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepairIssue {
+    pub line: usize,
+    pub reason: String,
+    pub final_unterminated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionExport {
+    pub version: SchemaVersion,
+    pub manifest: SessionManifest,
+    pub entries: Vec<SessionEntry>,
+}
+
+#[derive(Debug, Error)]
+pub enum SessionStoreError {
+    #[error("session storage I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("session JSON failed: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("session {0} already exists")]
+    AlreadyExists(SessionId),
+    #[error("session {0} was not found")]
+    NotFound(SessionId),
+    #[error("session {0} has an active local writer")]
+    WriterLocked(SessionId),
+    #[error("session path escaped the canonical session root")]
+    PathEscape,
+    #[error("session {0} is archived")]
+    Archived(SessionId),
+    #[error("session {0} is quarantined")]
+    Quarantined(SessionId),
+    #[error("unsupported session schema {0}")]
+    UnsupportedVersion(SchemaVersion),
+    #[error("checksum mismatch for entry {0}")]
+    ChecksumMismatch(EntryId),
+    #[error("duplicate entry {0}")]
+    DuplicateEntry(EntryId),
+    #[error("entry {entry} references missing parent {parent}")]
+    MissingParent { entry: EntryId, parent: EntryId },
+    #[error("entry {0} introduced a second history root")]
+    MultipleRoots(EntryId),
+    #[error("entry {0} was not found")]
+    MissingEntry(EntryId),
+    #[error("entry ancestry contains a cycle at {0}")]
+    AncestryCycle(EntryId),
+    #[error("branch label is empty or already exists")]
+    InvalidLabel,
+    #[error("history corruption at line {line}: {reason}")]
+    CorruptHistory { line: usize, reason: String },
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionStore {
+    root: PathBuf,
+    sessions: PathBuf,
+}
+
+impl SessionStore {
+    /// # Errors
+    ///
+    /// Returns an error when the storage root cannot be created or canonicalized.
+    pub fn open(root: impl AsRef<Path>) -> Result<Self, SessionStoreError> {
+        fs::create_dir_all(root.as_ref())?;
+        let root = fs::canonicalize(root.as_ref())?;
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let sessions = fs::canonicalize(sessions)?;
+        if sessions.parent() != Some(root.as_path()) {
+            return Err(SessionStoreError::PathEscape);
+        }
+        Ok(Self { root, sessions })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the session exists or its durable files cannot be created.
+    pub fn create(&self, session: NewSession) -> Result<SessionManifest, SessionStoreError> {
+        validate_new_session(&session)?;
+        let session_id = session.session_id.clone();
+        let directory = self.sessions.join(session_id.to_string());
+        match fs::create_dir(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(SessionStoreError::AlreadyExists(session_id));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(directory.join(HISTORY_FILE))?
+            .sync_all()?;
+        let manifest = SessionManifest::from(session);
+        write_manifest(&directory, &manifest)?;
+        sync_directory(&directory)?;
+        Ok(manifest)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when a manifest cannot be read or decoded.
+    pub fn manifest(&self, session_id: &SessionId) -> Result<SessionManifest, SessionStoreError> {
+        let directory = self.session_directory(session_id)?;
+        read_manifest(&directory)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when any discovered manifest is corrupt or inaccessible.
+    pub fn discover(&self) -> Result<Vec<SessionManifest>, SessionStoreError> {
+        let mut manifests = Vec::new();
+        for entry in fs::read_dir(&self.sessions)? {
+            let entry = entry?;
+            if entry.file_type()?.is_symlink() || !entry.file_type()?.is_dir() {
+                continue;
+            }
+            if !entry.path().join(MANIFEST_FILE).is_file() {
+                continue;
+            }
+            manifests.push(read_manifest(&entry.path())?);
+        }
+        manifests.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        Ok(manifests)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the session is missing, quarantined, escaped, or already locked.
+    pub fn acquire_writer(
+        &self,
+        session_id: &SessionId,
+        identity: WriterIdentity,
+    ) -> Result<SessionWriter, SessionStoreError> {
+        let directory = self.session_directory(session_id)?;
+        if directory.join(QUARANTINE_FILE).exists() {
+            return Err(SessionStoreError::Quarantined(session_id.clone()));
+        }
+        let mut lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(directory.join(WRITER_LOCK_FILE))?;
+        lock_file
+            .try_lock_exclusive()
+            .map_err(|_| SessionStoreError::WriterLocked(session_id.clone()))?;
+        lock_file.set_len(0)?;
+        lock_file.seek(SeekFrom::Start(0))?;
+        lock_file.write_all(&canonical_json_bytes(&identity)?)?;
+        lock_file.sync_all()?;
+        let manifest = read_manifest(&directory)?;
+        if manifest.archived {
+            return Err(SessionStoreError::Archived(session_id.clone()));
+        }
+        Ok(SessionWriter {
+            directory,
+            manifest,
+            lock_file,
+            identity,
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when durable history is corrupt or inaccessible.
+    pub fn load_index(&self, session_id: &SessionId) -> Result<SessionIndex, SessionStoreError> {
+        let directory = self.session_directory(session_id)?;
+        if directory.join(QUARANTINE_FILE).exists() {
+            return Err(SessionStoreError::Quarantined(session_id.clone()));
+        }
+        parse_complete_history(&directory.join(HISTORY_FILE))
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the history cannot be inspected, truncated, or quarantined.
+    pub fn recover(
+        &self,
+        session_id: &SessionId,
+        detected_at: UtcTimestamp,
+    ) -> Result<RecoveryReport, SessionStoreError> {
+        let directory = self.session_directory(session_id)?;
+        if directory.join(QUARANTINE_FILE).exists() {
+            return Err(SessionStoreError::Quarantined(session_id.clone()));
+        }
+        let history_path = directory.join(HISTORY_FILE);
+        let bytes = fs::read(&history_path)?;
+        let inspection = inspect_bytes(&bytes);
+        if let Some(issue) = inspection.issues.first() {
+            if issue.final_unterminated {
+                let discarded = u64::try_from(bytes.len().saturating_sub(inspection.valid_bytes))
+                    .map_err(|_| SessionStoreError::CorruptHistory {
+                    line: issue.line,
+                    reason: "history length exceeds supported range".into(),
+                })?;
+                let file = OpenOptions::new().write(true).open(&history_path)?;
+                file.set_len(u64::try_from(inspection.valid_bytes).map_err(|_| {
+                    SessionStoreError::CorruptHistory {
+                        line: issue.line,
+                        reason: "history length exceeds supported range".into(),
+                    }
+                })?)?;
+                file.sync_all()?;
+                return Ok(RecoveryReport {
+                    entries: inspection.index.len(),
+                    discarded_tail_bytes: discarded,
+                });
+            }
+            let quarantine = QuarantineRecord {
+                session_id: session_id.clone(),
+                detected_at,
+                line: issue.line,
+                reason: issue.reason.clone(),
+            };
+            atomic_write_json(&directory, QUARANTINE_FILE, &quarantine)?;
+            return Err(SessionStoreError::Quarantined(session_id.clone()));
+        }
+        Ok(RecoveryReport {
+            entries: inspection.index.len(),
+            discarded_tail_bytes: 0,
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when raw history cannot be read.
+    pub fn inspect_repair(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<RepairIssue>, SessionStoreError> {
+        let directory = self.session_directory(session_id)?;
+        Ok(inspect_bytes(&fs::read(directory.join(HISTORY_FILE))?).issues)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when a quarantined or corrupt session cannot be exported.
+    pub fn export(&self, session_id: &SessionId) -> Result<SessionExport, SessionStoreError> {
+        let manifest = self.manifest(session_id)?;
+        let index = self.load_index(session_id)?;
+        let mut entries = index.entries.into_values().collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
+        Ok(SessionExport {
+            version: CURRENT_SCHEMA_VERSION,
+            manifest,
+            entries,
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when raw session files cannot be read.
+    pub fn export_raw(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(Vec<u8>, Vec<u8>), SessionStoreError> {
+        let directory = self.session_directory(session_id)?;
+        Ok((
+            fs::read(directory.join(MANIFEST_FILE))?,
+            fs::read(directory.join(HISTORY_FILE))?,
+        ))
+    }
+
+    fn session_directory(&self, session_id: &SessionId) -> Result<PathBuf, SessionStoreError> {
+        let candidate = self.sessions.join(session_id.to_string());
+        let metadata = match fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SessionStoreError::NotFound(session_id.clone()));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(SessionStoreError::PathEscape);
+        }
+        let canonical = fs::canonicalize(candidate)?;
+        if canonical.parent() != Some(self.sessions.as_path()) {
+            return Err(SessionStoreError::PathEscape);
+        }
+        Ok(canonical)
+    }
+}
+
+pub struct SessionWriter {
+    directory: PathBuf,
+    manifest: SessionManifest,
+    lock_file: File,
+    identity: WriterIdentity,
+}
+
+impl SessionWriter {
+    pub fn manifest(&self) -> &SessionManifest {
+        &self.manifest
+    }
+
+    pub fn identity(&self) -> &WriterIdentity {
+        &self.identity
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the parent is invalid or the append cannot be made durable.
+    pub fn append(
+        &mut self,
+        parent_id: Option<EntryId>,
+        timestamp: UtcTimestamp,
+        payload: SessionEntryPayload,
+    ) -> Result<SessionEntry, SessionStoreError> {
+        self.ensure_writable()?;
+        let history_path = self.directory.join(HISTORY_FILE);
+        let mut index = parse_complete_history(&history_path)?;
+        if index.is_empty()
+            && let Some(parent) = &parent_id
+        {
+            return Err(SessionStoreError::MissingEntry(parent.clone()));
+        }
+        if !index.is_empty() {
+            let parent = parent_id
+                .as_ref()
+                .ok_or_else(|| SessionStoreError::MultipleRoots(EntryId::new()))?;
+            if !index.entries.contains_key(parent) {
+                return Err(SessionStoreError::MissingEntry(parent.clone()));
+            }
+        }
+        let entry = SessionEntry::new(EntryId::new(), parent_id, timestamp, payload)?;
+        index.insert(entry.clone())?;
+        let mut bytes = canonical_json_bytes(&entry)?;
+        bytes.push(b'\n');
+        let mut history = OpenOptions::new().append(true).open(&history_path)?;
+        history.write_all(&bytes)?;
+        history.sync_all()?;
+        self.manifest.active_leaf = Some(entry.id.clone());
+        write_manifest(&self.directory, &self.manifest)?;
+        Ok(entry)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the selected entry is missing or the manifest update fails.
+    pub fn select_leaf(&mut self, leaf: &EntryId) -> Result<(), SessionStoreError> {
+        self.ensure_writable()?;
+        let index = parse_complete_history(&self.directory.join(HISTORY_FILE))?;
+        if !index.entries.contains_key(leaf) {
+            return Err(SessionStoreError::MissingEntry(leaf.clone()));
+        }
+        self.manifest.active_leaf = Some(leaf.clone());
+        write_manifest(&self.directory, &self.manifest)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error for an invalid label, missing entry, or failed manifest update.
+    pub fn label_branch(
+        &mut self,
+        label: impl Into<String>,
+        leaf: &EntryId,
+    ) -> Result<(), SessionStoreError> {
+        self.ensure_writable()?;
+        let label = label.into();
+        if label.trim().is_empty() || self.manifest.branch_labels.contains_key(&label) {
+            return Err(SessionStoreError::InvalidLabel);
+        }
+        let index = parse_complete_history(&self.directory.join(HISTORY_FILE))?;
+        if !index.entries.contains_key(leaf) {
+            return Err(SessionStoreError::MissingEntry(leaf.clone()));
+        }
+        self.manifest.branch_labels.insert(label, leaf.clone());
+        write_manifest(&self.directory, &self.manifest)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the archived manifest cannot be made durable.
+    pub fn archive(&mut self) -> Result<(), SessionStoreError> {
+        self.ensure_writable()?;
+        self.manifest.archived = true;
+        write_manifest(&self.directory, &self.manifest)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when history cannot be reconstructed.
+    pub fn active_ancestry(&self) -> Result<Vec<SessionEntry>, SessionStoreError> {
+        let Some(leaf) = &self.manifest.active_leaf else {
+            return Ok(Vec::new());
+        };
+        parse_complete_history(&self.directory.join(HISTORY_FILE))?.ancestry(leaf)
+    }
+
+    fn ensure_writable(&self) -> Result<(), SessionStoreError> {
+        if self.directory.join(QUARANTINE_FILE).exists() {
+            Err(SessionStoreError::Quarantined(
+                self.manifest.session_id.clone(),
+            ))
+        } else if self.manifest.archived {
+            Err(SessionStoreError::Archived(
+                self.manifest.session_id.clone(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for SessionWriter {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.lock_file);
+    }
+}
+
+struct Inspection {
+    index: SessionIndex,
+    valid_bytes: usize,
+    issues: Vec<RepairIssue>,
+}
+
+fn inspect_bytes(bytes: &[u8]) -> Inspection {
+    let mut index = SessionIndex::default();
+    let mut offset = 0;
+    let mut line = 0;
+    while offset < bytes.len() {
+        line += 1;
+        let remaining = &bytes[offset..];
+        let Some(relative_newline) = remaining.iter().position(|byte| *byte == b'\n') else {
+            return Inspection {
+                index,
+                valid_bytes: offset,
+                issues: vec![RepairIssue {
+                    line,
+                    reason: "unterminated final JSONL record".into(),
+                    final_unterminated: true,
+                }],
+            };
+        };
+        let end = offset + relative_newline;
+        let raw = &bytes[offset..end];
+        let parsed = serde_json::from_slice::<SessionEntry>(raw)
+            .map_err(SessionStoreError::from)
+            .and_then(|entry| {
+                entry.verify()?;
+                index.insert(entry)
+            });
+        if let Err(error) = parsed {
+            return Inspection {
+                index,
+                valid_bytes: offset,
+                issues: vec![RepairIssue {
+                    line,
+                    reason: error.to_string(),
+                    final_unterminated: false,
+                }],
+            };
+        }
+        offset = end + 1;
+    }
+    Inspection {
+        index,
+        valid_bytes: offset,
+        issues: Vec::new(),
+    }
+}
+
+fn parse_complete_history(path: &Path) -> Result<SessionIndex, SessionStoreError> {
+    let bytes = fs::read(path)?;
+    let inspection = inspect_bytes(&bytes);
+    if let Some(issue) = inspection.issues.first() {
+        return Err(SessionStoreError::CorruptHistory {
+            line: issue.line,
+            reason: issue.reason.clone(),
+        });
+    }
+    Ok(inspection.index)
+}
+
+fn validate_new_session(session: &NewSession) -> Result<(), SessionStoreError> {
+    let parent_valid = match session.kind {
+        SessionKind::Root => session.parent_session_id.is_none(),
+        SessionKind::DurableChild => session.parent_session_id.is_some(),
+    };
+    if parent_valid {
+        Ok(())
+    } else {
+        Err(SessionStoreError::CorruptHistory {
+            line: 0,
+            reason: "session kind and parent identity disagree".into(),
+        })
+    }
+}
+
+fn read_manifest(directory: &Path) -> Result<SessionManifest, SessionStoreError> {
+    let manifest: SessionManifest =
+        serde_json::from_slice(&fs::read(directory.join(MANIFEST_FILE))?)?;
+    if manifest.version.major != CURRENT_SCHEMA_VERSION.major
+        || manifest.version.minor > CURRENT_SCHEMA_VERSION.minor
+    {
+        Err(SessionStoreError::UnsupportedVersion(manifest.version))
+    } else {
+        Ok(manifest)
+    }
+}
+
+fn write_manifest(directory: &Path, manifest: &SessionManifest) -> Result<(), SessionStoreError> {
+    atomic_write_json(directory, MANIFEST_FILE, manifest)
+}
+
+fn atomic_write_json(
+    directory: &Path,
+    name: &str,
+    value: &impl Serialize,
+) -> Result<(), SessionStoreError> {
+    let path = directory.join(name);
+    let temporary = directory.join(format!(".{name}.{}.tmp", EntityId::new()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(&canonical_json_bytes(value)?)?;
+    file.sync_all()?;
+    fs::rename(&temporary, &path)?;
+    sync_directory(directory)
+}
+
+fn sync_directory(directory: &Path) -> Result<(), SessionStoreError> {
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use proptest::prelude::*;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn new_session(session_id: SessionId) -> NewSession {
+        NewSession {
+            kind: SessionKind::Root,
+            session_id,
+            root_tree_id: RootTreeId::new(),
+            parent_session_id: None,
+            profile_id: ProfileId::new(),
+            workspace_id: WorkspaceId::new(),
+            created_at: UtcTimestamp::UNIX_EPOCH,
+            label: Some("test".into()),
+        }
+    }
+
+    fn identity(generation: u64) -> WriterIdentity {
+        WriterIdentity {
+            worker_id: WorkerId::new(),
+            owner_instance: EntityId::new(),
+            generation: Generation::new(generation),
+            acquired_at: UtcTimestamp::UNIX_EPOCH,
+        }
+    }
+
+    fn message(text: &str) -> SessionEntryPayload {
+        SessionEntryPayload::UserMessage {
+            message: StoredMessage {
+                role: MessageRole::User,
+                content: vec![ContentBlock::Text { text: text.into() }],
+                provider_metadata: BTreeMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn branches_reconstruct_without_rewriting_history() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+        let root = writer
+            .append(None, UtcTimestamp::UNIX_EPOCH, message("root"))
+            .unwrap();
+        let left = writer
+            .append(
+                Some(root.id.clone()),
+                UtcTimestamp::from_unix_millis(1),
+                message("left"),
+            )
+            .unwrap();
+        let right = writer
+            .append(
+                Some(root.id.clone()),
+                UtcTimestamp::from_unix_millis(2),
+                message("right"),
+            )
+            .unwrap();
+        writer.label_branch("left", &left.id).unwrap();
+        writer.select_leaf(&right.id).unwrap();
+        let ancestry = writer.active_ancestry().unwrap();
+        assert_eq!(
+            ancestry
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>(),
+            vec![root.id.clone(), right.id.clone()]
+        );
+        let index = store.load_index(&session_id).unwrap();
+        assert_eq!(index.children_of(Some(&root.id)).len(), 2);
+        assert_eq!(index.len(), 3);
+    }
+
+    #[test]
+    fn writer_lease_excludes_concurrent_and_allows_replacement() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let first = store.acquire_writer(&session_id, identity(1)).unwrap();
+        assert!(matches!(
+            store.acquire_writer(&session_id, identity(2)),
+            Err(SessionStoreError::WriterLocked(_))
+        ));
+        drop(first);
+        let replacement = store.acquire_writer(&session_id, identity(2)).unwrap();
+        assert_eq!(replacement.identity().generation, Generation::new(2));
+    }
+
+    #[test]
+    fn only_an_unterminated_final_line_is_discarded() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        {
+            let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+            writer
+                .append(None, UtcTimestamp::UNIX_EPOCH, message("safe"))
+                .unwrap();
+        }
+        let history = store
+            .session_directory(&session_id)
+            .unwrap()
+            .join(HISTORY_FILE);
+        OpenOptions::new()
+            .append(true)
+            .open(&history)
+            .unwrap()
+            .write_all(b"{\"partial\":")
+            .unwrap();
+        let report = store
+            .recover(&session_id, UtcTimestamp::from_unix_millis(2))
+            .unwrap();
+        assert_eq!(report.entries, 1);
+        assert!(report.discarded_tail_bytes > 0);
+        assert_eq!(store.load_index(&session_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn complete_corruption_is_quarantined_and_remains_exportable_raw() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let history = store
+            .session_directory(&session_id)
+            .unwrap()
+            .join(HISTORY_FILE);
+        OpenOptions::new()
+            .append(true)
+            .open(&history)
+            .unwrap()
+            .write_all(b"not-json\n")
+            .unwrap();
+        assert!(matches!(
+            store.recover(&session_id, UtcTimestamp::from_unix_millis(1)),
+            Err(SessionStoreError::Quarantined(_))
+        ));
+        assert!(matches!(
+            store.acquire_writer(&session_id, identity(2)),
+            Err(SessionStoreError::Quarantined(_))
+        ));
+        assert_eq!(store.inspect_repair(&session_id).unwrap()[0].line, 1);
+        assert!(
+            store
+                .export_raw(&session_id)
+                .unwrap()
+                .1
+                .ends_with(b"not-json\n")
+        );
+    }
+
+    #[test]
+    fn checksums_detect_payload_changes() {
+        let mut entry = SessionEntry::new(
+            EntryId::new(),
+            None,
+            UtcTimestamp::UNIX_EPOCH,
+            message("original"),
+        )
+        .unwrap();
+        entry.payload = message("changed");
+        assert!(matches!(
+            entry.verify(),
+            Err(SessionStoreError::ChecksumMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn discovery_archive_and_export_follow_the_manifest() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+        writer
+            .append(None, UtcTimestamp::UNIX_EPOCH, message("entry"))
+            .unwrap();
+        writer.archive().unwrap();
+        drop(writer);
+        assert!(store.discover().unwrap()[0].archived);
+        assert_eq!(store.export(&session_id).unwrap().entries.len(), 1);
+        assert!(matches!(
+            store.acquire_writer(&session_id, identity(2)),
+            Err(SessionStoreError::Archived(_))
+        ));
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_branch_parent_choices_reconstruct(
+            parents in prop::collection::vec(0usize..32, 1..32)
+        ) {
+            let directory = tempdir().unwrap();
+            let store = SessionStore::open(directory.path()).unwrap();
+            let session_id = SessionId::new();
+            store.create(new_session(session_id.clone())).unwrap();
+            let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+            let root = writer.append(None, UtcTimestamp::UNIX_EPOCH, message("root")).unwrap();
+            let mut ids = vec![root.id];
+            for (offset, choice) in parents.into_iter().enumerate() {
+                let parent = ids[choice % ids.len()].clone();
+                let entry = writer.append(
+                    Some(parent),
+                    UtcTimestamp::from_unix_millis(i64::try_from(offset + 1).unwrap()),
+                    message("node"),
+                ).unwrap();
+                ids.push(entry.id);
+            }
+            let index = store.load_index(&session_id).unwrap();
+            for id in ids {
+                let ancestry = index.ancestry(&id).unwrap();
+                prop_assert_eq!(ancestry.last().map(|entry| &entry.id), Some(&id));
+            }
+        }
+    }
+}
