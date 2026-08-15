@@ -410,7 +410,7 @@
     - Implement truthful running/waiting/recovering/interrupted/incomplete/failed/cancelled/completed projections
     - Kill every process around durable boundaries and prove no loss, duplicate effect, or phantom state
     - _Requirements: 42.1-42.6_
-  - [ ] 12.3 Complete data export, restore, delete, and derived cleanup
+  - [x] 12.3 Complete data export, restore, delete, and derived cleanup
     - Implement versioned export for sessions, workspaces, memory, knowledge, skills, artifacts, schedules, commitments, routes, channel state, and tool history
     - Implement scoped confirmed deletion and partial-failure reporting
     - Remove lexical, trigram, vector, cache, preview, and summary projections associated with deleted sources

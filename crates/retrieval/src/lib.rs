@@ -312,6 +312,37 @@ impl RetrievalService {
         Ok(())
     }
 
+    /// Strictly removes lexical, trigram, and vector projections for a deleted source.
+    ///
+    /// Unlike ordinary degraded retrieval, source deletion must not hide a vector cleanup
+    /// failure because that could retain data after the source is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any associated projection cannot be removed.
+    pub fn purge_source(
+        &self,
+        profile_id: &ProfileId,
+        source_path: &str,
+    ) -> Result<(), RetrievalError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM documents WHERE profile_id = ?1 AND source_path = ?2",
+            params![profile_id.to_string(), source_path],
+        )?;
+        transaction.execute(
+            "INSERT INTO documents_fts(documents_fts) VALUES('rebuild')",
+            [],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        if let Some(vectors) = &self.vectors {
+            vectors.index.remove_source(profile_id, source_path)?;
+        }
+        Ok(())
+    }
+
     /// Searches one profile with normalized lexical, Unicode trigram, and optional vector ranks.
     ///
     /// The merger uses bounded scores in `[0, 1]` and renormalizes available weights when the
