@@ -15,84 +15,22 @@ use keith_protocol::{
     DeliveryPolicy, EventAcknowledgement, ResponsePayload, SessionFilter, SessionSummary,
     SteerAction, SubmitPrompt, WireMessage,
 };
-use keith_ui_model::{ProjectionReducer, ReductionOutcome, VirtualizationConfig};
+use keith_ui_model::{
+    ClientParity, OperatorCommand, OperatorSurface, ProjectionReducer, ReductionOutcome,
+    VirtualizationConfig,
+};
 use unicode_width::UnicodeWidthStr;
+
+pub use keith_ui_model::OperatorSurface as Surface;
 
 pub const MAX_COMPOSER_BYTES: usize = 64 * 1_024;
 pub const MAX_LOG_LINES: usize = 512;
 pub const MAX_PENDING_COMMANDS: usize = 128;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Surface {
-    Chat,
-    Queue,
-    Sessions,
-    Models,
-    Goals,
-    Plans,
-    Children,
-    Tools,
-    Kernels,
-    Artifacts,
-    Schedules,
-    Commitments,
-    Waiting,
-    Confirmations,
-    Memory,
-    Knowledge,
-    Channels,
-    Refinement,
-    Logs,
-    Diagnostics,
-}
-
-impl Surface {
-    pub const ALL: [Self; 20] = [
-        Self::Chat,
-        Self::Queue,
-        Self::Sessions,
-        Self::Models,
-        Self::Goals,
-        Self::Plans,
-        Self::Children,
-        Self::Tools,
-        Self::Kernels,
-        Self::Artifacts,
-        Self::Schedules,
-        Self::Commitments,
-        Self::Waiting,
-        Self::Confirmations,
-        Self::Memory,
-        Self::Knowledge,
-        Self::Channels,
-        Self::Refinement,
-        Self::Logs,
-        Self::Diagnostics,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Chat => "Chat",
-            Self::Queue => "Queue",
-            Self::Sessions => "Sessions",
-            Self::Models => "Models",
-            Self::Goals => "Goals",
-            Self::Plans => "Plans",
-            Self::Children => "Children",
-            Self::Tools => "Tools",
-            Self::Kernels => "Kernels",
-            Self::Artifacts => "Artifacts",
-            Self::Schedules => "Schedules",
-            Self::Commitments => "Commitments",
-            Self::Waiting => "Waiting",
-            Self::Confirmations => "Confirmations",
-            Self::Memory => "Memory",
-            Self::Knowledge => "Knowledge",
-            Self::Channels => "Channels",
-            Self::Refinement => "Refinement",
-            Self::Logs => "Logs",
-            Self::Diagnostics => "Diagnostics",
-        }
+pub fn client_parity() -> ClientParity {
+    ClientParity {
+        surfaces: OperatorSurface::ALL.into_iter().collect(),
+        commands: OperatorCommand::ALL.into_iter().collect(),
     }
 }
 
@@ -675,6 +613,7 @@ mod tests {
 
     #[test]
     fn every_operator_surface_is_keyboard_reachable_and_renderable_at_all_widths() {
+        assert!(client_parity().is_full());
         for mode in [
             ColorMode::TrueColor,
             ColorMode::Ansi256,

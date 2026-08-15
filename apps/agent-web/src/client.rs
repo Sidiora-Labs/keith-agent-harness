@@ -6,15 +6,17 @@ use keith_agent_types::{
     CURRENT_PROTOCOL_VERSION, ClientId, CommandId, EntityId, ProfileId, SessionId, UtcTimestamp,
 };
 use keith_protocol::{
-    ClientCommand, CommandEnvelope, CommandResult, CreateSchedule, DaemonEvent, DeliveryPolicy,
-    MessageRole, ReplyRoute, ResponsePayload, ScheduleExpression, SubmitPrompt, WireMessage,
+    BranchRequest, CancelTarget, ClientCommand, CommandEnvelope, CommandResult,
+    ConfirmationDecision, ConfirmationResolution, CreateSchedule, DaemonEvent, DeliveryPolicy,
+    MessageRole, ModelSelection, ReplyRoute, ResponsePayload, ScheduleExpression, SteerAction,
+    SubmitPrompt, WireMessage,
 };
 use keith_ui_model::{ProjectionReducer, ReductionOutcome, VirtualizationConfig};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{
-    CloseEvent, Document, Element, Event, HtmlFormElement, HtmlTextAreaElement, MessageEvent,
-    WebSocket, XmlHttpRequest,
+    CloseEvent, Document, Element, Event, HtmlElement, HtmlFormElement, HtmlInputElement,
+    HtmlSelectElement, HtmlTextAreaElement, MessageEvent, WebSocket, XmlHttpRequest,
 };
 
 struct ClientApp {
@@ -25,6 +27,7 @@ struct ClientApp {
     socket: Option<WebSocket>,
     reducer: Option<ProjectionReducer>,
     connection_epoch: u64,
+    last_prompt: Option<String>,
 }
 
 #[wasm_bindgen(start)]
@@ -48,12 +51,16 @@ pub fn start() -> Result<(), JsValue> {
         socket: None,
         reducer: None,
         connection_epoch: 0,
+        last_prompt: None,
     }));
     bind_navigation(&app)?;
     bind_session_picker(&app)?;
     bind_composer(&app)?;
     bind_domain_forms(&app)?;
     bind_credential_submit(&app)?;
+    bind_operator_commands(&app)?;
+    bind_model_form(&app)?;
+    bind_confirmation_form(&app)?;
     show_surface(&app.borrow().document, "sessions")?;
     if app.borrow().session.is_empty() {
         set_status(&app.borrow().document, "No session selected");
@@ -149,11 +156,13 @@ fn bind_composer(app: &Rc<RefCell<ClientApp>>) -> Result<(), JsValue> {
         };
         let command = ClientCommand::SubmitPrompt(SubmitPrompt {
             session_id: session_id.clone(),
-            text,
+            text: text.clone(),
             delivery: DeliveryPolicy::Immediate,
             reply_route: None,
         });
         if send_command(&app, Some(session_id), command).is_ok() {
+            drop(state);
+            app.borrow_mut().last_prompt = Some(text);
             input.set_value("");
         }
     });
@@ -229,6 +238,179 @@ fn bind_credential_submit(app: &Rc<RefCell<ClientApp>>) -> Result<(), JsValue> {
     button.add_event_listener_with_callback("click", callback.as_ref().unchecked_ref())?;
     callback.forget();
     Ok(())
+}
+
+fn bind_operator_commands(app: &Rc<RefCell<ClientApp>>) -> Result<(), JsValue> {
+    let buttons = app.borrow().document.query_selector_all("[data-command]")?;
+    for index in 0..buttons.length() {
+        let Some(node) = buttons.item(index) else {
+            continue;
+        };
+        let element: Element = node.dyn_into()?;
+        let command = element.get_attribute("data-command").unwrap_or_default();
+        let app = Rc::clone(app);
+        let callback = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+            event.prevent_default();
+            if dispatch_operator_command(&app, &command).is_err() {
+                set_status(&app.borrow().document, "Command could not be sent");
+            }
+        });
+        element.add_event_listener_with_callback("click", callback.as_ref().unchecked_ref())?;
+        callback.forget();
+    }
+    Ok(())
+}
+
+fn dispatch_operator_command(app: &Rc<RefCell<ClientApp>>, action: &str) -> Result<(), JsValue> {
+    if action == "list-sessions" {
+        return send_command(app, None, ClientCommand::ListSessions(Default::default()));
+    }
+    let state = app.borrow();
+    let session_id = state.session.parse::<SessionId>().map_err(js_error)?;
+    let command = match action {
+        "steer" => {
+            let text = prompt_value(&state.document)?;
+            if text.trim().is_empty() {
+                return Ok(());
+            }
+            ClientCommand::Steer(SteerAction {
+                session_id: session_id.clone(),
+                text,
+                delivery: DeliveryPolicy::NextTurnBoundary,
+            })
+        }
+        "cancel" => ClientCommand::Cancel(CancelTarget::Session(session_id.clone())),
+        "retry" => {
+            let Some(text) = state.last_prompt.clone() else {
+                return Ok(());
+            };
+            ClientCommand::SubmitPrompt(SubmitPrompt {
+                session_id: session_id.clone(),
+                text,
+                delivery: DeliveryPolicy::Immediate,
+                reply_route: None,
+            })
+        }
+        "branch" => {
+            let parent_entry_id = state
+                .reducer
+                .as_ref()
+                .and_then(|reducer| reducer.snapshot().messages.last())
+                .map(|message| message.message_id.as_entity_id().clone())
+                .ok_or_else(|| JsValue::from_str("branch parent unavailable"))?;
+            ClientCommand::BranchSession(BranchRequest {
+                session_id: session_id.clone(),
+                parent_entry_id,
+                label: None,
+            })
+        }
+        "resume" => ClientCommand::ResumeSession {
+            session_id: session_id.clone(),
+        },
+        _ => return Err(JsValue::from_str("unsupported operator command")),
+    };
+    drop(state);
+    send_command(app, Some(session_id), command)
+}
+
+fn bind_model_form(app: &Rc<RefCell<ClientApp>>) -> Result<(), JsValue> {
+    let Some(form) = app.borrow().document.get_element_by_id("model-form") else {
+        return Ok(());
+    };
+    let form: HtmlFormElement = form.dyn_into()?;
+    let app = Rc::clone(app);
+    let form_for_callback = form.clone();
+    let callback = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+        event.prevent_default();
+        let result = (|| -> Result<(), JsValue> {
+            let provider: HtmlInputElement = form_for_callback
+                .query_selector("input[name='provider']")?
+                .ok_or_else(|| JsValue::from_str("provider unavailable"))?
+                .dyn_into()?;
+            let model: HtmlInputElement = form_for_callback
+                .query_selector("input[name='model']")?
+                .ok_or_else(|| JsValue::from_str("model unavailable"))?
+                .dyn_into()?;
+            let session_id = app
+                .borrow()
+                .session
+                .parse::<SessionId>()
+                .map_err(js_error)?;
+            send_command(
+                &app,
+                Some(session_id.clone()),
+                ClientCommand::SelectModel(ModelSelection {
+                    session_id,
+                    provider: provider.value(),
+                    model: model.value(),
+                }),
+            )
+        })();
+        if result.is_err() {
+            set_status(&app.borrow().document, "Model selection could not be sent");
+        }
+    });
+    form.add_event_listener_with_callback("submit", callback.as_ref().unchecked_ref())?;
+    callback.forget();
+    Ok(())
+}
+
+fn bind_confirmation_form(app: &Rc<RefCell<ClientApp>>) -> Result<(), JsValue> {
+    let Some(form) = app.borrow().document.get_element_by_id("confirmation-form") else {
+        return Ok(());
+    };
+    let form: HtmlFormElement = form.dyn_into()?;
+    let app = Rc::clone(app);
+    let form_for_callback = form.clone();
+    let callback = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+        event.prevent_default();
+        let result = (|| -> Result<(), JsValue> {
+            let identifier: HtmlInputElement = form_for_callback
+                .query_selector("input[name='confirmation']")?
+                .ok_or_else(|| JsValue::from_str("confirmation unavailable"))?
+                .dyn_into()?;
+            let decision: HtmlSelectElement = form_for_callback
+                .query_selector("select[name='decision']")?
+                .ok_or_else(|| JsValue::from_str("decision unavailable"))?
+                .dyn_into()?;
+            let confirmation_id = identifier.value().parse::<EntityId>().map_err(js_error)?;
+            let decision = if decision.value() == "allow_once" {
+                ConfirmationDecision::AllowOnce
+            } else {
+                ConfirmationDecision::Deny
+            };
+            let session_id = app
+                .borrow()
+                .session
+                .parse::<SessionId>()
+                .map_err(js_error)?;
+            send_command(
+                &app,
+                Some(session_id),
+                ClientCommand::ResolveConfirmation(ConfirmationResolution {
+                    confirmation_id,
+                    decision,
+                }),
+            )
+        })();
+        if result.is_err() {
+            set_status(
+                &app.borrow().document,
+                "Confirmation decision could not be sent",
+            );
+        }
+    });
+    form.add_event_listener_with_callback("submit", callback.as_ref().unchecked_ref())?;
+    callback.forget();
+    Ok(())
+}
+
+fn prompt_value(document: &Document) -> Result<String, JsValue> {
+    Ok(document
+        .get_element_by_id("prompt")
+        .ok_or_else(|| JsValue::from_str("prompt unavailable"))?
+        .dyn_into::<HtmlTextAreaElement>()?
+        .value())
 }
 
 fn domain_command(
@@ -466,14 +648,29 @@ fn render_projection(state: &ClientApp) {
         }
     }
     let entries = [
+        ("chat", format!("Messages: {}", snapshot.messages.len())),
+        ("queue", format!("Actions: {}", snapshot.actions.len())),
         (
             "sessions",
             format!("Session state: {:?}", snapshot.session.state),
+        ),
+        (
+            "models",
+            "Model selection is submitted through the shared protocol".into(),
         ),
         ("goals", format!("Goals: {}", snapshot.goals.len())),
         ("plans", format!("Plans: {}", snapshot.plans.len())),
         ("children", format!("Children: {}", snapshot.children.len())),
         ("tools", format!("Tools: {}", snapshot.tools.len())),
+        ("kernels", format!("Kernels: {}", snapshot.kernels.len())),
+        (
+            "artifacts",
+            format!("Deliveries: {}", snapshot.deliveries.len()),
+        ),
+        (
+            "schedules",
+            format!("Schedules: {}", snapshot.schedules.len()),
+        ),
         (
             "knowledge",
             "Knowledge is indexed by the agent runtime".into(),
@@ -482,9 +679,36 @@ fn render_projection(state: &ClientApp) {
             "commitments",
             format!("Commitments: {}", snapshot.commitments.len()),
         ),
+        ("waiting", format!("Waits: {}", snapshot.waits.len())),
         (
-            "artifacts",
-            format!("Deliveries: {}", snapshot.deliveries.len()),
+            "confirmations",
+            format!("Confirmations: {}", snapshot.confirmations.len()),
+        ),
+        (
+            "memory",
+            format!("Memory changes: {}", snapshot.memory_changes.len()),
+        ),
+        (
+            "channels",
+            format!("Delivery states: {}", snapshot.deliveries.len()),
+        ),
+        (
+            "settings",
+            "Settings are resolved by the authoritative runtime".into(),
+        ),
+        (
+            "refinement",
+            "Refinement state is delivered through confirmations and events".into(),
+        ),
+        ("logs", "Diagnostics are emitted by the runtime".into()),
+        (
+            "diagnostics",
+            format!(
+                "Generation {}; sequence {}; revision {}",
+                snapshot.generation.get(),
+                snapshot.through_sequence.get(),
+                snapshot.revision.get()
+            ),
         ),
     ];
     for (surface, text) in entries {
@@ -495,6 +719,19 @@ fn render_projection(state: &ClientApp) {
             panel.set_text_content(Some(&text));
             panel.set_class_name("projection metric");
         }
+    }
+    if let Some(presence) = state.document.get_element_by_id("presence-status") {
+        presence.set_text_content(Some(&format!(
+            "Presence {:?}; updated {:?}; next wake {:?}{}",
+            snapshot.presence.state,
+            snapshot.presence.updated_at,
+            snapshot.presence.next_wake,
+            snapshot
+                .presence
+                .safe_error
+                .as_ref()
+                .map_or(String::new(), |error| format!("; failure {error}"))
+        )));
     }
 }
 
@@ -508,6 +745,9 @@ fn show_surface(document: &Document, route: &str) -> Result<(), JsValue> {
         let active = element.get_attribute("data-panel").as_deref() == Some(route);
         if active {
             element.remove_attribute("hidden")?;
+            if let Ok(focus_target) = element.clone().dyn_into::<HtmlElement>() {
+                let _ = focus_target.focus();
+            }
         } else {
             element.set_attribute("hidden", "")?;
         }

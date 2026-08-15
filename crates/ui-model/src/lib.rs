@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
+
 use keith_agent_types::{Generation, GoalId, Sequence, SessionId, UtcTimestamp};
 use keith_protocol::{
     DaemonEvent, EventEnvelope, MemoryChangeProjection, MessageProjection, MessageRole,
@@ -8,6 +10,157 @@ use keith_protocol::{
 pub use keith_protocol::{PresenceProjection, PresenceState};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorSurface {
+    Chat,
+    Queue,
+    Sessions,
+    Models,
+    Goals,
+    Plans,
+    Children,
+    Tools,
+    Kernels,
+    Artifacts,
+    Schedules,
+    Commitments,
+    Waiting,
+    Confirmations,
+    Memory,
+    Knowledge,
+    Channels,
+    Settings,
+    Refinement,
+    Logs,
+    Diagnostics,
+}
+
+impl OperatorSurface {
+    pub const ALL: [Self; 21] = [
+        Self::Chat,
+        Self::Queue,
+        Self::Sessions,
+        Self::Models,
+        Self::Goals,
+        Self::Plans,
+        Self::Children,
+        Self::Tools,
+        Self::Kernels,
+        Self::Artifacts,
+        Self::Schedules,
+        Self::Commitments,
+        Self::Waiting,
+        Self::Confirmations,
+        Self::Memory,
+        Self::Knowledge,
+        Self::Channels,
+        Self::Settings,
+        Self::Refinement,
+        Self::Logs,
+        Self::Diagnostics,
+    ];
+
+    pub const fn route(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Queue => "queue",
+            Self::Sessions => "sessions",
+            Self::Models => "models",
+            Self::Goals => "goals",
+            Self::Plans => "plans",
+            Self::Children => "children",
+            Self::Tools => "tools",
+            Self::Kernels => "kernels",
+            Self::Artifacts => "artifacts",
+            Self::Schedules => "schedules",
+            Self::Commitments => "commitments",
+            Self::Waiting => "waiting",
+            Self::Confirmations => "confirmations",
+            Self::Memory => "memory",
+            Self::Knowledge => "knowledge",
+            Self::Channels => "channels",
+            Self::Settings => "settings",
+            Self::Refinement => "refinement",
+            Self::Logs => "logs",
+            Self::Diagnostics => "diagnostics",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "Chat",
+            Self::Queue => "Queue",
+            Self::Sessions => "Sessions",
+            Self::Models => "Models",
+            Self::Goals => "Goals",
+            Self::Plans => "Plans",
+            Self::Children => "Children",
+            Self::Tools => "Tools",
+            Self::Kernels => "Kernels",
+            Self::Artifacts => "Artifacts",
+            Self::Schedules => "Schedules",
+            Self::Commitments => "Commitments",
+            Self::Waiting => "Waiting",
+            Self::Confirmations => "Confirmations",
+            Self::Memory => "Memory",
+            Self::Knowledge => "Knowledge",
+            Self::Channels => "Channels",
+            Self::Settings => "Settings",
+            Self::Refinement => "Refinement",
+            Self::Logs => "Logs",
+            Self::Diagnostics => "Diagnostics",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorCommand {
+    SubmitPrompt,
+    Steer,
+    Cancel,
+    Retry,
+    Branch,
+    Resume,
+    ListSessions,
+    SelectModel,
+    ResolveConfirmation,
+}
+
+impl OperatorCommand {
+    pub const ALL: [Self; 9] = [
+        Self::SubmitPrompt,
+        Self::Steer,
+        Self::Cancel,
+        Self::Retry,
+        Self::Branch,
+        Self::Resume,
+        Self::ListSessions,
+        Self::SelectModel,
+        Self::ResolveConfirmation,
+    ];
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientParity {
+    pub surfaces: BTreeSet<OperatorSurface>,
+    pub commands: BTreeSet<OperatorCommand>,
+}
+
+impl ClientParity {
+    pub fn full() -> Self {
+        Self {
+            surfaces: OperatorSurface::ALL.into_iter().collect(),
+            commands: OperatorCommand::ALL.into_iter().collect(),
+        }
+    }
+
+    pub fn is_full(&self) -> bool {
+        self == &Self::full()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

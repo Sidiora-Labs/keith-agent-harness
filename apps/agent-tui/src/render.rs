@@ -264,6 +264,7 @@ fn projection_lines(app: &TuiApp, surface: Surface) -> Vec<String> {
             vec!["Knowledge changes use shared memory and command results.".into()]
         }
         Surface::Channels => vec!["Channel routes and delivery state are daemon-owned.".into()],
+        Surface::Settings => vec!["Settings use shared configuration and protocol state.".into()],
         Surface::Refinement => vec!["Refinement diffs and confirmations are daemon-owned.".into()],
         Surface::Chat | Surface::Sessions => Vec::new(),
     }
@@ -346,6 +347,7 @@ const fn empty_label(surface: Surface) -> &'static str {
         Surface::Memory => "No memory changes",
         Surface::Knowledge => "No knowledge changes",
         Surface::Channels => "No channel activity",
+        Surface::Settings => "No settings changes",
         Surface::Refinement => "No refinements",
         Surface::Logs => "No logs",
         Surface::Diagnostics => "No diagnostics",

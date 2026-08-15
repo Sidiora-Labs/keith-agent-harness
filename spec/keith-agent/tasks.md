@@ -386,7 +386,7 @@
     - Implement first-run setup, crash reporting, safe update/rollback, and uninstall state choices
     - Run startup, existing daemon, daemon crash, update, rollback, notifications, file selection, and uninstall tests
     - _Requirements: 39.3, 39.6, 49.4_
-  - [ ] 11.5 Accessibility, responsive behavior, parity, and truthful activity gate
+  - [x] 11.5 Accessibility, responsive behavior, parity, and truthful activity gate
     - Implement WCAG 2.2 AA critical paths, visible focus, screen-reader labels, reduced motion, high contrast, and text alternatives
     - Implement mobile/narrow through wide layouts and localization-safe text
     - Remove decorative borders, glow, purple gradients, emoji status, and fabricated activity
