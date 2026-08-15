@@ -396,7 +396,7 @@
 ## Phase 12 — Reliability, Security, Data Lifecycle, and Diagnostics
 
 - [ ] 12. Backpressure, Crash Recovery, Adversarial Boundaries, Export/Delete, and Local Observability
-  - [ ] 12.1 Hierarchical concurrency, backpressure, fairness, and cancellation
+  - [x] 12.1 Hierarchical concurrency, backpressure, fairness, and cancellation
     - Implement bounded queues and semaphores at every declared hierarchy
     - Implement fairness across trees/sessions and priority for user work
     - Implement bounded output channels, artifact spill, safe event coalescing, and channel backpressure

@@ -129,9 +129,17 @@ pub struct ResourceCeiling {
     pub exhaustion: ExhaustionBehavior,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueueCeiling {
+    pub maximum: usize,
+    pub interactive_reserve: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResourcePolicy {
     ceilings: BTreeMap<(ResourceScope, ResourceKind), ResourceCeiling>,
+    queue_ceilings: BTreeMap<ResourceScope, QueueCeiling>,
 }
 
 impl ResourcePolicy {
@@ -153,7 +161,38 @@ impl ResourcePolicy {
                 )));
             }
         }
-        Ok(Self { ceilings })
+        Ok(Self {
+            ceilings,
+            queue_ceilings: BTreeMap::from([(
+                ResourceScope::Installation,
+                QueueCeiling {
+                    maximum: 4_096,
+                    interactive_reserve: 256,
+                },
+            )]),
+        })
+    }
+
+    /// Applies bounded admission queues to installation and narrower scopes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a zero bound, an oversized reserve, or a missing installation bound.
+    pub fn with_queue_ceilings(
+        mut self,
+        queue_ceilings: BTreeMap<ResourceScope, QueueCeiling>,
+    ) -> Result<Self, ResourceError> {
+        if !queue_ceilings.contains_key(&ResourceScope::Installation)
+            || queue_ceilings
+                .values()
+                .any(|limit| limit.maximum == 0 || limit.interactive_reserve > limit.maximum)
+        {
+            return Err(ResourceError::Invalid(
+                "queue ceilings require a non-zero installation bound and valid reserves".into(),
+            ));
+        }
+        self.queue_ceilings = queue_ceilings;
+        Ok(self)
     }
 
     pub fn ceiling(
@@ -162,6 +201,10 @@ impl ResourcePolicy {
         resource: ResourceKind,
     ) -> Option<ResourceCeiling> {
         self.ceilings.get(&(scope.clone(), resource)).copied()
+    }
+
+    pub fn queue_ceiling(&self, scope: &ResourceScope) -> Option<QueueCeiling> {
+        self.queue_ceilings.get(scope).copied()
     }
 }
 
@@ -331,6 +374,11 @@ pub enum ResourceError {
     Duplicate(EntityId),
     #[error("resource request or lease {0} does not exist")]
     Missing(EntityId),
+    #[error("resource queue at {scope} is full for {priority:?} work")]
+    QueueFull {
+        scope: String,
+        priority: WorkPriority,
+    },
     #[error("resource governor lock was poisoned")]
     LockPoisoned,
     #[error("resource repository failed: {0}")]

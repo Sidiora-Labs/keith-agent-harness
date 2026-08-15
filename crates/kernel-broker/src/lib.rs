@@ -171,6 +171,7 @@ pub struct KernelLimits {
     pub max_snapshot_bytes: usize,
     pub max_bridge_calls: u32,
     pub execution_timeout: Duration,
+    pub cancellation_grace: Duration,
     pub max_lifetime: Duration,
     pub idle_timeout: Duration,
 }
@@ -187,6 +188,7 @@ impl Default for KernelLimits {
             max_snapshot_bytes: MAX_SNAPSHOT_STATE_BYTES,
             max_bridge_calls: 32,
             execution_timeout: Duration::from_secs(30),
+            cancellation_grace: Duration::from_millis(250),
             max_lifetime: Duration::from_secs(8 * 60 * 60),
             idle_timeout: Duration::from_secs(30 * 60),
         }
@@ -871,11 +873,20 @@ impl KernelBroker {
                     }
                 }
             });
+            let mut cancellation_started = None;
             let result = loop {
                 if cancellation.is_cancelled() {
-                    signal_interrupt(pid)?;
-                    terminate_process(child);
-                    break Err(KernelError::Cancelled);
+                    if let Some(cancelled_at) = cancellation_started {
+                        if Instant::now().duration_since(cancelled_at)
+                            >= process.spec.limits.cancellation_grace
+                        {
+                            terminate_process(child);
+                            break Err(KernelError::Cancelled);
+                        }
+                    } else {
+                        signal_interrupt(pid)?;
+                        cancellation_started = Some(Instant::now());
+                    }
                 }
                 if started.elapsed() >= timeout {
                     signal_interrupt(pid)?;
@@ -887,13 +898,23 @@ impl KernelBroker {
                         if event.request_id.as_ref() != Some(&request.request_id) {
                             continue;
                         }
+                        if cancellation_started.is_some() && is_exchange_terminal(&event.event) {
+                            break Err(KernelError::Cancelled);
+                        }
+                        if cancellation_started.is_some() {
+                            continue;
+                        }
                         if let Some(done) = handle(event.event, stdin)? {
                             break Ok(done);
                         }
                     }
                     Ok(Err(error)) => {
                         terminate_process(child);
-                        break Err(error);
+                        break if cancellation_started.is_some() {
+                            Err(KernelError::Cancelled)
+                        } else {
+                            Err(error)
+                        };
                     }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break Err(KernelError::Crashed),
@@ -925,6 +946,7 @@ fn validate_spec(spec: &KernelSpec, sandbox: &SandboxStatus) -> Result<(), Kerne
         || spec.limits.max_snapshot_bytes == 0
         || spec.limits.max_snapshot_bytes > MAX_SNAPSHOT_STATE_BYTES
         || spec.limits.execution_timeout.is_zero()
+        || spec.limits.cancellation_grace.is_zero()
         || spec.limits.max_lifetime.is_zero()
         || spec.limits.idle_timeout.is_zero()
     {
@@ -1343,6 +1365,7 @@ mod tests {
             max_snapshot_bytes: 40 * 1024,
             max_bridge_calls: 4,
             execution_timeout: Duration::from_secs(2),
+            cancellation_grace: Duration::from_millis(100),
             max_lifetime: Duration::from_secs(60),
             idle_timeout: Duration::from_secs(10),
         }
@@ -1429,6 +1452,39 @@ mod tests {
         let interrupted = execution.join().unwrap().unwrap();
         assert!(interrupted.error.unwrap().contains("KeyboardInterrupt"));
 
+        let live_cancellation = CancellationToken::default();
+        let execution_cancellation = live_cancellation.clone();
+        let cancelling_broker = Arc::clone(&broker);
+        let cancelling_id = id.clone();
+        let cancelling_execution = thread::spawn(move || {
+            cancelling_broker.execute(
+                &cancelling_id,
+                "while True: pass",
+                &execution_cancellation,
+                &mut NoKernelOutput,
+                UtcTimestamp::from_unix_millis(2),
+            )
+        });
+        thread::sleep(Duration::from_millis(50));
+        live_cancellation.cancel();
+        assert!(matches!(
+            cancelling_execution.join().unwrap(),
+            Err(KernelError::Cancelled)
+        ));
+        assert_eq!(
+            broker
+                .execute(
+                    &id,
+                    "3 + 4",
+                    &CancellationToken::default(),
+                    &mut NoKernelOutput,
+                    UtcTimestamp::from_unix_millis(3),
+                )
+                .unwrap()
+                .result,
+            Some(serde_json::json!(7))
+        );
+
         let cancelled = CancellationToken::default();
         cancelled.cancel();
         assert!(matches!(
@@ -1437,7 +1493,7 @@ mod tests {
                 "1 + 1",
                 &cancelled,
                 &mut NoKernelOutput,
-                UtcTimestamp::from_unix_millis(2)
+                UtcTimestamp::from_unix_millis(4)
             ),
             Err(KernelError::Cancelled)
         ));
@@ -1447,14 +1503,14 @@ mod tests {
             "import os; os._exit(17)",
             &CancellationToken::default(),
             &mut NoKernelOutput,
-            UtcTimestamp::from_unix_millis(3),
+            UtcTimestamp::from_unix_millis(5),
         );
         assert!(matches!(crashed, Err(KernelError::Crashed)));
 
         let mut short = spec(&workspace, &session);
         short.limits.execution_timeout = Duration::from_millis(50);
         let timed = broker
-            .start(short, UtcTimestamp::from_unix_millis(4))
+            .start(short, UtcTimestamp::from_unix_millis(6))
             .unwrap();
         assert!(matches!(
             broker.execute(

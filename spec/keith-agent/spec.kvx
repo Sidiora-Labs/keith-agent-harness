@@ -1195,7 +1195,7 @@ status  = "pending"
 
 [task.12.1]
 title  = "Hierarchical concurrency, backpressure, fairness, and cancellation"
-status = "pending"
+status = "done"
 wave   = 20
 do_1   = "Implement bounded queues and semaphores at every declared hierarchy"
 do_2   = "Implement fairness across trees/sessions and priority for user work"

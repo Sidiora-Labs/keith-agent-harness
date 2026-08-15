@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Debug, Display};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 
 use keith_agent_types::{EntityId, ToolCallId};
 use serde::{Deserialize, Serialize};
@@ -237,18 +237,52 @@ impl Drop for ProviderCredential {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
+struct CancellationState {
+    cancelled: AtomicBool,
+    parent: Option<Weak<CancellationState>>,
+}
+
+#[derive(Clone, Debug)]
 pub struct CancellationToken {
-    cancelled: Arc<AtomicBool>,
+    state: Arc<CancellationState>,
+}
+
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(CancellationState {
+                cancelled: AtomicBool::new(false),
+                parent: None,
+            }),
+        }
+    }
 }
 
 impl CancellationToken {
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.state.cancelled.store(true, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn child_token(&self) -> Self {
+        Self {
+            state: Arc::new(CancellationState {
+                cancelled: AtomicBool::new(false),
+                parent: Some(Arc::downgrade(&self.state)),
+            }),
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        let mut current = Some(Arc::clone(&self.state));
+        while let Some(state) = current {
+            if state.cancelled.load(Ordering::Acquire) {
+                return true;
+            }
+            current = state.parent.as_ref().and_then(Weak::upgrade);
+        }
+        false
     }
 
     /// # Errors
@@ -496,6 +530,30 @@ mod tests {
             })
         ));
         assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn parent_cancellation_propagates_without_child_cancellation_leaking_upward() {
+        let client = CancellationToken::default();
+        let goal = client.child_token();
+        let session = goal.child_token();
+        let provider = session.child_token();
+        let tool = session.child_token();
+        let kernel = session.child_token();
+        let child = session.child_token();
+
+        tool.cancel();
+        assert!(tool.is_cancelled());
+        assert!(!session.is_cancelled());
+        assert!(!provider.is_cancelled());
+        assert!(!kernel.is_cancelled());
+        assert!(!child.is_cancelled());
+
+        goal.cancel();
+        for descendant in [&session, &provider, &kernel, &child] {
+            assert!(descendant.is_cancelled());
+        }
+        assert!(!client.is_cancelled());
     }
 
     #[test]

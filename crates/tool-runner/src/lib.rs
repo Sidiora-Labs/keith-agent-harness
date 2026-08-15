@@ -509,6 +509,7 @@ pub enum IsolationRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessLimits {
     pub timeout: Duration,
+    pub cancellation_grace: Duration,
     pub output_bytes: usize,
     pub cpu_seconds: Option<u64>,
     pub memory_bytes: Option<u64>,
@@ -519,6 +520,7 @@ impl Default for ProcessLimits {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(60),
+            cancellation_grace: Duration::from_millis(250),
             output_bytes: 4 * 1_024 * 1_024,
             cpu_seconds: None,
             memory_bytes: None,
@@ -699,13 +701,13 @@ impl RestrictedProcessRunner {
         let mut eof = 0_u8;
         let status = loop {
             if cancellation.is_cancelled() {
-                kill_process_tree(&mut child);
+                terminate_process_tree(&mut child, request.limits.cancellation_grace);
                 drop(receiver);
                 join_readers(stdout_reader, stderr_reader)?;
                 return Err(RunError::Cancelled);
             }
             if started.elapsed() >= request.limits.timeout {
-                kill_process_tree(&mut child);
+                terminate_process_tree(&mut child, request.limits.cancellation_grace);
                 drop(receiver);
                 join_readers(stdout_reader, stderr_reader)?;
                 return Err(RunError::Timeout);
@@ -717,7 +719,7 @@ impl RestrictedProcessRunner {
                         .saturating_add(stderr_bytes.len())
                         .saturating_add(chunk.bytes.len());
                     if total > request.limits.output_bytes {
-                        kill_process_tree(&mut child);
+                        terminate_process_tree(&mut child, request.limits.cancellation_grace);
                         drop(receiver);
                         join_readers(stdout_reader, stderr_reader)?;
                         return Err(RunError::OutputLimit);
@@ -731,7 +733,7 @@ impl RestrictedProcessRunner {
                 Ok(StreamMessage::Eof) => eof = eof.saturating_add(1),
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) if eof < 2 => {
-                    kill_process_tree(&mut child);
+                    terminate_process_tree(&mut child, request.limits.cancellation_grace);
                     drop(receiver);
                     join_readers(stdout_reader, stderr_reader)?;
                     return Err(RunError::OutputDisconnected);
@@ -958,6 +960,7 @@ fn join_readers(
 
 fn validate_process_limits(limits: &ProcessLimits) -> Result<(), RunError> {
     if limits.timeout.is_zero()
+        || limits.cancellation_grace.is_zero()
         || limits.output_bytes == 0
         || limits.cpu_seconds == Some(0)
         || limits.memory_bytes == Some(0)
@@ -1115,19 +1118,33 @@ fn configure_process_group(command: &mut Command) {
 fn configure_process_group(_command: &mut Command) {}
 
 #[cfg(unix)]
-fn kill_process_tree(child: &mut Child) {
+fn terminate_process_tree(child: &mut Child, grace: Duration) {
     use nix::sys::signal::{Signal, killpg};
     use nix::unistd::Pid;
 
     if let Ok(pid) = i32::try_from(child.id()) {
-        let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+        let process_group = Pid::from_raw(pid);
+        let _ = killpg(process_group, Signal::SIGTERM);
+        if wait_for_exit(child, grace) {
+            return;
+        }
+        let _ = killpg(process_group, Signal::SIGKILL);
     }
     let _ = child.kill();
     let _ = child.wait();
 }
 
 #[cfg(windows)]
-fn kill_process_tree(child: &mut Child) {
+fn terminate_process_tree(child: &mut Child, grace: Duration) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &child.id().to_string(), "/T"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if wait_for_exit(child, grace) {
+        return;
+    }
     let _ = Command::new("taskkill")
         .args(["/PID", &child.id().to_string(), "/T", "/F"])
         .stdin(Stdio::null())
@@ -1139,9 +1156,25 @@ fn kill_process_tree(child: &mut Child) {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn kill_process_tree(child: &mut Child) {
+fn terminate_process_tree(child: &mut Child, grace: Duration) {
+    if wait_for_exit(child, grace) {
+        return;
+    }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn wait_for_exit(child: &mut Child, grace: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        if child.try_wait().ok().flatten().is_some() {
+            return true;
+        }
+        if started.elapsed() >= grace {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(2).min(grace.saturating_sub(started.elapsed())));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1370,7 +1403,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn cancellation_streams_output_and_cleans_descendants() {
+    fn cancellation_streams_output_then_forces_stubborn_process_tree_after_grace() {
         let (_directory, runner) = runner(&["/bin/sh"]);
         let cancellation = CancellationToken::default();
         let trigger = cancellation.clone();
@@ -1383,14 +1416,20 @@ mod tests {
         let mut sink = move |chunk: &OutputChunk| {
             captured.lock().unwrap().extend_from_slice(&chunk.bytes);
         };
-        let run = request(
+        let mut run = request(
             "/bin/sh",
-            vec!["-c".into(), "sleep 30 & echo $!; wait".into()],
+            vec![
+                "-c".into(),
+                "trap '' TERM; sleep 30 & echo $!; while :; do wait; done".into(),
+            ],
         );
+        run.limits.cancellation_grace = Duration::from_millis(40);
+        let started = Instant::now();
         assert!(matches!(
             runner.run(&run, &cancellation, &mut sink),
             Err(RunError::Cancelled)
         ));
+        assert!(started.elapsed() >= Duration::from_millis(70));
         canceller.join().unwrap();
         let output = String::from_utf8(chunks.lock().unwrap().clone()).unwrap();
         let child_pid = output.trim().parse::<u32>().unwrap();

@@ -122,6 +122,7 @@ where
         {
             return Err(ResourceError::Duplicate(request.id));
         }
+        ensure_queue_capacity(&state, &self.policy, &request)?;
         let pending = Pending {
             request: request.clone(),
             revision: Revision::ZERO,
@@ -508,6 +509,35 @@ fn validate_acquire(request: &AcquireRequest) -> Result<(), ResourceError> {
     Ok(())
 }
 
+fn ensure_queue_capacity(
+    state: &State,
+    policy: &ResourcePolicy,
+    request: &AcquireRequest,
+) -> Result<(), ResourceError> {
+    for scope in request.path.scopes() {
+        let Some(ceiling) = policy.queue_ceiling(scope) else {
+            continue;
+        };
+        let admitted = state
+            .pending
+            .values()
+            .filter(|pending| pending.request.path.scopes().contains(scope))
+            .count();
+        let maximum = if request.priority == WorkPriority::Background {
+            ceiling.maximum.saturating_sub(ceiling.interactive_reserve)
+        } else {
+            ceiling.maximum
+        };
+        if admitted >= maximum {
+            return Err(ResourceError::QueueFull {
+                scope: scope.safe_label(),
+                priority: request.priority,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn exhausted(
     state: &State,
     policy: &ResourcePolicy,
@@ -704,7 +734,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{ReclaimClass, RecoveryDescriptor, ResourceCeiling, ResourcePolicy, ResourceScope};
+    use crate::{
+        QueueCeiling, ReclaimClass, RecoveryDescriptor, ResourceCeiling, ResourcePolicy,
+        ResourceScope,
+    };
 
     fn policy(
         overrides: impl IntoIterator<Item = ((ResourceScope, ResourceKind), ResourceCeiling)>,
@@ -763,6 +796,125 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn hierarchy_path(profile: &ProfileId, tree: &RootTreeId, session: &SessionId) -> ScopePath {
+        ScopePath::new(vec![
+            ResourceScope::Installation,
+            ResourceScope::Worker(tree.clone()),
+            ResourceScope::Profile(profile.clone()),
+            ResourceScope::Tree(tree.clone()),
+            ResourceScope::Session(session.clone()),
+            ResourceScope::Goal(GoalId::new()),
+            ResourceScope::Action(ActionId::new()),
+            ResourceScope::ProviderAccount {
+                provider: "provider".into(),
+                account: "private-account".into(),
+            },
+            ResourceScope::Tool("shell".into()),
+            ResourceScope::Child(SessionId::new()),
+            ResourceScope::Kernel(SessionId::new()),
+            ResourceScope::Browser(SessionId::new()),
+            ResourceScope::Process(SessionId::new()),
+            ResourceScope::Channel("operator".into()),
+            ResourceScope::Scheduler(profile.clone()),
+            ResourceScope::Background(profile.clone()),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn every_declared_hierarchy_has_bounded_admission_and_interactive_reserve() {
+        let profile = ProfileId::new();
+        let tree = RootTreeId::new();
+        let session = SessionId::new();
+        let hierarchy = hierarchy_path(&profile, &tree, &session);
+        for scope in hierarchy.scopes().iter().skip(1) {
+            let limits = BTreeMap::from([
+                (
+                    ResourceScope::Installation,
+                    QueueCeiling {
+                        maximum: 100,
+                        interactive_reserve: 10,
+                    },
+                ),
+                (
+                    scope.clone(),
+                    QueueCeiling {
+                        maximum: 1,
+                        interactive_reserve: 0,
+                    },
+                ),
+            ]);
+            let policy = policy([]).with_queue_ceilings(limits).unwrap();
+            let governor =
+                ResourceGovernor::open(EmbeddedStore::open_in_memory().unwrap(), policy).unwrap();
+            governor
+                .submit(request(
+                    hierarchy.clone(),
+                    ResourceKind::ActiveSessions,
+                    WorkPriority::Normal,
+                    0,
+                ))
+                .unwrap();
+            assert!(matches!(
+                governor.submit(request(
+                    hierarchy.clone(),
+                    ResourceKind::ActiveSessions,
+                    WorkPriority::Normal,
+                    1,
+                )),
+                Err(ResourceError::QueueFull { scope: ref label, .. })
+                    if label == &scope.safe_label()
+            ));
+        }
+
+        let policy = policy([])
+            .with_queue_ceilings(BTreeMap::from([(
+                ResourceScope::Installation,
+                QueueCeiling {
+                    maximum: 3,
+                    interactive_reserve: 1,
+                },
+            )]))
+            .unwrap();
+        let governor =
+            ResourceGovernor::open(EmbeddedStore::open_in_memory().unwrap(), policy).unwrap();
+        for submitted_at in 0..2 {
+            governor
+                .submit(request(
+                    path(&profile, &tree, &session),
+                    ResourceKind::ProviderRequests,
+                    WorkPriority::Background,
+                    submitted_at,
+                ))
+                .unwrap();
+        }
+        assert!(matches!(
+            governor.submit(request(
+                path(&profile, &tree, &session),
+                ResourceKind::ProviderRequests,
+                WorkPriority::Background,
+                2,
+            )),
+            Err(ResourceError::QueueFull {
+                priority: WorkPriority::Background,
+                ..
+            })
+        ));
+        let interactive = request(
+            path(&profile, &RootTreeId::new(), &SessionId::new()),
+            ResourceKind::ProviderRequests,
+            WorkPriority::Interactive,
+            3,
+        );
+        governor.submit(interactive.clone()).unwrap();
+        assert_eq!(
+            granted(&governor.schedule(UtcTimestamp::UNIX_EPOCH, 1).unwrap())[0]
+                .request
+                .id,
+            interactive.id
+        );
     }
 
     #[test]
