@@ -1113,7 +1113,12 @@ fn authorize(actor: WorkspaceActor, path: &Path) -> Result<(), PersonalWorkspace
         }
         WorkspaceActor::SkillTool => path.starts_with("skills"),
         WorkspaceActor::RefinementTool => {
-            matches!(path.to_str(), Some("AGENT.md" | "USER.md" | "RULE.md"))
+            matches!(
+                path.to_str(),
+                Some("AGENT.md" | "USER.md" | "RULE.md" | "MEMORY.md")
+            ) || path.starts_with("memory")
+                || path.starts_with("knowledge")
+                || path.starts_with("skills")
         }
     };
     if allowed {

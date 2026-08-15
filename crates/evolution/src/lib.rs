@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod refinement;
+
+pub use refinement::*;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use keith_agent_types::{CURRENT_SCHEMA_VERSION, EntityId, ProfileId, Revision, UtcTimestamp};

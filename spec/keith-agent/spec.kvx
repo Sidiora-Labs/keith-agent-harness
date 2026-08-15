@@ -1103,7 +1103,7 @@ requires = ["5.1", "5.4", "7.4"]
 
 [task.10.3]
 title  = "Guarded background refinement transaction"
-status = "pending"
+status = "done"
 wave   = 18
 do_1   = "Implement idle/scheduled refinement action and restricted read-only reviewer inputs"
 do_2   = "Implement allowed/protected paths, file/byte limits, patch parsing, snapshots, temporary view, and validators"

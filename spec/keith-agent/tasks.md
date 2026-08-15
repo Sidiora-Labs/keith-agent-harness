@@ -341,7 +341,7 @@
     - Execute MCP calls through normalized bounded sessions and ordinary tool results
     - Run auth, restart, schema change, timeout, malicious output, relevance, isolation, and cleanup tests
     - _Requirements: 19.1-19.5_
-  - [ ] 10.3 Guarded background refinement transaction
+  - [x] 10.3 Guarded background refinement transaction
     - Implement idle/scheduled refinement action and restricted read-only reviewer inputs
     - Implement allowed/protected paths, file/byte limits, patch parsing, snapshots, temporary view, and validators
     - Implement optional confirmation, atomic commit, index refresh, diff, undo, and no-change suppression
