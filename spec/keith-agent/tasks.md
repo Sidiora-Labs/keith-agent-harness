@@ -284,7 +284,7 @@
     - Submit selected work through ordinary actions and persist bounded decision history
     - Run longitudinal anti-spam, urgency, batching, workload, daily-limit, and no-event tests
     - _Requirements: 32.1-32.6_
-  - [ ] 8.5 Truthful presence and meaningful progress notifications
+  - [x] 8.5 Truthful presence and meaningful progress notifications
     - Implement presence projection from session, action, tool, child, wait, schedule, recovery, and terminal state
     - Implement rate-limited progress transitions and safe channel-friendly summaries
     - Expose timestamps, session/goal links, next wake, and safe errors

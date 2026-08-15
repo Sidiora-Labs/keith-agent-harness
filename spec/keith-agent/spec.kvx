@@ -1009,7 +1009,7 @@ requires = ["8.3"]
 
 [task.8.5]
 title  = "Truthful presence and meaningful progress notifications"
-status = "pending"
+status = "done"
 wave   = 16
 do_1   = "Implement presence projection from session, action, tool, child, wait, schedule, recovery, and terminal state"
 do_2   = "Implement rate-limited progress transitions and safe channel-friendly summaries"
