@@ -1,0 +1,1382 @@
+# spec.kvx — Keith Agent
+# SINGLE SOURCE for requirements, design, and implementation tasks.
+# Render generated requirements/design/tasks views from this file; do not let
+# generated Markdown outrank this source.
+#
+# Format: KVX. One key = value per line; string values double-quoted; lists
+# are bracketed quoted strings; # starts a comment.
+# Product and technical baselines: ../blueprint.md and ../shematics.md.
+# Schema:
+#   [req.<n>]   title, story, ac_1..ac_n
+#   [design]    overview, include
+#   [task.<id>] title, status, wave, reqs, requires, do_1..do_n
+
+[meta]
+feature      = "keith-agent"
+title        = "Keith Agent — Rust-native supervised recursion, readable personal memory, multi-channel presence, and durable autonomy"
+status       = "planning"
+spec_version = "1.0.0"
+intro        = "Keith Agent combines the Delta-1 supervised recursive runtime with the Gamma-3 assistant and distribution layer in one Rust-native architecture. One daemon supervises one worker per root session tree; every root and durable child uses AgentSession; prompts, schedules, channel messages, child results, steering, and autonomous continuation share one action inbox. Human-readable profiles, memory, knowledge, and skills remain user-owned, while event-driven awareness, attention, commitments, waiting, planning, review, channels, and reversible refinement create continuity without simulated consciousness. Rust owns every platform boundary; Python, shells, browsers, compilers, and other runtimes are optional restricted guest workloads. No task is complete from source presence, a rendered interface, an endpoint response, or a model claim: current packaged binaries and real process paths must satisfy the referenced acceptance criteria."
+
+[design]
+overview = "Keith Agent is a local-first persistent agent whose process may die while its work continues. Delta-1 provides daemon supervision, root-tree workers, AgentSession, unified action admission, provider normalization, persistent computation, branched history, recovery, goals, and full recursive children. Gamma-3 provides explicit profiles, messaging channels, readable memory, hybrid retrieval, linked knowledge, proactive delivery, and guarded self-evolution. The implementation uses strict Rust crate and process boundaries, event-driven waiting, selective initiative, bounded autonomy, and user-owned declarative state."
+include  = "design.body.md"
+
+# ============================== REQUIREMENTS ==============================
+
+# --- RUST FOUNDATION ---
+
+[req.1]
+title = "Rust workspace, module boundaries, and executable engineering standards"
+story = "As the implementation team, I want a modular Rust workspace with enforced dependency direction, so that the runtime does not recreate a monolithic session core."
+ac_1  = "THE repository SHALL be a Cargo workspace whose domain, protocol, adapter, orchestration, application, and test-support crates follow the dependency direction defined in shematics.md."
+ac_2  = "DOMAIN crates SHALL NOT depend on clients, concrete channel adapters, concrete provider adapters, or application composition roots."
+ac_3  = "THE AgentSession implementation SHALL be composed from bounded state machines and services; provider, storage, channel, tool, and UI implementations SHALL remain behind traits."
+ac_4  = "ALL owned daemon, worker, protocol, provider, storage, client, channel, scheduler, memory, plugin-host, and execution-broker code SHALL be Rust."
+ac_5  = "CI SHALL enforce formatting, linting, compilation, dependency policy, documentation links, schema drift, unit tests, integration tests, and prohibited dependency edges."
+ac_6  = "A clean checkout test SHALL build the initial workspace and run its real test binaries without repository-local unpublished dependencies or generated files missing from source."
+
+[req.2]
+title = "Versioned AgentConnection protocol shared by every client"
+story = "As a client developer, I want one transport-independent connection contract, so that terminal, web, desktop, API, and channel clients operate the same runtime."
+ac_1  = "EVERY public command, response, snapshot, and streamed event SHALL belong to an explicit major/minor protocol version and a closed Rust type."
+ac_2  = "THE protocol SHALL support session create, attach, detach, list, branch, resume, prompt, steer, cancel, model selection, goals, children, schedules, memory queries, confirmations, export, and background controls."
+ac_3  = "LOCAL transports SHALL support permission-restricted Unix sockets or platform equivalents plus framed stdio; web clients SHALL use authenticated HTTP and reconnectable WebSocket transport."
+ac_4  = "A major mismatch SHALL fail explicitly; a minor mismatch SHALL negotiate a common feature subset without silently changing command meaning."
+ac_5  = "CLIENTS SHALL consume the generated/shared protocol package and SHALL NOT define independent wire types or mutate persistence directly."
+ac_6  = "A conformance suite SHALL run the same command/event journey over every supported transport."
+
+[req.3]
+title = "Stable daemon supervisor and lazy root-session catalog"
+story = "As the runtime, I want a stable daemon that owns discovery and lifecycle without running user tools, so that clients and session workers can fail independently."
+ac_1  = "ONE `agentd` process SHALL own the public endpoint, root-session catalog, worker lifecycle, routing, scheduler, awareness service, delivery outbox, and credential references."
+ac_2  = "THE daemon SHALL discover existing root trees without loading every AgentSession or starting every worker."
+ac_3  = "THE supervisor SHALL start, adopt, monitor, drain, restart, and evict workers and SHALL expose their generation, health, activity, and resource state."
+ac_4  = "THE daemon SHALL NOT execute arbitrary shell, browser, kernel, or third-party plugin code."
+ac_5  = "ONE worker crash SHALL NOT terminate the daemon or unrelated root session trees."
+ac_6  = "A process test SHALL prove lazy discovery, worker start/adoption, idle eviction, crash containment, and daemon restart."
+
+[req.4]
+title = "One leased Rust worker per root session tree"
+story = "As the supervisor, I want one exclusive worker owner for each root tree, so that recursion is contained and session writes cannot split-brain."
+ac_1  = "EACH active root session tree SHALL have at most one valid lease holder and one monotonically increasing worker generation."
+ac_2  = "A worker SHALL own the root AgentSession, all retained child AgentSessions, action inboxes, provider streams, child messaging, and kernel handles beneath that root."
+ac_3  = "LEASE acquisition and renewal SHALL be transactional; a worker that loses renewal SHALL stop accepting actions and stop writing session files."
+ac_4  = "WORKER shutdown SHALL drain or explicitly interrupt active operations, checkpoint recoverable state, release resources, and release its lease."
+ac_5  = "A race/process suite SHALL prove single ownership, stale-worker rejection, generation change, graceful drain, forced termination, and replacement recovery."
+
+[req.5]
+title = "Composable AgentSession actor as the single durable agent abstraction"
+story = "As the runtime, I want roots and children to share one serialized state machine, so that every durable agent has equivalent lifecycle and recovery behavior."
+ac_1  = "AgentSession SHALL be an actor whose state mutations are serialized through its mailbox."
+ac_2  = "THE actor SHALL compose input pipeline, action inbox, turn runner, context builder, tool coordinator, compaction manager, goal controller, child manager, kernel handle, extension context, and session writer services."
+ac_3  = "ROOT and durable child sessions SHALL use the same AgentSession implementation and session-entry schema."
+ac_4  = "THE actor SHALL expose explicit dormant, ready, running, waiting-tool, waiting-child, waiting-external, compacting, paused, failed, and archived states."
+ac_5  = "SERVICES SHALL return typed messages or results and SHALL NOT mutate AgentSession memory or persisted files behind the actor."
+ac_6  = "A state-machine suite SHALL prove every legal transition, reject illegal transitions, and reconstruct equivalent state after restart."
+
+[req.6]
+title = "Unified persistent action inbox"
+story = "As the agent runtime, I want every work source to share one admission and ordering system, so that background and interactive work have identical semantics."
+ac_1  = "USER prompts, channel messages, scheduled jobs, child messages, steering, follow-ups, waiting resumptions, awareness initiatives, refinement work, and autonomous continuations SHALL become SessionAction records."
+ac_2  = "EACH action SHALL carry stable ID, session, source, delivery policy, priority, creation time, optional not-before/deadline, limits, reply route, and typed payload."
+ac_3  = "THE inbox SHALL implement immediate, next-turn-boundary, and when-idle delivery plus interrupt, user, child-result, scheduled, and background priorities."
+ac_4  = "FIFO ordering SHALL hold within equal priority; expired, cancelled, and incompatible actions SHALL become explicit terminal states."
+ac_5  = "AT most one model turn SHALL execute per AgentSession while safe tool and child concurrency remains independently bounded."
+ac_6  = "A persistence and ordering suite SHALL interleave every action source across restart and prove deterministic admission, steering, cancellation, and terminal state."
+
+[req.7]
+title = "Append-only branched session history, leases, and correct compaction"
+story = "As a user, I want conversation branches and compaction to survive indefinitely, so that long work resumes from the exact selected history."
+ac_1  = "SESSION history SHALL use versioned append-only JSONL entries with stable entry ID, optional parent ID, UTC timestamp, payload, and canonical checksum."
+ac_2  = "THE entry taxonomy SHALL include user, assistant, tool call, tool result, model, thinking, compaction, branch summary, goal, plan, child link, usage, lifecycle, and custom records."
+ac_3  = "BRANCH creation SHALL append from a selected historical parent and SHALL NOT rewrite existing entries."
+ac_4  = "CONTEXT reconstruction SHALL walk the selected leaf ancestry and apply the latest compatible compaction and model settings."
+ac_5  = "COMPACTION SHALL atomically append its summary and select the continuation leaf; failures SHALL leave the old leaf active and SHALL NOT create sibling continuation drift."
+ac_6  = "RECOVERY MAY discard only a truncated final line; earlier corruption SHALL quarantine the session and require explicit repair."
+ac_7  = "A property and process suite SHALL prove branch reconstruction, concurrent lease exclusion, repeated compaction, crash at every append boundary, and correct long-session continuation."
+
+[req.8]
+title = "Ordered event streams, snapshots, and reconnect recovery"
+story = "As a user switching clients, I want exact runtime state after disconnect, so that live work does not disappear or duplicate."
+ac_1  = "EVERY worker event SHALL carry root-tree ID, generation, strictly increasing sequence, occurrence time, and a closed typed payload."
+ac_2  = "THE daemon SHALL retain a bounded replay window and a reconstructible snapshot for every active tree."
+ac_3  = "A reconnect within the retained generation/window SHALL receive exact missing deltas; otherwise it SHALL receive a fresh snapshot followed by newer deltas."
+ac_4  = "SLOW or malformed clients SHALL NOT block worker event production or grow server memory without bound."
+ac_5  = "REPLACEABLE streaming deltas MAY be coalesced, but committed messages, terminal tool/action states, confirmations, goals, children, waits, and deliveries SHALL remain recoverable."
+ac_6  = "A reconnect matrix SHALL disconnect at every event boundary, change worker generation, overflow retention, attach multiple clients, and prove no duplicate command execution."
+
+# --- MODEL AND TURN EXECUTION ---
+
+[req.9]
+title = "Normalized provider interface and real per-profile model routing"
+story = "As the agent loop, I want provider-independent model behavior, so that profiles can select and fall back across providers without changing session code."
+ac_1  = "EVERY provider adapter SHALL implement model discovery, normalized streaming, token counting, cancellation, content/tool normalization, usage, and typed error classification."
+ac_2  = "THE normalized event model SHALL support text, bounded reasoning visibility, partial tool arguments, completed tool calls, usage, stop reasons, and failures."
+ac_3  = "A profile SHALL resolve its real primary model, fallbacks, classification, summarization, review, and vision selections before session construction."
+ac_4  = "FALLBACK SHALL depend on error class; authentication, invalid request, content rejection, and cancellation SHALL NOT be treated as transient outages."
+ac_5  = "CREDENTIAL resolution SHALL use named references and SHALL NOT copy unrelated secrets into workers, logs, prompts, or subprocess environments."
+ac_6  = "A provider conformance suite SHALL prove at least two real adapters plus scripted edge streams, cancellation, usage, rate limits, fallback, and per-profile separation."
+
+[req.10]
+title = "Production-hardened streaming agent loop"
+story = "As a user, I want robust tool-using turns across provider quirks and failures, so that ordinary malformed output does not destroy a task."
+ac_1  = "THE loop SHALL emit agent-start, turn-start, message/tool lifecycle, turn-end, and agent-end events in deterministic subscriber order."
+ac_2  = "THE loop SHALL handle partial and malformed arguments, missing call IDs, empty responses, tool-call/result adjacency, provider-specific stream variance, oversized output, and context overflow."
+ac_3  = "SAFE read-only tools MAY run in bounded parallel batches; state-changing tools SHALL serialize unless their contract explicitly provides safe concurrency."
+ac_4  = "CANCELLATION and steering SHALL propagate to provider streams, tools, kernels, and optionally children according to action policy."
+ac_5  = "REPEATED identical failures SHALL trigger strategy change or stop after a configured bound rather than consuming the remaining budget."
+ac_6  = "PARTIAL model output SHALL remain explicitly incomplete unless the final response is committed."
+ac_7  = "A scripted-stream and real-process suite SHALL cover normal text, tool calls, malformed streams, cancellation, overflow, retry, repeated failures, and output artifact spill."
+
+[req.11]
+title = "Direct, planned, and reviewed task execution"
+story = "As a user, I want simple work to stay fast and complex work to remain organized and checked, so that intelligence does not require ceremony on every turn."
+ac_1  = "A deterministic/router-assisted classifier SHALL choose direct response, single-tool, multi-step, research, coding/project, monitoring, recurring, or delegated execution."
+ac_2  = "DIRECT and single-tool work SHALL NOT require a persisted plan unless the user requests one or risk/complexity thresholds require it."
+ac_3  = "A complex plan SHALL define restated outcome, constraints, milestones, dependencies, assignees, result checks, budgets, state, and revision history."
+ac_4  = "IMPORTANT outcomes SHALL run deterministic checks first and MAY run a bounded reviewer that receives the original request and produced artifacts."
+ac_5  = "REVIEW SHALL return accept, revise, ask-user, or stop and SHALL obey a maximum pass count."
+ac_6  = "A fixed evaluation corpus SHALL compare direct, planned, delegated, and reviewed modes for quality, latency, cost, and failure behavior."
+
+[req.12]
+title = "Tool experience and adaptive model/tool selection"
+story = "As a recurring agent, I want operational history to improve routing, so that I stop repeating approaches that fail in the same environment."
+ac_1  = "THE runtime SHALL record tool and provider success, failure category, latency, timeout, task category, and corrective strategy without storing private reasoning."
+ac_2  = "ROUTING MAY use this history to choose provider, model, tool, skill, timeout, and fallback order within profile limits."
+ac_3  = "RECENT failures SHALL reduce preference for an approach but SHALL NOT permanently disable a tool without explicit health or configuration state."
+ac_4  = "THE operator SHALL be able to inspect, reset, export, or disable learned routing history."
+ac_5  = "A test SHALL prove that repeated environment-specific failure changes a later route, a recovered tool becomes selectable, and profile overrides remain authoritative."
+
+# --- TOOLS, COMPUTE, AND EXTENSIONS ---
+
+[req.13]
+title = "Typed tool registry, readiness, confirmation, and execution lifecycle"
+story = "As the agent loop, I want one tool contract and manager, so that validation, confirmation, timeout, retry, and progress are consistent."
+ac_1  = "EVERY tool SHALL declare stable name/version, description, input/output schema, read/write/network/process behavior, parallel safety, repeatability, confirmation mode, timeout, output limit, and readiness probe."
+ac_2  = "UNREADY tools SHALL be excluded from the model surface with an operator-visible reason and SHALL return when readiness recovers."
+ac_3  = "THE manager SHALL validate arguments before confirmation or execution and SHALL produce requested, awaiting-confirmation, started, bounded-progress, and one terminal state."
+ac_4  = "PROFILE and installation execution rules SHALL resolve allow, confirm, or deny; narrower configuration SHALL NOT relax an installation prohibition."
+ac_5  = "RETRY behavior SHALL distinguish safe, check-before-retry, and never-automatic tools."
+ac_6  = "A conformance suite SHALL prove discovery, readiness TTL/recovery, schema denial, confirmation, cancellation, timeout, progress, output limits, and every terminal state."
+
+[req.14]
+title = "Restricted filesystem, shell, browser, and web execution"
+story = "As a local operator, I want useful tools without granting every model call my full host authority, so that autonomy remains containable."
+ac_1  = "FILESYSTEM tools SHALL operate relative to opened workspace roots, reject traversal and device paths, defend against symlink swaps, and use atomic writes with expected-preimage checks where applicable."
+ac_2  = "SHELL and compiler work SHALL run in separate processes with explicit working directory, minimal environment, time, CPU, memory, output, process-tree, filesystem, and optional network limits."
+ac_3  = "GENERAL web tools SHALL enforce allowed schemes, DNS and redirect revalidation, private/special address denial, response size limits, timeouts, and content-type validation."
+ac_4  = "BROWSER automation SHALL use isolated profiles, bounded semantic observations, restricted downloads, cancellation, and explicit confirmation for configured consequential interactions."
+ac_5  = "UNTRUSTED projects SHALL support container or stronger sandbox execution without changing the tool contract."
+ac_6  = "An adversarial suite SHALL cover traversal, symlink races, environment leakage, process escape, output floods, SSRF, redirects, hostile pages, downloads, and cleanup."
+
+[req.15]
+title = "Credential storage and narrow secret delivery"
+story = "As the owner, I want credentials kept outside ordinary agent state, so that providers and integrations work without exposing secrets to models or guests."
+ac_1  = "CREDENTIALS SHALL live in an OS credential store or a restricted encrypted store and SHALL be referenced by stable non-secret names."
+ac_2  = "ONLY the owning provider, channel, MCP adapter, or tool request SHALL receive the secret value in memory."
+ac_3  = "SECRETS SHALL NOT enter prompts, session JSONL, workspace files, artifacts, ordinary logs, metrics, client events, URLs, or broad subprocess environments."
+ac_4  = "BROWSER-facing credential configuration SHALL be write-only and protected by authentication, exact origin, CSRF, payload limits, and redacted responses."
+ac_5  = "A secret-leak suite SHALL scan every persistence, event, log, process, browser, export, and diagnostic path under normal and failure behavior."
+
+[req.16]
+title = "Durable bounded artifact service"
+story = "As a session, I want large outputs and deliverables stored independently of context, so that work remains inspectable without exhausting model or event buffers."
+ac_1  = "EVERY artifact SHALL have stable ID, owning root/session, media type, byte length, digest, relative path, creation time, and optional display metadata."
+ac_2  = "ARTIFACT paths SHALL resolve beneath the owning tree and SHALL reject traversal, cross-profile access, missing content, and oversized content."
+ac_3  = "OVERSIZED tool or kernel output SHALL spill to an artifact and provide a bounded preview."
+ac_4  = "CHILD results SHALL be able to return artifact references rather than copying full content into messages."
+ac_5  = "EXPORT, delete, archive, and retention operations SHALL be explicit and leave derived references consistent."
+ac_6  = "A test SHALL prove digest validation, concurrent creation, cross-scope denial, spill behavior, deletion, archive, and restart recovery."
+
+[req.17]
+title = "Rust-owned persistent guest-kernel broker"
+story = "As a technical user, I want a persistent computational environment that survives normal turns, so that analysis and coding can retain useful state."
+ac_1  = "A Rust kernel broker SHALL own startup, typed transport, execution, streaming output, interrupt, timeout, snapshot, restore, idle eviction, and resource accounting."
+ac_2  = "PYTHON, Rust REPL, WASM, and custom kernels MAY implement the guest protocol; no guest owns daemon or session authority."
+ac_3  = "GUEST kernels SHALL use restricted filesystem mounts, minimal environment, configured network access, and bounded processes, memory, CPU, output, and lifetime."
+ac_4  = "GUEST-to-agent operations SHALL use typed bridge calls for children, messages, goals, MCP, compaction, and artifacts and SHALL NOT mutate in-memory AgentSession state directly."
+ac_5  = "SNAPSHOTS SHALL be best effort, list excluded state, and restore only into a compatible sandbox."
+ac_6  = "A process suite SHALL prove streaming, interrupt, timeout, snapshot, restart, incompatible restore, output spill, bridge authorization, and idle reclamation."
+
+[req.18]
+title = "WASI plugin host and immutable first-party extensions"
+story = "As an extension author, I want a versioned Rust-compatible plugin boundary, so that third-party features cannot crash or control the daemon."
+ac_1  = "FIRST-PARTY native Rust extensions SHALL compile into a distribution and SHALL NOT be loaded as untrusted dynamic libraries."
+ac_2  = "THIRD-PARTY executable plugins SHALL run as WASI components or separate processes through a versioned manifest and interface."
+ac_3  = "PLUGINS SHALL receive no ambient filesystem, network, environment, credential, clock, or process authority; configured grants SHALL be explicit and bounded."
+ac_4  = "THE plugin lifecycle SHALL support discovery, validation, activation, health, disable, update, migration, uninstall, and safe-mode startup."
+ac_5  = "A malicious-plugin suite SHALL prove resource denial, timeout, memory limit, crash isolation, invalid manifest rejection, migration failure recovery, and uninstall cleanup."
+
+[req.19]
+title = "First-class MCP lifecycle and relevant tool projection"
+story = "As a profile owner, I want external MCP servers to integrate through one managed boundary, so that their tools are useful without bloating every prompt or bypassing isolation."
+ac_1  = "THE daemon SHALL own MCP configuration, process/network lifecycle, authentication, health, reconnect, schema caching, profile enablement, and session cleanup."
+ac_2  = "WORKERS SHALL receive only enabled MCP tool/resource projections and SHALL execute calls through normalized bounded sessions."
+ac_3  = "THE context builder SHALL select relevant schemas when the complete server surface exceeds configured prompt limits."
+ac_4  = "MCP servers SHALL be treated as external trust domains with explicit filesystem, network, and credential configuration."
+ac_5  = "A conformance suite SHALL prove stdio and HTTP servers, auth failure, restart, schema change, relevance selection, timeout, malicious output, profile isolation, and cleanup."
+
+# --- GOALS, RECURSION, AND AUTONOMY ---
+
+[req.20]
+title = "Durable goals and bounded autonomous continuation"
+story = "As a user delegating long work, I want explicit goals and limits, so that the agent can continue without running forever."
+ac_1  = "A goal SHALL store objective, state, limits, optional plan, optional waiting condition, timestamps, usage, and completion/failure summary."
+ac_2  = "GOAL states SHALL include draft, ready, running, waiting, reviewing, paused, blocked, complete, failed, and cancelled with validated transitions."
+ac_3  = "AUTONOMOUS continuation SHALL enqueue a normal SessionAction and SHALL NOT recurse through a private loop."
+ac_4  = "GOALS SHALL stop at turn, token, elapsed-time, review, child, retry, process, storage, or cost limits."
+ac_5  = "USERS SHALL be able to inspect, pause, resume, edit, cancel, and archive goals from full clients."
+ac_6  = "A restart and limits suite SHALL prove each transition, exact budget enforcement, cancellation, pause/resume, and terminal summaries."
+
+[req.21]
+title = "Full recursive child AgentSessions with typed messaging"
+story = "As a complex-task agent, I want durable specialized children, so that independent work can proceed in parallel without becoming disposable summaries."
+ac_1  = "EVERY durable child SHALL have independent session history, goal, model route, artifact directory, workspace mode, allowed tools, limits, status, heartbeat, and retention."
+ac_2  = "CHILD workspace modes SHALL include read-only parent, isolated copy, dedicated workspace, and explicitly shared workspace."
+ac_3  = "PARENT and child SHALL exchange durable typed text, request, status, and artifact-reference messages with stable IDs and rate limits."
+ac_4  = "CHILD tool access SHALL be no broader than parent/profile rules and recursive depth/count SHALL be checked before creation."
+ac_5  = "PARENT cancellation SHALL propagate according to child policy; orphaned children SHALL become visible and recoverable or terminate after bounded grace."
+ac_6  = "A process suite SHALL prove nested children, parallel completion, messages, artifacts, failure, cancellation, parent restart, orphan cleanup, retention, and limit enforcement."
+
+[req.22]
+title = "System-wide resource accounting and idle reclamation"
+story = "As the operator, I want bounded recursive and background resource use, so that useful autonomy cannot exhaust the host or provider accounts."
+ac_1  = "THE daemon SHALL enforce independent ceilings for workers, active sessions, provider requests, safe parallel tools, children, recursive depth, kernels, browsers, processes, channels, schedules, and background initiatives."
+ac_2  = "GOAL and profile accounting SHALL cover tokens, model cost, wall time, tool calls, processes, memory, storage, network, retries, and notifications where measurable."
+ac_3  = "IDLE workers, children, kernels, MCP sessions, browser instances, and tool processes SHALL be reclaimed independently without losing durable recovery state."
+ac_4  = "RESOURCE exhaustion SHALL pause or fail affected work explicitly and SHALL NOT corrupt other session trees."
+ac_5  = "A load suite SHALL prove fair scheduling, reclamation, recursive bounds, provider/account limits, notification bounds, and recovery after exhaustion."
+
+# --- PROFILES, MEMORY, KNOWLEDGE, AND SKILLS ---
+
+[req.23]
+title = "Explicit profile, workspace, model, and route isolation"
+story = "As a user with multiple assistants or projects, I want real profile isolation, so that identity, models, memory, and tools never silently cross."
+ac_1  = "A profile SHALL bind stable identity, workspace, persona, user file, rules, real model route, thinking level, tools, skills, MCP, plugins, channels, autonomy, notifications, and refinement policy."
+ac_2  = "ROUTING SHALL resolve profile, workspace, session policy, model configuration, and reply route before creating or resuming AgentSession."
+ac_3  = "AMBIGUOUS, missing, disabled, or unauthorized routes SHALL fail visibly and SHALL NOT substitute another profile."
+ac_4  = "THE resolved profile snapshot SHALL be recorded in session state so later configuration changes apply deliberately."
+ac_5  = "A cross-profile suite SHALL prove separate models, memory, workspaces, tools, channels, sessions, schedules, and failure behavior."
+
+[req.24]
+title = "Human-readable personal workspace with safe live reload"
+story = "As the owner, I want my agent identity and memory in ordinary files, so that I can inspect and control what persists."
+ac_1  = "EACH profile workspace SHALL support AGENT.md, USER.md, RULE.md, MEMORY.md, daily memory, state, knowledge, skills, artifacts, backups, and hidden runtime metadata."
+ac_2  = "EXTERNAL edits SHALL be detected, validated, versioned, and made available to later context builds without daemon restart."
+ac_3  = "AGENT writes SHALL use temporary files, flush, atomic rename, and directory synchronization where supported."
+ac_4  = "CONCURRENT human and agent changes SHALL produce a conflict or proposed merge and SHALL NOT silently overwrite the human version."
+ac_5  = "BUILT-IN resources and backups SHALL be immutable to ordinary memory, skill, and refinement tools."
+ac_6  = "A filesystem suite SHALL prove create/reload, conflicts, crash during write, symlinks, unsupported encoding, large files, backups, and version restore."
+
+[req.25]
+title = "Separated session compaction, daily memory, durable memory, and current state"
+story = "As the assistant, I want distinct memory purposes, so that transient conversation does not automatically become permanent identity."
+ac_1  = "ONE structured summarization pass MAY produce branch summary, memory candidates, daily entry, commitments, and unresolved follow-ups."
+ac_2  = "THE branch summary SHALL remain session state; daily entries SHALL remain chronological; durable memories SHALL enter MEMORY.md only under memory policy."
+ac_3  = "CURRENT state SHALL remain a compact projection of active focus, projects, relationships, commitments, routines, waiting, and recent feedback."
+ac_4  = "MEMORY writes SHALL retain source session/entry references and sensitivity/retention classification in hidden metadata without making indexes authoritative."
+ac_5  = "USER correction or deletion SHALL supersede or remove future use and SHALL update derived search data."
+ac_6  = "A test SHALL prove one-pass structured output, correct destination separation, current-state bounds, correction, deletion, and restart continuity."
+
+[req.26]
+title = "Hybrid lexical, trigram, and optional vector retrieval"
+story = "As the context builder, I want resilient relevant-memory search, so that mixed-language and semantic retrieval work without becoming a single point of failure."
+ac_1  = "THE retrieval service SHALL index memory, daily notes, current state, knowledge, selected summaries, and skills with profile/source/version metadata."
+ac_2  = "SEARCH SHALL combine full-text, trigram, and optional vector ranks using a documented normalized merger."
+ac_3  = "LEXICAL and trigram search SHALL remain available when embeddings or the vector index are unavailable."
+ac_4  = "CORRUPT derived indexes SHALL be quarantined and rebuilt from source files while the profile remains usable in degraded mode."
+ac_5  = "RESULTS SHALL retain source path, heading/section, excerpt, version, scores, and modification time."
+ac_6  = "A retrieval corpus SHALL cover English, Chinese, mixed language, identifiers, misspellings, semantic paraphrase, deletions, corrupt indexes, and profile isolation."
+
+[req.27]
+title = "Linked Markdown knowledge service"
+story = "As a user, I want an inspectable personal knowledge base, so that durable reference material remains portable and connected."
+ac_1  = "KNOWLEDGE pages SHALL be Markdown files whose relative links create lightweight edges and backlinks."
+ac_2  = "THE service SHALL support create, inspect, update, search, backlinks, orphan detection, related pages, safe rename, and link repair."
+ac_3  = "PAGE changes SHALL use workspace atomicity, conflict handling, profile isolation, and index refresh."
+ac_4  = "THE product SHALL describe this as linked Markdown knowledge, not as a general semantic knowledge graph."
+ac_5  = "A test SHALL prove link extraction, rename, broken links, backlinks, search, concurrent edits, deletion, and rebuild."
+
+[req.28]
+title = "Relevant skills and validation-gated procedural learning"
+story = "As a recurring agent, I want reusable procedures that improve through use, so that successful workflows are not rediscovered every time."
+ac_1  = "A skill SHALL be a readable SKILL.md package declaring identity, triggers, inputs, steps, required tools, validation, known failures, and stop conditions."
+ac_2  = "THE context builder SHALL select skills by task, trigger, profile, platform, and ready-tool compatibility within a prompt budget."
+ac_3  = "LOADING a skill SHALL NOT execute its scripts or grant authority; executable components use tools, plugins, or MCP."
+ac_4  = "SUCCESSFUL repeated work MAY create a candidate skill in a temporary workspace with private task data and secrets removed."
+ac_5  = "A candidate SHALL remain inactive until clean-workspace applicability, safety, and regression cases pass and configured user review completes."
+ac_6  = "SKILL installation, update, disable, rollback, delete, and provenance SHALL survive restart and remain inspectable."
+ac_7  = "A production-path suite SHALL prove discovery, selection, irrelevant exclusion, unavailable tools, candidate creation, rejection, activation, recurrence, refinement, and rollback."
+
+# --- LIFE LOOP, SCHEDULING, AND PRESENCE ---
+
+[req.29]
+title = "Durable scheduler with explicit missed-run behavior"
+story = "As a user, I want future and recurring work to survive restarts, so that reminders and proactive tasks are dependable."
+ac_1  = "JOBS SHALL support one-time, interval, and calendar schedules with IANA time zone, owning profile/session, action, limits, reply route, state, next/last run, and missed-run policy."
+ac_2  = "DUE execution SHALL transactionally claim an attempt and update next-run state before enqueueing one stable SessionAction."
+ac_3  = "MISSED-RUN policy SHALL explicitly skip, run once, or replay a bounded number and SHALL NOT create unbounded catch-up storms."
+ac_4  = "FAILURES SHALL use bounded retry and SHALL NOT wedge later recurring occurrences."
+ac_5  = "USERS and authorized agents SHALL create, list, inspect, pause, resume, update, and delete jobs through the shared runtime."
+ac_6  = "A time/restart suite SHALL prove DST, time zones, claims, duplicates, cancellation, retry, catch-up, recurring advancement, and reply delivery."
+
+[req.30]
+title = "Durable commitments and efficient waiting conditions"
+story = "As a user, I want the agent to remember promises and wait without burning resources, so that long-running assistance remains dependable."
+ac_1  = "A commitment SHALL store owner, description, source session, optional trigger, reply route, created/updated time, and captured, scheduled, active, waiting, fulfilled, blocked, cancelled, or expired state."
+ac_2  = "WAITING triggers SHALL support time, schedule, child terminal state, process exit, file/repository change, channel message, external condition, and user response."
+ac_3  = "THE trigger SHALL be persisted before AgentSession yields and SHALL use a stable wake identity to suppress duplicate resume actions."
+ac_4  = "WAITING SHALL release the model turn and permit kernel/worker eviction while preserving exact resumption state."
+ac_5  = "USERS SHALL list, edit, cancel, fulfill, and resume commitments and waiting items from full clients."
+ac_6  = "A process suite SHALL prove every trigger, duplicated events, expiry, daemon/worker restart, resource release, cancellation, and one-time resumption."
+
+[req.31]
+title = "Awareness events and bounded current-state projection"
+story = "As a persistent assistant, I want meaningful changes normalized into current state, so that I know what is happening between conversations."
+ac_1  = "AWARENESS SHALL normalize user, schedule, file, repository, child, process, channel, commitment, goal-inactivity, session-idle, and external-connector events."
+ac_2  = "EVENTS SHALL carry stable identity, profile, source, occurrence time, bounded summary, and optional artifact reference and SHALL be deduplicated by source semantics."
+ac_3  = "CURRENT state SHALL update active focus, projects, relationships, commitments, routines, waiting, and recent feedback without copying full transcripts."
+ac_4  = "WATCHERS SHALL be bounded, restartable, and removable and SHALL coalesce noisy changes."
+ac_5  = "A test SHALL prove normalization, deduplication, coalescing, current-state bounds, cross-profile isolation, watcher restart, and source deletion."
+
+[req.32]
+title = "Selective attention and non-annoying initiative"
+story = "As a user, I want proactive help only when it is useful, so that autonomy does not become notification spam."
+ac_1  = "AN awareness event MAY create initiative candidates containing proposed action, urgency, expected value, confidence, interruption cost, resource cost, duplication penalty, and expiry."
+ac_2  = "ATTENTION SHALL apply quiet hours, current workload, recent duplicates, per-channel notification budgets, autonomy mode, and user-declared priorities."
+ac_3  = "THE decision SHALL be ignore, remember, batch, schedule, ask, start bounded work, or notify."
+ac_4  = "STARTED work SHALL enter the ordinary SessionAction inbox with explicit limits and SHALL NOT execute from the attention service."
+ac_5  = "THE operator SHALL be able to inspect recent candidates and understand why they were suppressed, batched, started, or notified."
+ac_6  = "A longitudinal suite SHALL prove quiet hours, batching, duplicate suppression, daily limits, workload suppression, useful urgency override, and no fabricated event."
+
+[req.33]
+title = "Truthful presence and progress projection"
+story = "As a user, I want to know what the agent is actually doing, so that long work feels present without theatrical activity."
+ac_1  = "PRESENCE SHALL derive available, thinking, using-tools, waiting-child, waiting-external, paused-for-user, scheduled, completed, and failed states from real runtime state."
+ac_2  = "PROGRESS notifications SHALL be rate-limited and emitted only for meaningful action, tool, child, wait, recovery, failure, or completion transitions."
+ac_3  = "THE product SHALL NOT fabricate cursor movement, typing, tool use, background thought, progress percentage, or completion."
+ac_4  = "CHANNEL and client presentations SHALL show timestamp, session/goal link, current state, next wake where relevant, and safe failure detail."
+ac_5  = "A test SHALL compare projection against real event history across tool work, child work, waiting, restart, failure, and zero-activity periods."
+
+# --- CHANNELS AND DELIVERY ---
+
+[req.34]
+title = "Rust channel gateway and normalized adapter contract"
+story = "As a user, I want to converse where I already work, so that the durable agent is not confined to its own application."
+ac_1  = "CHANNEL adapters SHALL implement inbound streaming, outbound send, identity mapping, attachments, feature discovery, error classification, rate limits, and reconnect."
+ac_2  = "INBOUND messages SHALL normalize channel, external account, conversation, thread, sender, message ID, reply target, text, attachments, and occurrence time."
+ac_3  = "THE gateway SHALL enforce per-session ordering, global concurrency, duplicate suppression, bounded attachment staging, and backpressure."
+ac_4  = "CHANNEL processes SHALL submit SessionActions through AgentConnection and SHALL NOT execute models, tools, or arbitrary memory reads."
+ac_5  = "A conformance suite SHALL exercise ordering, duplicates, attachments, reconnect, rate limits, cancellation/steering where supported, and malformed platform events."
+
+[req.35]
+title = "Persistent outbound delivery and proactive channel return"
+story = "As a user, I want replies and scheduled results delivered reliably, so that disconnects do not silently discard completed work."
+ac_1  = "EVERY outbound item SHALL store stable delivery key, profile, session, route, content/artifacts, state, attempt count, not-before, safe error, and platform receipt."
+ac_2  = "DELIVERY SHALL transition through pending, claimed, sent, retry-scheduled, permanent-failure, or cancelled with transactional claims."
+ac_3  = "ADAPTERS SHALL classify retryable and terminal failures and use bounded backoff."
+ac_4  = "THE system SHALL use platform idempotency or receipt identifiers where available and SHALL expose possible duplicates honestly where exactly-once cannot be guaranteed."
+ac_5  = "SCHEDULED, child-completed, commitment, attention, and refinement results MAY use the same outbox according to profile notification policy."
+ac_6  = "A restart/fault suite SHALL fail sends before and after platform acknowledgement and prove claim recovery, deduplication, receipts, cancellation, and visible terminal state."
+
+[req.36]
+title = "Explicit channel/profile routing and group privacy"
+story = "As a multi-channel user, I want every external conversation bound to the correct profile and privacy mode, so that messages cannot leak state across people or groups."
+ac_1  = "ROUTES SHALL match channel, external account, conversation/thread, sender, command prefix, or explicit profile and SHALL have deterministic priority."
+ac_2  = "AMBIGUOUS top-priority routes SHALL fail; unavailable profiles SHALL NOT fall back to another workspace."
+ac_3  = "GROUP routes SHALL declare mention behavior, shared/private memory, participant retention, tool authority, schedule authority, and proactive-post permission."
+ac_4  = "STABLE route policies SHALL support per-conversation, per-sender, per-thread, or explicit-only session selection."
+ac_5  = "THE first production adapter SHALL complete real inbound, reply, restart, schedule, attachment, and isolation journeys before additional adapters count as supported."
+ac_6  = "A cross-identity matrix SHALL prove private/group isolation, ambiguous denial, route updates, deleted profiles, replayed messages, and proactive-post rules."
+
+# --- BACKGROUND REFINEMENT ---
+
+[req.37]
+title = "Guarded reversible background refinement"
+story = "As a user, I want the assistant to improve readable state without silently changing its trusted runtime, so that adaptation remains controllable."
+ac_1  = "REFINEMENT SHALL run from an idle or scheduled SessionAction using a separate reviewer with read-only access to selected transcript and workspace files."
+ac_2  = "ALLOWED targets MAY include persona, preferences, memory, knowledge, explicitly editable rules, and user-owned skills; binaries, credentials, session logs, built-ins, backups, and runtime metadata SHALL be protected."
+ac_3  = "THE reviewer SHALL propose a bounded patch and SHALL have no shell or unrestricted write tool."
+ac_4  = "A Rust transaction service SHALL resolve paths, enforce file/byte limits, snapshot, apply in a temporary view, validate, optionally confirm, atomically commit, and refresh indexes."
+ac_5  = "ANY failure SHALL restore byte-exact prior state; every success SHALL expose a readable diff and one-step undo."
+ac_6  = "NO content change SHALL produce no proactive change notification."
+ac_7  = "An adversarial suite SHALL prove path denial, protected files, prompt injection, malformed patches, concurrent user edits, validation failure, crash rollback, restart, diff, and undo."
+
+# --- CLIENTS AND PRODUCT SURFACES ---
+
+[req.38]
+title = "First-class Rust terminal application"
+story = "As a terminal-first user, I want full runtime control without a browser, so that deep work remains fast and scriptable."
+ac_1  = "THE TUI SHALL use the shared AgentConnection protocol and UI projection types and SHALL NOT own session or agent-loop state."
+ac_2  = "THE TUI SHALL provide streaming chat, multiline composer, history, queue, steer, cancel, retry, branch, resume, sessions, models, goals, plans, children, tools, kernels, artifacts, schedules, commitments, waiting, memory, knowledge, channels, refinement, logs, and diagnostics."
+ac_3  = "THE TUI SHALL support attach and supervised-local modes plus optional authenticated remote mode with bounded startup, buffers, reconnect, retry, and shutdown."
+ac_4  = "ALL critical actions SHALL be keyboard accessible and terminal state SHALL restore on every normal exit, error, panic, and signal."
+ac_5  = "RENDERING SHALL support truecolor, 256-color, no-color, narrow terminals, Unicode width, SSH, multiplexers, and reduced motion without decorative border strokes, glow, purple gradients, or emoji status."
+ac_6  = "A terminal matrix SHALL prove streaming, reconnect, crash recovery, confirmation, long history, resize, paste, external editor, terminal restoration, and parity with shared commands."
+
+[req.39]
+title = "Rust/WASM web application and Rust desktop shell"
+story = "As a visual user, I want a rich persistent application, so that I can supervise sessions, memory, channels, and autonomy without losing active work."
+ac_1  = "THE web backend SHALL be Rust and the owned browser application SHALL use Rust/WASM while communicating only through the shared protocol."
+ac_2  = "THE shell SHALL keep active chat/session subscriptions mounted while navigating sessions, goals, children, tools, memory, knowledge, schedules, commitments, channels, settings, artifacts, and refinement."
+ac_3  = "THE desktop shell SHALL package daemon lifecycle, web assets, notifications, file selection, updates, and browser handoff without implementing alternate agent behavior."
+ac_4  = "BROWSER mutations SHALL require authenticated session, exact origin, CSRF proof, payload/rate limits, and server-side route/profile checks."
+ac_5  = "NO durable credential SHALL enter URLs, browser storage, client bundles, diagnostic payloads, or ordinary JavaScript-accessible state."
+ac_6  = "A real-client suite SHALL prove persistent streaming across navigation, refresh/reconnect, daemon restart, file editing, schedules, channels, refinement diff/undo, and desktop lifecycle."
+
+[req.40]
+title = "Shared UI projections, truthful activity, and accessibility"
+story = "As a user across interfaces, I want consistent and accessible state, so that the agent never appears to do different work in different clients."
+ac_1  = "SNAPSHOTS and events SHALL project session state, active action, messages, goals, plans, children, kernels, waits, commitments, schedules, deliveries, memory changes, usage, confirmations, and presence."
+ac_2  = "CLIENTS SHALL render authoritative projections and SHALL NOT infer completion or running state from local timers or animation."
+ac_3  = "WEB and desktop SHALL meet WCAG 2.2 AA critical paths, visible focus, screen-reader labels, reduced motion, localization-safe layout, text alternatives, and high-contrast themes."
+ac_4  = "VISUAL separation SHALL use background-color contrast rather than decorative border strokes; interfaces SHALL use no glow effects, purple gradients, or emoji-based state language."
+ac_5  = "LONG histories and streams SHALL use bounded virtualization and SHALL preserve terminal states under coalescing and slow-client conditions."
+ac_6  = "A browser/TUI parity matrix SHALL prove equivalent commands and states, accessibility, mobile/narrow layouts, reduced motion, long streams, and zero fabricated progress."
+
+# --- RELIABILITY, OPERATIONS, AND RELEASE ---
+
+[req.41]
+title = "Hierarchical concurrency, backpressure, and cancellation"
+story = "As the operator, I want predictable performance under load, so that one recursive tree or channel cannot starve the system."
+ac_1  = "CONCURRENCY SHALL be bounded at installation, worker, session, provider/account, tool, child, kernel, browser, process, channel, scheduler, and background levels."
+ac_2  = "PER-session queues SHALL preserve ordering while global semaphores enforce fairness."
+ac_3  = "TOOL and kernel output SHALL use bounded channels and spill oversized content to artifacts."
+ac_4  = "LOW-priority initiatives SHALL be suppressed before interactive work is delayed."
+ac_5  = "CANCELLATION SHALL propagate from client/goal to session turn, provider, tools, kernel, and configured children, followed by process termination after a grace period."
+ac_6  = "A saturation suite SHALL cover queue bounds, fairness, slow clients, output floods, cancellation races, process cleanup, and recovery to normal throughput."
+
+[req.42]
+title = "Crash reconciliation and unknown-outcome handling"
+story = "As a user, I want interrupted work recovered honestly, so that restarts neither lose progress nor duplicate external effects."
+ac_1  = "DAEMON startup SHALL migrate state, expire stale claims, rebuild the lazy catalog, restore schedules, waits, deliveries, and channel offsets, then open public endpoints."
+ac_2  = "WORKER recovery SHALL acquire a new generation, validate manifests/log tails, rebuild indexes, restore goals/actions/children/kernel metadata, and reconcile active operations."
+ac_3  = "PROVIDER requests without a committed final SHALL become interrupted and MAY retry according to error and action policy."
+ac_4  = "A repeatable tool MAY retry with the same stable call identity; check-before-retry tools SHALL query state; never-automatic or ambiguous effects SHALL pause for user decision."
+ac_5  = "CLIENTS SHALL distinguish running, waiting, recovering, interrupted, incomplete, failed, cancelled, and completed."
+ac_6  = "A fault-injection suite SHALL kill every process before/after durable boundaries and prove correct reconciliation, no blind external retry, and no phantom running state."
+
+[req.43]
+title = "Configuration, schema migration, and compatibility"
+story = "As an operator upgrading the system, I want validated versioned configuration and state, so that upgrades do not silently reinterpret my agent."
+ac_1  = "CONFIGURATION SHALL layer built-in defaults, global, profile, workspace, session, and action values with documented replace/merge behavior per field."
+ac_2  = "INVALID narrower configuration SHALL leave the previous valid state active and expose a clear warning."
+ac_3  = "PUBLIC protocol, session entries, structured workspace state, plugin interfaces, and transactional records SHALL carry explicit versions."
+ac_4  = "STATE-store migrations SHALL be transactional with backups before destructive change; session JSONL SHALL not be rewritten in place during ordinary startup."
+ac_5  = "USER Markdown SHALL not be mechanically rewritten solely for an application upgrade; indexes SHALL rebuild against new schemas."
+ac_6  = "A migration matrix SHALL cover every supported prior version, failed migration, rollback policy, protocol negotiation, plugin mismatch, and invalid configuration."
+
+[req.44]
+title = "Data export, deletion, portability, and derived-data cleanup"
+story = "As the data owner, I want complete control over persistent state, so that I can leave, reset, or remove information without hidden copies."
+ac_1  = "THE product SHALL separately export and delete sessions, workspaces, memory, knowledge, skills, artifacts, schedules, commitments, routes, channel state, tool experience, and credentials."
+ac_2  = "DELETING source text SHALL remove associated lexical, trigram, vector, cache, summary, and preview projections according to retention policy."
+ac_3  = "EXPORT formats SHALL be documented, versioned, and usable without a running Keith Agent installation where practical."
+ac_4  = "DESTRUCTIVE deletion SHALL identify exact scope and require configured confirmation; partial failure SHALL report remaining data."
+ac_5  = "A lifecycle test SHALL create, export, restore where supported, delete, rebuild, scan for remnants, and prove profile/session isolation."
+
+[req.45]
+title = "Local observability, diagnostics, and privacy-preserving telemetry"
+story = "As an operator, I want to diagnose long-running work without exposing private content, so that reliability can improve safely."
+ac_1  = "LOCAL metrics SHALL cover workers, action queues, models, tools, children, kernels, retrieval, scheduler lag, deliveries, initiatives, and refinement outcomes."
+ac_2  = "TRACES SHALL correlate command, action, turn, provider request, tool call, child, job attempt, wake, and delivery identifiers."
+ac_3  = "PROMPT text, personal memory, channel content, tool output, artifacts, and secrets SHALL NOT become metric labels or default exported traces."
+ac_4  = "REMOTE telemetry export SHALL be opt-in and SHALL disclose exactly which metadata leaves the machine."
+ac_5  = "DIAGNOSTIC bundles SHALL be bounded, redacted, user-reviewable, and exclude credentials and private content by default."
+ac_6  = "A test SHALL inject secret-like data through every subsystem and prove redaction while preserving actionable failure classification."
+
+[req.46]
+title = "Cross-platform execution and reduced-isolation honesty"
+story = "As a user on Linux, macOS, or Windows, I want portable core behavior with honest platform differences, so that unsupported protections do not silently disappear."
+ac_1  = "LINUX SHALL be the reference platform for process isolation, sockets, and packaged execution."
+ac_2  = "MACOS and Windows SHALL provide platform-specific paths, process control, credential storage, local transport, desktop packaging, and the strongest available sandbox behavior."
+ac_3  = "CORE session, workspace, export, and protocol formats SHALL remain portable across supported platforms."
+ac_4  = "WHEN a requested isolation feature is unavailable, the system SHALL fail closed or require explicit reduced-isolation acknowledgement according to profile policy."
+ac_5  = "A platform matrix SHALL prove install, paths, locking, signals/cancellation, credentials, TUI restoration, web/desktop startup, and reduced-isolation messaging."
+
+[req.47]
+title = "Adversarial security and privacy gate"
+story = "As the owner, I want hostile content and guest execution unable to cross boundaries, so that increasing autonomy does not increase ambient authority."
+ac_1  = "THE threat suite SHALL cover path traversal, symlink races, device paths, command/environment injection, SSRF, DNS changes, redirects, malicious web and repository content, archive bombs, and output floods."
+ac_2  = "THE suite SHALL cover cross-profile/channel/session access, forged routes, stale leases, duplicate events, credential exfiltration, browser storage, logs, exports, plugins, MCP, and kernels."
+ac_3  = "THE suite SHALL cover origin, CSRF, authentication, rate limits, payload bounds, malicious Markdown/media, terminal escapes, and attachment handling."
+ac_4  = "BACKGROUND awareness and refinement SHALL treat observed content as data and SHALL NOT allow it to change routing, permissions, or protected files."
+ac_5  = "NO release SHALL pass while a serious containment, cross-scope, credential, destructive-action, or unauthenticated-access issue remains open."
+ac_6  = "THE gate SHALL execute against current packaged binaries and real process boundaries rather than disconnected mock services."
+
+[req.48]
+title = "Performance, soak, and resource-budget acceptance"
+story = "As a long-running user, I want bounded latency and memory over hours and recursive work, so that continuity does not degrade the machine."
+ac_1  = "THE project SHALL publish reference-hardware measurements for daemon readiness, attach, event replay, first acknowledgement, model stream handling, tool events, retrieval, scheduling lag, delivery, and worker recovery."
+ac_2  = "TUI render and web event-to-render latency SHALL remain responsive under declared stream rates, long histories, and multiple children."
+ac_3  = "A multi-hour soak SHALL bound daemon, worker, client, channel, kernel, browser, index, and replay-buffer memory."
+ac_4  = "DISCONNECTED or slow viewers SHALL NOT measurably slow tool execution or grow buffers without bound."
+ac_5  = "LOAD tests SHALL cover multiple workers, channel bursts, recursive trees, schedules, index rebuild, output floods, and repeated client reconnect."
+ac_6  = "PERFORMANCE claims SHALL name hardware, configuration, models/external exclusions, workload, percentiles, and failure behavior."
+
+[req.49]
+title = "Reproducible packaging, installation, and upgrade"
+story = "As a new user, I want a trustworthy installation that starts the complete local system, so that source checkout knowledge is not required."
+ac_1  = "RELEASES SHALL produce versioned daemon, worker, CLI, TUI, channel gateway, tool/browser/kernel runners, web assets, desktop package, built-in skills, provider metadata, and protocol schemas."
+ac_2  = "THE dependency graph SHALL be locked; release artifacts SHALL be signed and accompanied by a software bill of materials and license report."
+ac_3  = "THE daemon and worker SHALL report build ID, protocol version, storage schema, and enabled features."
+ac_4  = "INSTALL, first-run configuration, service start/stop, backup, restore, update, rollback, and uninstall SHALL be documented and tested."
+ac_5  = "A clean-install matrix SHALL connect a real provider, complete a tool turn, restart, restore a session, and remove the installation without leaving undocumented persistent data."
+
+[req.50]
+title = "Keith Agent production acceptance and anti-performance gate"
+story = "As a user, I want proof that the complete agent is durable, useful, personal, proactive, and bounded, so that the architecture is more than a collection of components."
+ac_1  = "A clean-install journey SHALL create a profile, connect two model providers, complete a long tool-using conversation through repeated compaction, create a durable child, kill and recover the worker, and resume the exact selected branch."
+ac_2  = "A personal-assistant journey SHALL edit readable memory, reload it, retrieve it lexically without embeddings, create knowledge links and a skill, correct/delete state, and prove derived-index cleanup."
+ac_3  = "A proactive journey SHALL create a commitment, wait without active compute, survive daemon restart, wake once from a duplicated trigger, complete work, and deliver through a real messaging adapter respecting quiet hours."
+ac_4  = "A smarter-work journey SHALL route direct and complex requests appropriately, build and revise a plan, delegate specialist children, run deterministic checks and bounded review, learn tool-routing history, and produce inspectable artifacts."
+ac_5  = "AN adversarial journey SHALL attack workspaces, network, plugins, MCP, guest kernels, browser, channels, routing, credentials, refinement, reconnect, schedules, deliveries, and deletion and SHALL preserve isolation and honest terminal state."
+ac_6  = "A multi-hour journey SHALL prove bounded resources, fair concurrency, client switching, TUI/web/desktop consistency, channel continuity, idle eviction, and truthful presence with no fabricated activity."
+ac_7  = "NO umbrella or release task SHALL be marked done from source presence, unit tests alone, a rendered UI, an HTTP success, screenshots, simulated external payloads, or model claims; current packaged binaries and real process paths SHALL satisfy every referenced criterion."
+
+# ================================ TASKS ==================================
+
+[tasks]
+heading = "Implementation Plan: Contracts → Rust Foundation → Daemon and Sessions → Providers and Loop → Restricted Execution → Goals and Recursion → Personal State → Life Loop → Channels → Extensions and Refinement → Clients → Reliability and Security → Packaging → Production Acceptance"
+
+[task.1]
+section = "Phase 1 — Contracts and Rust Foundation"
+title   = "Workspace, Common Types, Configuration, Storage Traits, and Test Harness"
+status  = "pending"
+
+[task.1.1]
+title  = "Cargo workspace and dependency-boundary enforcement"
+status = "pending"
+wave   = 1
+do_1   = "Create the complete Cargo workspace and application layout from ../shematics.md"
+do_2   = "Define crate ownership and dependency rules and add automated forbidden-edge checks"
+do_3   = "Configure formatting, linting, compilation, documentation, dependency, license, and security checks"
+do_4   = "Add deterministic local and CI entry points and a clean-checkout build"
+do_5   = "Document no-fake internal test policy and true external boundary adapters"
+reqs   = ["1.1-1.6"]
+
+[task.1.2]
+title  = "Versioned common domain types and serialization contracts"
+status = "pending"
+wave   = 1
+do_1   = "Implement typed IDs, versions, generations, sequences, revisions, UTC timestamps, and common errors"
+do_2   = "Implement canonical serialization and compatibility fixtures for persisted and wire-visible types"
+do_3   = "Add property tests for round trips, unknown fields/variants, IDs, and time-zone separation"
+do_4   = "Generate human-readable schema documentation from the Rust source"
+reqs   = ["1.1", "2.1", "43.3"]
+
+[task.1.3]
+title  = "Configuration layering, profile schema, and validation core"
+status = "pending"
+wave   = 2
+do_1   = "Implement defaults, global, profile, workspace, session, and action configuration layers"
+do_2   = "Define explicit replace, merge, append, and prohibition semantics per field"
+do_3   = "Keep previous valid configuration active when a narrower layer fails validation"
+do_4   = "Add schema versions, migrations, redacted inspection, and change notifications"
+do_5   = "Test deterministic merge, invalid overrides, safety ceilings, and restart"
+reqs   = ["23.1", "43.1-43.6"]
+requires = ["1.2"]
+
+[task.1.4]
+title  = "Transactional state-store and repository traits"
+status = "pending"
+wave   = 2
+do_1   = "Define domain repository traits for leases, catalog, actions, goals, plans, commitments, waits, schedules, routes, deliveries, initiatives, refinement, and tool experience"
+do_2   = "Implement a transactional embedded backend with schema migrations and backup hooks"
+do_3   = "Implement atomic multi-record transitions and fault injection around commit boundaries"
+do_4   = "Test concurrent readers/writers, corruption handling, migration failure, and recovery"
+reqs   = ["3.2", "4.3", "6.6", "43.3-43.6"]
+requires = ["1.2"]
+
+[task.2]
+section = "Phase 2 — AgentConnection and Supervision"
+title   = "Public Protocol, Daemon, Root Catalog, Leases, Workers, and Event Replay"
+status  = "pending"
+
+[task.2.1]
+title  = "AgentConnection command, response, snapshot, and event protocol"
+status = "pending"
+wave   = 3
+do_1   = "Define ClientHello, ServerHello, resume cursors, command envelopes, command results, snapshots, events, and errors"
+do_2   = "Implement framed JSON, local binary, stdio, and WebSocket codecs over one type system"
+do_3   = "Implement protocol negotiation and feature discovery"
+do_4   = "Generate client bindings/models needed by Rust clients and schema documentation"
+do_5   = "Run one conformance journey over every transport"
+reqs   = ["2.1-2.6"]
+requires = ["1.2"]
+
+[task.2.2]
+title  = "Daemon composition root and lazy root-session catalog"
+status = "pending"
+wave   = 4
+do_1   = "Build agentd with public endpoints, lifecycle, structured shutdown, and health"
+do_2   = "Implement lazy discovery and metadata-only root-tree catalog"
+do_3   = "Implement worker start, adoption, monitor, drain, restart, and idle eviction"
+do_4   = "Keep arbitrary execution and model turns outside the daemon"
+do_5   = "Process-test daemon restart and unrelated-worker crash containment"
+reqs   = ["3.1-3.6"]
+requires = ["1.4", "2.1"]
+
+[task.2.3]
+title  = "Root-tree leases, worker generations, and private framing"
+status = "pending"
+wave   = 4
+do_1   = "Implement transactional leases, renewal, expiry, takeover, and stale-writer shutdown"
+do_2   = "Implement length-prefixed authenticated supervisor/worker framing"
+do_3   = "Implement worker generations, ready/heartbeat/idle/fatal/shutdown messages, and ownership checks"
+do_4   = "Add file-level local writer protection as a second guard"
+do_5   = "Race-test simultaneous claims, renewal loss, stale routing, drain, and forced replacement"
+reqs   = ["4.1-4.5"]
+requires = ["2.2"]
+
+[task.2.4]
+title  = "Ordered events, replay buffers, snapshots, and reconnect"
+status = "pending"
+wave   = 5
+do_1   = "Implement per-generation monotonic event sequencing and bounded replay"
+do_2   = "Implement reconstructible snapshots and snapshot-then-delta recovery"
+do_3   = "Implement slow-client bounds, safe coalescing, and non-droppable terminal state"
+do_4   = "Implement multi-client attachment, acknowledgements, detach, and generation gaps"
+do_5   = "Disconnect at every event boundary and prove exact replay or explicit snapshot replacement"
+reqs   = ["8.1-8.6"]
+requires = ["2.3"]
+
+[task.3]
+section = "Phase 3 — AgentSession, Actions, and Branched History"
+title   = "Composable Session Actor, Unified Inbox, JSONL Trees, Branching, and Compaction"
+status  = "pending"
+
+[task.3.1]
+title  = "AgentSession actor and domain state machines"
+status = "pending"
+wave   = 5
+do_1   = "Implement the session actor, mailbox, run states, transition guards, and snapshots"
+do_2   = "Compose bounded input, turn, context, tool, compaction, goal, child, kernel, extension, and writer services"
+do_3   = "Use traits for providers, tools, repositories, channels, and clients"
+do_4   = "Make root and child construction use the same implementation"
+do_5   = "Property-test legal/illegal transitions and restart reconstruction"
+reqs   = ["5.1-5.6"]
+requires = ["1.4", "2.3"]
+
+[task.3.2]
+title  = "Persistent unified action inbox and action pump"
+status = "pending"
+wave   = 6
+do_1   = "Implement SessionAction, sources, priorities, delivery policies, limits, reply routes, and lifecycle"
+do_2   = "Implement FIFO-within-priority selection, expiry, cancellation, steering, and turn-boundary delivery"
+do_3   = "Persist pending/running/waiting/terminal action state"
+do_4   = "Bound queue size and prioritize user work over background candidates"
+do_5   = "Interleave every source across restart and prove deterministic order"
+reqs   = ["6.1-6.6"]
+requires = ["3.1"]
+
+[task.3.3]
+title  = "Append-only JSONL session trees and writer leases"
+status = "pending"
+wave   = 6
+do_1   = "Implement SessionManifest, SessionEntry, payload taxonomy, canonical checksums, and append writer"
+do_2   = "Implement ancestry index, branch creation, selected leaf, labels, archive, and discovery"
+do_3   = "Implement canonical-path write leases and stale owner rejection"
+do_4   = "Implement tail recovery, earlier-corruption quarantine, repair inspection, and export"
+do_5   = "Property-test arbitrary branch trees and crash at each append boundary"
+reqs   = ["7.1-7.4", "7.6-7.7"]
+requires = ["2.3", "3.1"]
+
+[task.3.4]
+title  = "Correct branch-aware compaction and continuation"
+status = "pending"
+wave   = 7
+do_1   = "Implement context-threshold detection and selected-range summarization requests"
+do_2   = "Atomically append compaction, update the active continuation leaf, and rebuild context"
+do_3   = "Keep old leaf active on provider, validation, append, or selection failure"
+do_4   = "Emit memory/commitment candidates only after the session boundary commits"
+do_5   = "Run repeated long-session, branch switch, crash, and continuation-fork regression tests"
+reqs   = ["7.4-7.7", "25.1"]
+requires = ["3.3"]
+
+[task.4]
+section = "Phase 4 — Providers and Robust Turn Execution"
+title   = "Model Registry, Provider Adapters, Streaming Loop, Planning, Review, and Routing Experience"
+status  = "pending"
+
+[task.4.1]
+title  = "Provider core, model registry, and two production adapters"
+status = "pending"
+wave   = 7
+do_1   = "Implement normalized requests, events, content, tools, usage, errors, cancellation, and token counting"
+do_2   = "Implement model registry, profile routes, fallbacks, runtime overrides, and credential references"
+do_3   = "Implement two production provider adapters with streaming and tools"
+do_4   = "Implement error-class-aware retry/fallback and per-profile real construction"
+do_5   = "Run provider conformance and profile-isolation tests"
+reqs   = ["9.1-9.6"]
+requires = ["1.3", "3.1"]
+
+[task.4.2]
+title  = "Production-hardened agent loop"
+status = "pending"
+wave   = 8
+do_1   = "Implement deterministic lifecycle events and normalized streaming assembly"
+do_2   = "Implement tool-call parsing, ID repair, schema handoff, adjacency, and empty-response handling"
+do_3   = "Implement safe read parallelism, serialized effects, output spill, cancellation, and steering"
+do_4   = "Implement context-overflow compaction retry and repeated-failure strategy change"
+do_5   = "Keep partial provider output incomplete and out of final history until commit"
+do_6   = "Run scripted edge-stream and real adapter tests"
+reqs   = ["10.1-10.7"]
+requires = ["3.2", "3.4", "4.1"]
+
+[task.4.3]
+title  = "Direct-versus-planned router and durable plan service"
+status = "pending"
+wave   = 9
+do_1   = "Implement task classification with a direct path for simple work"
+do_2   = "Implement versioned Plan, PlanStep, dependencies, assignees, result checks, state, and revision history"
+do_3   = "Integrate plans into goals, context, session history, clients, and child dispatch"
+do_4   = "Allow user inspection/edit and preserve earlier plan revisions"
+do_5   = "Evaluate routing and plan quality on the fixed corpus"
+reqs   = ["11.1-11.3", "11.6"]
+requires = ["4.2"]
+
+[task.4.4]
+title  = "Deterministic checks and bounded independent review"
+status = "pending"
+wave   = 9
+do_1   = "Implement file, command, schema, content, external-query, reviewer, and user checks"
+do_2   = "Run deterministic checks before optional model review"
+do_3   = "Give reviewer original request, plan, final response, artifacts, and check results"
+do_4   = "Implement accept, revise, ask-user, and stop with bounded pass count"
+do_5   = "Test false-positive, revision, user-decision, deterministic failure, and review-budget paths"
+reqs   = ["11.4-11.6"]
+requires = ["4.3"]
+
+[task.4.5]
+title  = "Tool/provider experience and adaptive route history"
+status = "pending"
+wave   = 10
+do_1   = "Persist task-category success, typed failure, latency, timeout, correction, and recovery for tools/providers"
+do_2   = "Use bounded history in model, provider, tool, skill, timeout, and fallback routing"
+do_3   = "Implement recovery of preference after readiness returns and explicit profile overrides"
+do_4   = "Expose inspect, reset, export, and disable controls"
+do_5   = "Prove behavior change without hidden reasoning or permanent accidental disable"
+reqs   = ["12.1-12.5"]
+requires = ["4.2"]
+
+[task.5]
+section = "Phase 5 — Tools, Isolation, Artifacts, and Persistent Compute"
+title   = "Tool Manager, Restricted Executors, Browser/Web, Secrets, Artifacts, and Kernel Broker"
+status  = "pending"
+
+[task.5.1]
+title  = "Typed tool registry and manager lifecycle"
+status = "pending"
+wave   = 8
+do_1   = "Implement ToolDefinition, behavior, repeatability, confirmation, readiness, invocation, outcome, and progress"
+do_2   = "Implement discovery, readiness cache/recovery, schema validation, allow/confirm/deny, and timeout"
+do_3   = "Implement bounded lifecycle events, safe parallel grouping, cancellation, output limits, and retries"
+do_4   = "Build conformance harness and core read-only test tool"
+reqs   = ["13.1-13.6"]
+requires = ["3.1", "4.1"]
+
+[task.5.2]
+title  = "Workspace-rooted files and restricted shell runner"
+status = "pending"
+wave   = 9
+do_1   = "Implement handle-relative list/read/search/write/edit/rename/copy/delete operations with path and symlink defense"
+do_2   = "Implement atomic writes, expected preimages, size bounds, cancellation, and change summaries"
+do_3   = "Implement argv-safe restricted process runner with minimal environment, working directory, limits, streaming, and process-tree cleanup"
+do_4   = "Implement platform sandbox backends and explicit reduced-isolation state"
+do_5   = "Run traversal, symlink race, device path, environment, process, output flood, cancellation, and cleanup tests"
+reqs   = ["14.1-14.2", "14.5-14.6", "46.2", "47.1"]
+requires = ["5.1"]
+
+[task.5.3]
+title  = "Safe web fetch and isolated browser runner"
+status = "pending"
+wave   = 10
+do_1   = "Implement destination validation across schemes, DNS, redirects, private/special ranges, size, time, and content type"
+do_2   = "Implement isolated browser profiles, semantic observations, bounded downloads, cancellation, and progress"
+do_3   = "Implement configured confirmations for submissions, external communication, deletion, purchases, and account changes"
+do_4   = "Neutralize hostile page content and keep cookies/passwords/raw profiles outside model and client events"
+do_5   = "Run SSRF, rebinding, redirects, prompt injection, popup, download, secret, cancellation, and profile-isolation tests"
+reqs   = ["14.3-14.6", "15.3", "47.1-47.3"]
+requires = ["5.1", "5.2"]
+
+[task.5.4]
+title  = "Credential store and adapter-scoped secret flow"
+status = "pending"
+wave   = 9
+do_1   = "Implement OS/restricted encrypted credential backend and non-secret references"
+do_2   = "Implement provider, channel, MCP, and tool scoped in-memory resolution"
+do_3   = "Implement write-only authenticated browser configuration and redacted inspection"
+do_4   = "Implement secret zeroization where practical and log/event/export filters"
+do_5   = "Scan every normal and failure path for seeded secret leakage"
+reqs   = ["9.5", "15.1-15.5"]
+requires = ["1.3", "2.1"]
+
+[task.5.5]
+title  = "Artifact service and bounded output spill"
+status = "pending"
+wave   = 9
+do_1   = "Implement artifact metadata, content roots, digest validation, atomic creation, and access checks"
+do_2   = "Implement tool/kernel spill with bounded previews and media-type handling"
+do_3   = "Implement child deliverables, list, inspect, download, archive, export, delete, and retention"
+do_4   = "Test concurrent creation, restart, corruption, cross-scope access, oversize, cleanup, and stale refs"
+reqs   = ["16.1-16.6"]
+requires = ["1.4", "3.3"]
+
+[task.5.6]
+title  = "Persistent guest-kernel broker and typed bridge"
+status = "pending"
+wave   = 11
+do_1   = "Implement kernel protocol, broker lifecycle, output flow control, interrupt, timeout, and idle eviction"
+do_2   = "Implement one production guest kernel and a strict Rust/WASM alternative profile"
+do_3   = "Implement restricted mounts, environment, network, process, CPU, memory, and output limits"
+do_4   = "Implement best-effort snapshots, compatibility validation, restore, and excluded-state reporting"
+do_5   = "Implement typed bridge requests for children, messages, goals, MCP, compaction, and artifacts"
+do_6   = "Run process crash, snapshot, incompatible restore, output flood, bridge, and resource tests"
+reqs   = ["17.1-17.6"]
+requires = ["5.2", "5.5"]
+
+[task.6]
+section = "Phase 6 — Goals, Recursive Agents, and Resource Control"
+title   = "Durable Goals, Child Sessions, Messaging, Heartbeats, Limits, and Reclamation"
+status  = "pending"
+
+[task.6.1]
+title  = "Durable goal state machine and autonomous continuation"
+status = "pending"
+wave   = 10
+do_1   = "Implement Goal, states, limits, usage, plan/wait links, summaries, and transition validation"
+do_2   = "Implement continuation by enqueueing ordinary actions"
+do_3   = "Implement pause, resume, edit, cancel, archive, and client projections"
+do_4   = "Enforce turn, token, time, review, child, retry, process, storage, and cost bounds"
+do_5   = "Run restart, every-transition, exact-limit, cancellation, and terminal-summary tests"
+reqs   = ["20.1-20.6"]
+requires = ["3.2", "4.2"]
+
+[task.6.2]
+title  = "Full recursive child sessions and typed messaging"
+status = "pending"
+wave   = 11
+do_1   = "Implement ChildSpec, workspace modes, status, heartbeat, limits, and retention"
+do_2   = "Create children through the same AgentSession runtime and session store"
+do_3   = "Implement durable parent/child messages and artifact references"
+do_4   = "Implement cancellation, orphan detection, restart recovery, archive, and delete"
+do_5   = "Run nested, parallel, failure, parent restart, orphan, artifact, and limit journeys"
+reqs   = ["21.1-21.6"]
+requires = ["5.5", "6.1"]
+
+[task.6.3]
+title  = "Hierarchical budgets, fairness, and idle reclamation"
+status = "pending"
+wave   = 12
+do_1   = "Implement installation, profile, tree, session, goal, action, provider, tool, child, kernel, browser, process, channel, and background limits"
+do_2   = "Implement resource accounting and user-safe projections"
+do_3   = "Implement fair semaphores and priority-aware scheduling"
+do_4   = "Implement independent eviction/reclamation for workers, children, kernels, browsers, MCP, and processes"
+do_5   = "Load-test recursive explosion, starvation, exhaustion, reclamation, and recovery"
+reqs   = ["22.1-22.5", "41.1-41.4"]
+requires = ["6.2"]
+
+[task.7]
+section = "Phase 7 — Profiles, Readable Memory, Knowledge, and Skills"
+title   = "Profile Routing, Workspace State, Consolidation, Hybrid Retrieval, Knowledge, and Procedures"
+status  = "pending"
+
+[task.7.1]
+title  = "Profile registry and real model/workspace routing"
+status = "pending"
+wave   = 11
+do_1   = "Implement AgentProfile, WorkspaceId, model/tool/skill/MCP/plugin/channel/autonomy/notification/refinement settings"
+do_2   = "Implement deterministic route resolution before session creation"
+do_3   = "Persist profile snapshots in session metadata and apply deliberate updates"
+do_4   = "Fail ambiguous, missing, disabled, and unauthorized routes without fallback"
+do_5   = "Prove separate real models, memory, tools, channels, schedules, and workspaces"
+reqs   = ["23.1-23.5"]
+requires = ["1.3", "4.1"]
+
+[task.7.2]
+title  = "Human-readable workspace, atomic writes, and live reload"
+status = "pending"
+wave   = 12
+do_1   = "Create AGENT, USER, RULE, MEMORY, daily, state, knowledge, skills, artifacts, backups, and metadata layout"
+do_2   = "Implement file watchers, validation, version records, and context invalidation"
+do_3   = "Implement atomic replacement, flush/sync, conflicts, proposed merges, snapshots, and restore"
+do_4   = "Protect built-ins, backups, credentials, runtime metadata, and paths outside the profile root"
+do_5   = "Run external edit, conflict, crash, symlink, encoding, large-file, backup, and restore tests"
+reqs   = ["24.1-24.6"]
+requires = ["5.2", "7.1"]
+
+[task.7.3]
+title  = "Structured compaction outputs and memory-policy separation"
+status = "pending"
+wave   = 13
+do_1   = "Define branch summary, memory candidate, daily entry, commitment, and unresolved-item output schema"
+do_2   = "Integrate one summarization pass with committed compaction"
+do_3   = "Route outputs to session, daily, durable memory, current state, and commitments under separate policies"
+do_4   = "Persist source references, sensitivity, retention, correction, supersession, and deletion metadata"
+do_5   = "Test destination separation, bounds, correction, deletion, and restart"
+reqs   = ["25.1-25.6"]
+requires = ["3.4", "7.2"]
+
+[task.7.4]
+title  = "Lexical, trigram, and optional vector retrieval"
+status = "pending"
+wave   = 13
+do_1   = "Implement source parser, chunks, versions, profile filters, and index lifecycle"
+do_2   = "Implement full-text and trigram retrieval with normalized rank merger"
+do_3   = "Implement optional embeddings and vector index behind replaceable traits"
+do_4   = "Implement fallback, corruption quarantine, rebuild, deletion, and source citations"
+do_5   = "Run multilingual, identifier, spelling, semantic, corruption, deletion, and isolation corpus"
+reqs   = ["26.1-26.6"]
+requires = ["7.2"]
+
+[task.7.5]
+title  = "Linked Markdown knowledge service"
+status = "pending"
+wave   = 14
+do_1   = "Implement knowledge page CRUD through workspace transactions"
+do_2   = "Implement relative-link extraction, backlinks, orphan detection, related pages, safe rename, and repair"
+do_3   = "Integrate knowledge sources with retrieval and context"
+do_4   = "Test links, rename, broken links, conflicts, deletion, search, and rebuild"
+reqs   = ["27.1-27.5"]
+requires = ["7.4"]
+
+[task.7.6]
+title  = "Skill discovery, relevance selection, and lifecycle"
+status = "pending"
+wave   = 14
+do_1   = "Implement SKILL package schema, provenance, global/project/profile precedence, and immutable built-ins"
+do_2   = "Implement relevance and ready-tool selection within context budgets"
+do_3   = "Keep loading declarative and route executable resources through tools/plugins/MCP"
+do_4   = "Implement install, update, disable, rollback, delete, and restart-safe history"
+do_5   = "Test discovery, selection, irrelevant exclusion, unavailable tools, precedence, and rollback"
+reqs   = ["28.1-28.3", "28.6"]
+requires = ["7.2", "7.4"]
+
+[task.8]
+section = "Phase 8 — Scheduler, Commitments, Awareness, Attention, and Presence"
+title   = "The Persistent Life Loop"
+status  = "pending"
+
+[task.8.1]
+title  = "Persistent scheduler and missed-run recovery"
+status = "pending"
+wave   = 13
+do_1   = "Implement one-time, interval, calendar, time-zone, state, reply route, and missed-run models"
+do_2   = "Implement transactional claims, stable action IDs, retries, recurring advancement, pause/resume/update/delete"
+do_3   = "Enqueue due work through the AgentSession action inbox"
+do_4   = "Project next/last run, attempts, failures, and safe errors"
+do_5   = "Run DST, time-zone, restart, duplicate claim, catch-up, retry, cancellation, and delivery tests"
+reqs   = ["29.1-29.6"]
+requires = ["3.2", "6.1"]
+
+[task.8.2]
+title  = "Commitment registry and durable waiting service"
+status = "pending"
+wave   = 14
+do_1   = "Implement Commitment, states, source, trigger, reply route, expiry, and user controls"
+do_2   = "Implement time, schedule, child, process, file, repository, channel, external, and user-response triggers"
+do_3   = "Persist trigger before yielding and deduplicate wake actions"
+do_4   = "Release active turn and evict eligible kernel/worker resources"
+do_5   = "Run every trigger across duplicates, cancellation, expiry, worker/daemon restart, and resume"
+reqs   = ["30.1-30.6"]
+requires = ["6.1", "8.1"]
+
+[task.8.3]
+title  = "Awareness normalization and current-state service"
+status = "pending"
+wave   = 15
+do_1   = "Implement AwarenessEvent sources, identities, deduplication, summaries, and artifact refs"
+do_2   = "Implement bounded watchers for files, repositories, children, processes, channels, goals, and idle"
+do_3   = "Implement current focus, project, relationship, commitment, routine, waiting, and feedback projections"
+do_4   = "Coalesce noise and isolate profiles"
+do_5   = "Test source replay, duplicate events, watcher restart/removal, bounds, and deletion"
+reqs   = ["31.1-31.5"]
+requires = ["7.2", "8.2"]
+
+[task.8.4]
+title  = "Attention ranking, initiative decisions, quiet hours, and budgets"
+status = "pending"
+wave   = 16
+do_1   = "Implement initiative candidates and configurable scoring inputs"
+do_2   = "Implement ignore, remember, batch, schedule, ask, start-work, and notify decisions"
+do_3   = "Apply quiet hours, workload, duplicates, autonomy mode, channel budgets, and user priorities"
+do_4   = "Submit selected work through ordinary actions and persist bounded decision history"
+do_5   = "Run longitudinal anti-spam, urgency, batching, workload, daily-limit, and no-event tests"
+reqs   = ["32.1-32.6"]
+requires = ["8.3"]
+
+[task.8.5]
+title  = "Truthful presence and meaningful progress notifications"
+status = "pending"
+wave   = 16
+do_1   = "Implement presence projection from session, action, tool, child, wait, schedule, recovery, and terminal state"
+do_2   = "Implement rate-limited progress transitions and safe channel-friendly summaries"
+do_3   = "Expose timestamps, session/goal links, next wake, and safe errors"
+do_4   = "Reject fabricated typing, cursor, background thought, percentage, and completion states"
+do_5   = "Compare projection to event history across active, waiting, restart, failure, and zero activity"
+reqs   = ["33.1-33.5"]
+requires = ["2.4", "8.2", "8.4"]
+
+[task.9]
+section = "Phase 9 — Multi-Channel Gateway and Durable Delivery"
+title   = "Normalized Messaging, Explicit Routing, First Adapter, Groups, and Outbox"
+status  = "pending"
+
+[task.9.1]
+title  = "Channel core, gateway process, and per-conversation queues"
+status = "pending"
+wave   = 15
+do_1   = "Define InboundMessage, ReplyRoute, attachments, adapter features, send, receipts, and retry classes"
+do_2   = "Build channel-gateway as a separate Rust process using AgentConnection"
+do_3   = "Implement per-session ordering, global concurrency, inbound deduplication, bounded attachments, and reconnect"
+do_4   = "Keep agent loop, tools, and arbitrary memory reads out of the gateway"
+do_5   = "Run adapter conformance with malformed, duplicate, reordered, oversized, and reconnect events"
+reqs   = ["34.1-34.5"]
+requires = ["2.1", "7.1"]
+
+[task.9.2]
+title  = "Transactional delivery outbox and retry workers"
+status = "pending"
+wave   = 16
+do_1   = "Implement delivery model, stable keys, content/artifacts, claims, attempts, safe errors, receipts, and states"
+do_2   = "Implement retry classification/backoff, cancellation, permanent failure, and claim recovery"
+do_3   = "Integrate interactive, scheduled, child, commitment, attention, and refinement responses"
+do_4   = "Expose delivery state in full clients"
+do_5   = "Fault sends around acknowledgement and restart and prove deduplication or honest possible-duplicate state"
+reqs   = ["35.1-35.6"]
+requires = ["9.1"]
+
+[task.9.3]
+title  = "First production messaging adapter"
+status = "pending"
+wave   = 17
+do_1   = "Select one high-value platform and implement authentication, inbound, outbound, attachments, typing/streaming where supported, rate limits, and reconnect"
+do_2   = "Implement stable identity mapping, update cursors, message deduplication, and delivery receipts"
+do_3   = "Route all work through AgentConnection and the shared action inbox"
+do_4   = "Run real inbound, reply, restart, schedule, attachment, failure, and isolation journeys"
+do_5   = "Document setup without exposing tokens or internal routing IDs"
+reqs   = ["36.5", "34.1-34.5", "35.1-35.6"]
+requires = ["9.2"]
+
+[task.9.4]
+title  = "Explicit multi-profile and group routing"
+status = "pending"
+wave   = 17
+do_1   = "Implement route priority and matching by channel, account, conversation/thread, sender, prefix, and explicit profile"
+do_2   = "Implement stable per-conversation, per-sender, per-thread, and explicit-only session policies"
+do_3   = "Implement group mention, memory, participant retention, tools, schedules, and proactive-post rules"
+do_4   = "Fail ambiguous, missing, disabled, unauthorized, and deleted-profile routes"
+do_5   = "Run private/group cross-identity, replay, route-update, and proactive-post matrix"
+reqs   = ["36.1-36.6"]
+requires = ["9.3"]
+
+[task.10]
+section = "Phase 10 — Plugins, MCP, and Reversible Refinement"
+title   = "WASI Extensions, Managed MCP, Background Workspace Evolution, and Learned Skills"
+status  = "pending"
+
+[task.10.1]
+title  = "WASI plugin SDK, host, lifecycle, and safe mode"
+status = "pending"
+wave   = 15
+do_1   = "Define versioned manifest, tool/command hooks, requested resources, and host interface"
+do_2   = "Implement WASI stores with empty ambient authority and configured bounded grants"
+do_3   = "Implement discovery, validation, activation, health, disable, update, migration, uninstall, and safe mode"
+do_4   = "Keep first-party Rust extensions compiled into distributions"
+do_5   = "Run malicious resource, timeout, memory, crash, migration, and cleanup suite"
+reqs   = ["18.1-18.5"]
+requires = ["5.1"]
+
+[task.10.2]
+title  = "Managed MCP client lifecycle and relevant schema selection"
+status = "pending"
+wave   = 15
+do_1   = "Implement stdio/HTTP configuration, credentials, process/network lifecycle, health, reconnect, and cleanup"
+do_2   = "Implement schema cache/version and profile enablement"
+do_3   = "Implement lexical/vector relevant tool projection under context limits"
+do_4   = "Execute MCP calls through normalized bounded sessions and ordinary tool results"
+do_5   = "Run auth, restart, schema change, timeout, malicious output, relevance, isolation, and cleanup tests"
+reqs   = ["19.1-19.5"]
+requires = ["5.1", "5.4", "7.4"]
+
+[task.10.3]
+title  = "Guarded background refinement transaction"
+status = "pending"
+wave   = 18
+do_1   = "Implement idle/scheduled refinement action and restricted read-only reviewer inputs"
+do_2   = "Implement allowed/protected paths, file/byte limits, patch parsing, snapshots, temporary view, and validators"
+do_3   = "Implement optional confirmation, atomic commit, index refresh, diff, undo, and no-change suppression"
+do_4   = "Handle concurrent user edits with conflict rather than overwrite"
+do_5   = "Run prompt injection, protected path, malformed patch, validation, crash rollback, restart, diff, and undo suite"
+reqs   = ["37.1-37.7"]
+requires = ["7.2", "7.4", "8.1"]
+
+[task.10.4]
+title  = "Validation-gated candidate skill synthesis"
+status = "pending"
+wave   = 19
+do_1   = "Detect successful repeated workflows from committed session/tool outcomes"
+do_2   = "Generate secret-free candidate skills with triggers, inputs, steps, validation, failures, and stop conditions"
+do_3   = "Run clean-workspace applicability, safety, and regression cases"
+do_4   = "Require configured review, atomically activate, preserve provenance, and support rollback"
+do_5   = "Reject failed, private, unsafe, malformed, non-improving, or unavailable-tool candidates"
+reqs   = ["28.4-28.7", "37.2-37.6"]
+requires = ["7.6", "10.3"]
+
+[task.11]
+section = "Phase 11 — TUI, Web, Desktop, and Shared Operator State"
+title   = "First-Class Rust Clients with Protocol Parity and Accessible Truthful Presence"
+status  = "pending"
+
+[task.11.1]
+title  = "Shared UI projection model and reducers"
+status = "pending"
+wave   = 17
+do_1   = "Implement SessionSnapshot, session/action/goal/plan/child/kernel/wait/commitment/schedule/delivery/memory/usage/confirmation projections"
+do_2   = "Implement generation-aware snapshot and event reducers"
+do_3   = "Implement presence projection from authoritative runtime state"
+do_4   = "Implement bounded history virtualization contracts and slow-client states"
+do_5   = "Run deterministic reducer, gap, duplicate, out-of-order, coalescing, and no-phantom-state tests"
+reqs   = ["8.1-8.5", "33.1-33.5", "40.1-40.2", "40.5"]
+requires = ["2.4", "6.1", "8.5", "9.2"]
+
+[task.11.2]
+title  = "Ratatui terminal application"
+status = "pending"
+wave   = 18
+do_1   = "Build attach, supervised-local, optional remote, startup, reconnect, and shutdown flows"
+do_2   = "Build streaming chat, composer, history, queue/steer/cancel/retry/branch/resume, sessions, and models"
+do_3   = "Build goals, plans, children, tools, kernels, artifacts, schedules, commitments, waits, memory, knowledge, channels, refinement, logs, and diagnostics"
+do_4   = "Implement keyboard-only use, color fallbacks, Unicode width, narrow terminals, paste/editor, and terminal restoration"
+do_5   = "Enforce restrained visual rules and run terminal portability/recovery matrix"
+reqs   = ["38.1-38.6", "40.4"]
+requires = ["11.1"]
+
+[task.11.3]
+title  = "Rust/WASM web application and authenticated backend"
+status = "pending"
+wave   = 18
+do_1   = "Build authenticated Rust web backend, exact-origin/CSRF mutation boundary, WebSocket connection, and asset delivery"
+do_2   = "Build Rust/WASM responsive shell with persistent mounted conversation and session subscriptions"
+do_3   = "Build sessions, goals, plans, children, tools, memory, knowledge, schedules, commitments, channels, settings, artifacts, and refinement surfaces"
+do_4   = "Keep credentials write-only and out of URLs, browser storage, bundles, and diagnostics"
+do_5   = "Run real-browser navigation, refresh, reconnect, restart, stream, memory edit, schedule, channel, and refinement journeys"
+reqs   = ["39.1-39.2", "39.4-39.6"]
+requires = ["11.1"]
+
+[task.11.4]
+title  = "Rust desktop shell and local lifecycle"
+status = "pending"
+wave   = 19
+do_1   = "Package the web client with daemon discovery/start/stop, local notifications, file integration, updates, and browser handoff"
+do_2   = "Keep all agent behavior behind AgentConnection"
+do_3   = "Implement first-run setup, crash reporting, safe update/rollback, and uninstall state choices"
+do_4   = "Run startup, existing daemon, daemon crash, update, rollback, notifications, file selection, and uninstall tests"
+reqs   = ["39.3", "39.6", "49.4"]
+requires = ["11.3"]
+
+[task.11.5]
+title  = "Accessibility, responsive behavior, parity, and truthful activity gate"
+status = "pending"
+wave   = 20
+do_1   = "Implement WCAG 2.2 AA critical paths, visible focus, screen-reader labels, reduced motion, high contrast, and text alternatives"
+do_2   = "Implement mobile/narrow through wide layouts and localization-safe text"
+do_3   = "Remove decorative borders, glow, purple gradients, emoji status, and fabricated activity"
+do_4   = "Run TUI/web command and projection parity, accessibility automation/manual checks, long history, slow client, and zero-activity tests"
+reqs   = ["40.1-40.6"]
+requires = ["11.2", "11.3"]
+
+[task.12]
+section = "Phase 12 — Reliability, Security, Data Lifecycle, and Diagnostics"
+title   = "Backpressure, Crash Recovery, Adversarial Boundaries, Export/Delete, and Local Observability"
+status  = "pending"
+
+[task.12.1]
+title  = "Hierarchical concurrency, backpressure, fairness, and cancellation"
+status = "pending"
+wave   = 20
+do_1   = "Implement bounded queues and semaphores at every declared hierarchy"
+do_2   = "Implement fairness across trees/sessions and priority for user work"
+do_3   = "Implement bounded output channels, artifact spill, safe event coalescing, and channel backpressure"
+do_4   = "Implement cooperative cancellation and forced executor termination after grace"
+do_5   = "Run saturation, starvation, slow client, output flood, cancellation race, and recovery tests"
+reqs   = ["41.1-41.6"]
+requires = ["6.3", "9.1", "11.1"]
+
+[task.12.2]
+title  = "Daemon, worker, provider, tool, kernel, channel, and refinement recovery"
+status = "pending"
+wave   = 21
+do_1   = "Implement ordered daemon startup recovery and stale-claim expiration"
+do_2   = "Implement worker reconstruction and active provider/tool/process reconciliation"
+do_3   = "Implement repeatable, check-state-first, never-automatic, and ambiguous external outcomes"
+do_4   = "Implement truthful running/waiting/recovering/interrupted/incomplete/failed/cancelled/completed projections"
+do_5   = "Kill every process around durable boundaries and prove no loss, duplicate effect, or phantom state"
+reqs   = ["42.1-42.6"]
+requires = ["3.3", "4.2", "5.6", "8.2", "9.2", "10.3", "12.1"]
+
+[task.12.3]
+title  = "Complete data export, restore, delete, and derived cleanup"
+status = "pending"
+wave   = 21
+do_1   = "Implement versioned export for sessions, workspaces, memory, knowledge, skills, artifacts, schedules, commitments, routes, channel state, and tool history"
+do_2   = "Implement scoped confirmed deletion and partial-failure reporting"
+do_3   = "Remove lexical, trigram, vector, cache, preview, and summary projections associated with deleted sources"
+do_4   = "Implement documented restore where supported and portable inspection elsewhere"
+do_5   = "Run create/export/restore/delete/rebuild/remnant-scan/isolation lifecycle"
+reqs   = ["44.1-44.5"]
+requires = ["7.4", "8.2", "9.2", "10.3"]
+
+[task.12.4]
+title  = "Local metrics, traces, logs, diagnostics, and privacy controls"
+status = "pending"
+wave   = 20
+do_1   = "Implement declared metrics and correlation across commands, actions, turns, providers, tools, children, jobs, wakes, and deliveries"
+do_2   = "Implement structured logs with redaction and bounded retention"
+do_3   = "Implement opt-in remote telemetry disclosure and controls"
+do_4   = "Implement user-reviewable bounded diagnostic bundles"
+do_5   = "Seed secrets/private content through every subsystem and prove redaction with actionable diagnostics"
+reqs   = ["45.1-45.6"]
+requires = ["2.2", "4.2", "5.4"]
+
+[task.12.5]
+title  = "Adversarial security and privacy integration gate"
+status = "pending"
+wave   = 22
+do_1   = "Build the complete filesystem, process, network, content, archive, plugin, MCP, kernel, browser, and secret attack corpus"
+do_2   = "Build cross-profile, channel, session, route, lease, event, schedule, delivery, and deletion isolation attacks"
+do_3   = "Build browser origin, CSRF, authentication, payload, rate, rendering, terminal escape, and attachment attacks"
+do_4   = "Attack awareness and refinement with untrusted instructions and protected-path requests"
+do_5   = "Run against packaged real processes and block release on serious findings"
+reqs   = ["47.1-47.6"]
+requires = ["5.2", "5.3", "5.4", "10.1", "10.2", "10.3", "11.3", "12.2"]
+
+[task.13]
+section = "Phase 13 — Cross-Platform Packaging, Migration, and Performance"
+title   = "Supported Platforms, Reproducible Releases, Clean Install, Upgrade, Rollback, and Soak"
+status  = "pending"
+
+[task.13.1]
+title  = "Protocol, state, session, workspace, and plugin migration suite"
+status = "pending"
+wave   = 21
+do_1   = "Implement transactional state migrations and backups"
+do_2   = "Implement bounded prior-version readers for protocol/session/workspace/plugin schemas"
+do_3   = "Implement explicit migrated-session export rather than in-place JSONL rewrite"
+do_4   = "Implement index rebuild and invalid configuration fallback"
+do_5   = "Run every supported upgrade, failure, compatibility, and rollback policy path"
+reqs   = ["43.1-43.6"]
+requires = ["1.3", "1.4", "2.1", "3.3", "10.1"]
+
+[task.13.2]
+title  = "Linux, macOS, and Windows platform backends"
+status = "pending"
+wave   = 22
+do_1   = "Complete paths, locking, local transports, process control, signals/cancellation, credentials, sandbox, TUI, web, and desktop behavior per platform"
+do_2   = "Keep session, workspace, protocol, and export formats portable"
+do_3   = "Implement fail-closed or explicit reduced-isolation behavior"
+do_4   = "Run the platform acceptance matrix on supported release environments"
+reqs   = ["46.1-46.5"]
+requires = ["5.2", "5.4", "11.2", "11.4", "13.1"]
+
+[task.13.3]
+title  = "Reproducible release artifacts and installation lifecycle"
+status = "pending"
+wave   = 23
+do_1   = "Build daemon, worker, CLI, TUI, channel gateway, runners, web assets, desktop, built-ins, provider metadata, and schemas"
+do_2   = "Lock dependencies, sign artifacts, and generate software bill of materials and license report"
+do_3   = "Expose build/protocol/storage/feature versions"
+do_4   = "Document and test install, first run, service lifecycle, backup, restore, update, rollback, uninstall, and data choices"
+do_5   = "Run clean-install provider/tool/restart/uninstall matrix"
+reqs   = ["49.1-49.5"]
+requires = ["11.5", "12.5", "13.2"]
+
+[task.13.4]
+title  = "Performance, recursive load, and multi-hour soak"
+status = "pending"
+wave   = 23
+do_1   = "Instrument daemon readiness, attach, replay, acknowledgement, stream, tools, retrieval, scheduler, delivery, and recovery"
+do_2   = "Measure TUI/web rendering, long histories, multiple children, and event floods"
+do_3   = "Run multi-hour bounded-memory soak across daemon, workers, clients, channels, kernels, browsers, indexes, and replay"
+do_4   = "Run workers, channel bursts, recursive trees, schedules, rebuilds, output floods, slow/disconnected viewers, and reconnect load"
+do_5   = "Publish hardware, configuration, workload, percentiles, exclusions, and failure behavior"
+reqs   = ["48.1-48.6"]
+requires = ["12.1", "12.2", "13.3"]
+
+[task.14]
+section = "Phase 14 — Keith Agent Production Acceptance"
+title   = "Clean Install, Durable Recursion, Personal Continuity, Proactive Delivery, Smarter Work, Security, and Anti-Performance Gate"
+status  = "pending"
+
+[task.14.1]
+title  = "Clean-install durable recursive runtime journey"
+status = "pending"
+wave   = 24
+do_1   = "Install current release artifacts and create one real profile"
+do_2   = "Connect two real providers and complete a tool-using conversation through repeated compaction"
+do_3   = "Create a durable child, exchange messages/artifacts, kill the worker, reconnect clients, and resume the exact branch"
+do_4   = "Prove goals, plans, limits, kernels, cancellation, and terminal state through packaged binaries"
+reqs   = ["50.1", "50.7"]
+requires = ["13.3", "13.4"]
+
+[task.14.2]
+title  = "Readable personal memory, knowledge, and skill journey"
+status = "pending"
+wave   = 24
+do_1   = "Edit profile and memory files externally and consume them in a later context"
+do_2   = "Retrieve mixed-language content without embeddings and after index corruption/rebuild"
+do_3   = "Create, link, rename, and delete knowledge pages"
+do_4   = "Create, validate, install, reuse, refine, and roll back a skill"
+do_5   = "Correct/delete personal state and prove derived-data cleanup and export"
+reqs   = ["50.2", "50.7"]
+requires = ["10.4", "12.3", "13.3"]
+
+[task.14.3]
+title  = "Commitment, waiting, attention, schedule, and channel journey"
+status = "pending"
+wave   = 24
+do_1   = "Connect the production messaging adapter and establish explicit profile routing"
+do_2   = "Create a commitment and wait while releasing active compute"
+do_3   = "Restart daemon, deliver duplicated trigger, and resume exactly once"
+do_4   = "Complete work and deliver through the outbox while respecting quiet hours, batching, and notification budgets"
+do_5   = "Prove truthful presence and visible delivery/retry state"
+reqs   = ["50.3", "50.7"]
+requires = ["8.5", "9.4", "13.3"]
+
+[task.14.4]
+title  = "Direct, planned, reviewed, and specialist-recursive intelligence journey"
+status = "pending"
+wave   = 25
+do_1   = "Run direct requests without planning overhead and complex requests with durable plans"
+do_2   = "Delegate bounded specialist children in parallel and integrate artifacts"
+do_3   = "Inject failures that require plan revision, deterministic checks, bounded review, and alternate tool/provider routing"
+do_4   = "Prove tool experience changes a later route and remains inspectable/resettable"
+do_5   = "Publish quality, cost, latency, and failure results against the fixed corpus"
+reqs   = ["50.4", "50.7"]
+requires = ["4.4", "4.5", "6.2", "14.1"]
+
+[task.14.5]
+title  = "Adversarial complete-system and data-lifecycle journey"
+status = "pending"
+wave   = 25
+do_1   = "Attack workspace, network, browser, plugins, MCP, kernels, channels, routing, credentials, schedules, deliveries, and refinement"
+do_2   = "Kill processes around external and persistence boundaries and prove unknown outcomes remain honest"
+do_3   = "Attempt cross-profile/session/channel access and data remnant recovery after deletion"
+do_4   = "Prove every persistent/background item is visible, bounded, cancellable, and recoverable"
+do_5   = "Resolve all serious containment and privacy findings before completion"
+reqs   = ["50.5", "50.7"]
+requires = ["12.3", "12.5", "14.3"]
+
+[task.14.6]
+title  = "Multi-hour production composition and final anti-performance gate"
+status = "pending"
+wave   = 26
+do_1   = "Run packaged daemon, multiple workers, TUI, web, desktop, channel, schedules, kernels, browser, plugins, MCP, children, retrieval, and life loop for the declared soak"
+do_2   = "Prove fair concurrency, bounded resources, idle eviction, client switching, reconnect, delivery, and consistent projections"
+do_3   = "Prove every presence/progress statement corresponds to real runtime state and zero activity is never embellished"
+do_4   = "Publish reference hardware, versions, configuration, measurements, failures, and remaining limits"
+do_5   = "Reconcile every phase status only after all referenced criteria pass through current release artifacts and real process paths"
+reqs   = ["50.6-50.7"]
+requires = ["14.1", "14.2", "14.3", "14.4", "14.5"]

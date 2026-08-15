@@ -1,0 +1,688 @@
+# Keith Agent — The Architecture
+
+## Mission
+
+Keith Agent is a persistent personal and professional agent whose work survives the interface, the process, and the moment that created it.
+
+Most assistants are still request-response applications. A message enters, a model produces text, tools may run, and the process eventually stops. Even when such a system has memory or scheduling, those capabilities are often attached as independent features rather than composed into one durable operating model.
+
+Keith Agent begins from a different premise:
+
+> The session is a durable runtime, not a temporary prompt. Every source of work enters that runtime, every child uses the same abstraction, and every user-facing surface observes the same state.
+
+Delta-1 contributes the supervised recursive execution spine: daemon, root-tree workers, AgentSession, a unified action inbox, provider normalization, persistent computation, branched history, goals, compaction, recovery, and retained children.
+
+Gamma-3 contributes the assistant's reach and personal continuity: messaging channels, explicit profile routing, human-readable memory, hybrid retrieval, linked knowledge, proactive delivery, and guarded workspace refinement.
+
+Keith Agent is implemented in Rust. Guest languages, browsers, shells, and compilers remain available as isolated workloads, but they do not own runtime truth.
+
+The objective is not to perform life. The objective is to maintain continuity, notice what matters, honor commitments, initiate useful work, wait efficiently, learn reusable procedures, and return with real results.
+
+---
+
+## The Regression Corpus
+
+The architecture exists to eliminate a specific set of failures.
+
+**The Stateless Chat Failure.** The assistant can remember text but cannot reliably resume the exact work state, active branch, child topology, kernel, goal, or waiting condition after interruption.
+
+**The Client-Bound Failure.** Closing the terminal or refreshing the browser terminates or corrupts work because the client owns too much runtime state.
+
+**The Split-Brain Failure.** Interactive prompts, schedules, channel messages, child results, and autonomous continuation follow separate code paths and therefore behave differently under cancellation, recovery, and persistence.
+
+**The Shallow Delegation Failure.** A so-called child is only a one-shot model call with shared mutable state, no independent history, no durable objective, and no recovery semantics.
+
+**The Memory Black Box Failure.** Personal state is trapped in opaque records or vector indexes that users cannot inspect, correct, export, or truly delete.
+
+**The Context Dump Failure.** More memory is treated as more intelligence, so stale and irrelevant content displaces the current task.
+
+**The Notification Failure.** Proactivity becomes noise because every detected event competes equally for the user's attention.
+
+**The Busy-Wait Failure.** Long-running work keeps a model turn, worker, or polling loop alive when the correct state is simply waiting for a time, process, child, file, message, or external condition.
+
+**The Host-Authority Failure.** Shells, kernels, plugins, and browsers inherit the daemon user's complete filesystem, environment, and credentials.
+
+**The False-Progress Failure.** Interfaces animate work or report completion without a corresponding runtime transition, tool result, child result, or artifact.
+
+**The Self-Mutation Failure.** Background improvement is allowed to rewrite code or identity without confinement, validation, comparison, and rollback.
+
+**The Monolith Failure.** A single session class accumulates protocol, storage, providers, tools, UI, memory, planning, scheduling, and child lifecycle until every change risks every subsystem.
+
+Keith Agent treats each failure as an architectural constraint rather than a prompt-writing problem.
+
+---
+
+## Load-Bearing Ideas
+
+### 1. AgentSession Is the Unit of Agency
+
+A root agent and a durable child are both AgentSessions. They share lifecycle, history, tools, providers, goals, messages, cancellation, compaction, and recovery. The distinction is ownership and scope, not implementation quality.
+
+### 2. Every Source of Work Converges
+
+A user prompt, scheduled job, channel message, child completion, steering instruction, follow-up, and autonomous continuation all become a SessionAction. The action inbox owns ordering and delivery timing.
+
+This prevents the background system from becoming a weaker second agent runtime.
+
+### 3. Processes Are Replaceable; State Is Not
+
+The daemon, workers, kernels, browsers, channel connections, and tool processes may die. Durable session entries, ownership leases, goals, waiting conditions, commitments, schedules, deliveries, workspaces, and artifacts determine recovery.
+
+### 4. Personal State Belongs to the User
+
+Identity, preferences, rules, durable memory, daily notes, knowledge, and skills are readable files. Search indexes are disposable. Background updates are snapshots and patches, never silent replacement.
+
+### 5. Context Selection Is an Intelligence Function
+
+The system does not inject every memory, skill, tool, or prior turn. It selects the active branch, current goal, current state, commitments, relevant memory, relevant knowledge, and relevant tools within a measured token budget.
+
+### 6. Waiting Is a Durable State
+
+An agent waiting for a build, child, message, deadline, deployment, or file change should persist the condition, release active resources, and wake exactly once when the event occurs.
+
+### 7. Initiative Must Compete for Attention
+
+Events generate initiative candidates, not automatic interruptions. Urgency, value, confidence, cost, quiet hours, duplication, workload, and notification limits determine whether to ignore, remember, batch, schedule, ask, act, or notify.
+
+### 8. Intelligence Is a System Property
+
+Smarter behavior comes from direct-versus-planned routing, selective context, model routing, tool experience, specialized children, deterministic checks, bounded review, and reusable skills. It does not require pretending that every request needs a complex planner.
+
+### 9. Recursive Power Requires Resource Accounting
+
+Children, kernels, providers, tools, and background actions consume tokens, time, memory, processes, and attention. Every tree has explicit ceilings and idle eviction.
+
+### 10. Rust Owns the Platform Boundary
+
+All owned daemons, workers, protocols, providers, storage logic, clients, channels, memory services, schedulers, plugin hosts, and execution brokers are Rust. External interpreters are guests controlled through typed protocols and restricted process boundaries.
+
+---
+
+## The Nine Layers
+
+```text
+┌──────────────────────────────────────────────────────────────────────┐
+│                         EXPERIENCE LAYER                             │
+│  CLI · TUI · Web · Desktop · Messaging · Notifications             │
+├──────────────────────────────────────────────────────────────────────┤
+│                         CONNECTION LAYER                             │
+│  AgentConnection · Attach · Reconnect · Snapshot · Ordered Events  │
+├──────────────────────────────────────────────────────────────────────┤
+│                         SUPERVISION LAYER                            │
+│  Daemon · Root-Tree Catalog · Worker Leases · Routing · Scheduler  │
+├──────────────────────────────────────────────────────────────────────┤
+│                           SESSION LAYER                              │
+│  AgentSession Actor · Action Inbox · Branches · Goals · Children   │
+├──────────────────────────────────────────────────────────────────────┤
+│                        INTELLIGENCE LAYER                            │
+│  Context · Direct/Plan Router · Planner · Reviewer · Model Router  │
+├──────────────────────────────────────────────────────────────────────┤
+│                          EXECUTION LAYER                             │
+│  Agent Loop · Tools · Kernel Broker · Browser · MCP · Plugins      │
+├──────────────────────────────────────────────────────────────────────┤
+│                       PERSONAL-STATE LAYER                           │
+│  Profiles · Current State · Memory · Knowledge · Skills · Search   │
+├──────────────────────────────────────────────────────────────────────┤
+│                         LIFE-LOOP LAYER                              │
+│  Awareness · Attention · Commitments · Waiting · Initiative        │
+├──────────────────────────────────────────────────────────────────────┤
+│                        PERSISTENCE LAYER                             │
+│  Session JSONL · State Store · Markdown · Indexes · Artifacts      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+Dependencies flow downward through interfaces. Experience code cannot mutate session storage. Channel code cannot execute tools. Provider code cannot access workspaces. Guest code cannot access daemon state.
+
+---
+
+## Process Topology
+
+```text
+agentd
+  ├── connection server
+  ├── session catalog and root-tree leases
+  ├── worker supervisor
+  ├── profile and channel router
+  ├── persistent scheduler
+  ├── awareness and attention services
+  ├── delivery outbox
+  └── credential references
+
+agent-worker <one per active root session tree>
+  ├── root AgentSession
+  ├── retained child AgentSessions
+  ├── per-session action inboxes
+  ├── provider streams
+  ├── context, goals, plans, review, and compaction
+  ├── child messages and heartbeats
+  └── kernel/tool coordination
+
+restricted executors
+  ├── tool-runner
+  ├── browser-runner
+  ├── kernel-runner
+  └── WASI plugin stores
+
+edge processes
+  ├── channel-gateway
+  └── web/API endpoint
+```
+
+One worker owns one root session tree. This is a crash-containment and lifecycle boundary. It is not the sandbox for arbitrary code; that boundary belongs to the restricted executors.
+
+---
+
+## Data Flow: Standard Turn
+
+```text
+Prompt arrives from client or channel
+  │
+  ▼
+Route profile, workspace, session, and reply destination
+  │
+  ▼
+Submit SessionAction through AgentConnection
+  │
+  ▼
+Daemon finds or starts the root-tree worker
+  │
+  ▼
+AgentSession admits the action through the unified inbox
+  │
+  ▼
+Context Builder
+  ├── selected session branch and compaction boundary
+  ├── profile identity, user preferences, and rules
+  ├── active goal, plan, commitments, and waiting state
+  ├── current-state records
+  ├── relevant memory and knowledge
+  ├── relevant skills and tool schemas
+  └── child status, limits, and remaining budget
+  │
+  ▼
+Direct/Plan Router
+  ├── direct response or single-tool work
+  └── milestone plan for complex work
+  │
+  ▼
+Provider-Neutral Agent Loop
+  ├── normalized streaming response
+  ├── tool-call validation
+  ├── bounded safe parallel reads
+  ├── serialized state-changing tools
+  ├── cancellation and steering
+  ├── repeated-failure detection
+  └── context-overflow compaction
+  │
+  ▼
+Optional Result Review
+  ├── deterministic checks first
+  ├── bounded reviewer for important work
+  └── accept, revise, ask, or stop
+  │
+  ▼
+Commit final session entries and usage
+  │
+  ▼
+Stream ordered events to attached clients
+  │
+  ▼
+If channel-originated, place response in durable delivery outbox
+```
+
+---
+
+## Data Flow: Recursive Work
+
+```text
+Parent identifies independent bounded objective
+  │
+  ▼
+Create ChildSpec
+  ├── objective and deliverable
+  ├── relevant context only
+  ├── workspace mode
+  ├── allowed tools and model route
+  ├── token, turn, time, process, and depth limits
+  └── retention policy
+  │
+  ▼
+Worker creates full child AgentSession
+  │
+  ├── independent transcript
+  ├── independent goal
+  ├── dedicated artifacts
+  ├── typed parent/child messages
+  └── heartbeat, cancellation, and recovery
+  │
+  ▼
+Child returns structured result and artifact references
+  │
+  ▼
+Parent reviews and integrates; child cannot claim parent completion
+```
+
+Stateless helper calls remain available for classification, ranking, summarization, and bounded review. They are not durable children and cannot use tools or mutate personal state.
+
+---
+
+## Data Flow: Life Loop
+
+```text
+Real event arrives
+  ├── user or channel message
+  ├── due schedule or commitment
+  ├── file or repository change
+  ├── child or process transition
+  ├── external connector event
+  ├── goal inactivity
+  └── session idle
+  │
+  ▼
+Awareness normalizes and deduplicates the event
+  │
+  ▼
+Current-state projection updates
+  │
+  ▼
+Attention creates and scores initiative candidates
+  ├── urgency
+  ├── expected value
+  ├── confidence
+  ├── resource cost
+  ├── interruption cost
+  ├── quiet hours
+  ├── recent duplicates
+  └── notification budget
+  │
+  ▼
+Decision
+  ├── ignore
+  ├── remember
+  ├── batch into digest
+  ├── schedule
+  ├── ask user
+  ├── start bounded work
+  └── notify
+  │
+  ▼
+Any work enters the ordinary AgentSession action inbox
+```
+
+The life loop never calls the model or tools through a private path. It is a source of ordinary actions, not a second agent.
+
+---
+
+## Data Flow: Durable Waiting
+
+```text
+Agent reaches an external dependency
+  │
+  ▼
+Persist WaitingCondition before yielding
+  ├── time
+  ├── user response
+  ├── child terminal state
+  ├── process exit
+  ├── file/repository change
+  ├── channel message
+  └── external connector predicate
+  │
+  ▼
+Release model turn, kernel if idle, and eventually worker if tree idle
+  │
+  ▼
+Matching event arrives with stable wake identity
+  │
+  ▼
+Deduplicate and enqueue ResumeWaiting action exactly once
+  │
+  ▼
+Reconstruct session and continue goal
+```
+
+Waiting is visible, cancellable, and bounded by expiry or user policy.
+
+---
+
+## Memory Architecture
+
+Keith Agent intentionally uses multiple forms of state because they solve different problems.
+
+### Session history
+
+Append-only branched JSONL is canonical for conversation and session lifecycle. Parent-linked entries preserve alternate branches without rewriting history.
+
+### Human-readable workspace
+
+```text
+AGENT.md
+USER.md
+RULE.md
+MEMORY.md
+state/
+memory/YYYY-MM-DD.md
+knowledge/*.md
+skills/*/SKILL.md
+```
+
+These files are canonical for personal assistant state. Users can edit them outside the application.
+
+### Transactional state
+
+Worker leases, action queues, goals, plans, commitments, waiting conditions, schedules, routes, deliveries, initiative candidates, and background transactions use a transactional embedded store.
+
+### Derived search
+
+Keyword, trigram, and optional vector indexes are rebuildable projections. Search failure never deletes or invalidates the source Markdown.
+
+### Artifacts
+
+Large tool output, documents, child deliverables, screenshots, kernel snapshots, and exports are stable session artifacts with bounded references.
+
+---
+
+## Memory Consolidation
+
+One structured summarization pass can produce:
+
+- A branch compaction summary.
+- Candidate durable memories.
+- A daily-note entry.
+- Open commitments.
+- Unresolved follow-ups.
+
+The outputs do not share authority merely because they came from one call. The branch summary belongs to session reconstruction. The daily entry is chronological. Durable memory receives only appropriate stable content. Commitments enter their own lifecycle.
+
+Retrieved text retains source path and section so the user can inspect or correct it.
+
+---
+
+## Planning, Review, and Smarter Work
+
+The runtime distinguishes simple and complex work.
+
+**Direct work** avoids planning overhead and handles ordinary conversation or one-step actions.
+
+**Planned work** receives a restated outcome, constraints, milestones, dependencies, assignees, result checks, budgets, and revision history.
+
+Important work follows:
+
+```text
+plan → execute → deterministic checks → bounded review → accept/revise/ask/stop
+```
+
+Deterministic checks include tests, schema validation, file inspection, status queries, and artifact inspection. A reviewer sees the original request and produced results rather than merely accepting the executor's summary.
+
+Model routing selects fast classification, primary reasoning, summarization, vision, or review models according to profile, task, latency, context, tool support, recent reliability, and budget.
+
+Tool experience records operational success, latency, failure categories, and corrective workflows. It helps avoid repeating failed strategies without pretending to train the underlying model.
+
+---
+
+## Profiles and Routing
+
+A profile binds:
+
+- Identity and display name.
+- Workspace.
+- Persona, user, and rules files.
+- Primary and fallback models.
+- Thinking level.
+- Tools, skills, MCP servers, and plugins.
+- Memory and knowledge scope.
+- Channels and routes.
+- Autonomy and notification settings.
+- Background-refinement policy.
+
+External channel identity maps explicitly to a profile and session policy. Missing or ambiguous routing fails visibly. The system never silently substitutes another profile or workspace.
+
+Group routes separately define mention behavior, shared/private memory, schedule authority, tool authority, and proactive-posting rules.
+
+---
+
+## Channels and Delivery
+
+Channel adapters are edge processes. They normalize messages, preserve per-conversation ordering, stage attachments, suppress duplicate events, and map platform behavior into the common connection protocol.
+
+They do not read personal memory or execute the model loop.
+
+Responses and proactive notifications enter a durable outbox:
+
+```text
+pending → claimed → sent
+                 ├── retry scheduled → pending
+                 ├── permanently failed
+                 └── cancelled
+```
+
+External platforms cannot always guarantee exactly-once delivery. Stable delivery keys, platform receipts, and visible failure state provide the strongest honest behavior possible.
+
+---
+
+## Background Refinement
+
+Background refinement reviews completed conversations and declarative workspace state. It can propose changes to persona, preferences, memory, knowledge, editable rules, and user-owned skills.
+
+It cannot modify Rust binaries, daemon policy, credentials, session logs, built-in skills, backups, or paths outside the workspace.
+
+```text
+idle trigger
+  → restricted reviewer reads allowed inputs
+  → reviewer proposes patch
+  → Rust service resolves and checks every path
+  → snapshot affected files
+  → apply in temporary view
+  → validate syntax, schema, bounds, and custom checks
+  → confirm when configured
+  → atomically commit
+  → rebuild affected indexes
+  → notify only if content changed
+```
+
+Any failure restores byte-exact prior state. Every successful update has a readable diff and one-step undo.
+
+---
+
+## Persistent Computation
+
+The Rust kernel broker owns kernel startup, transport, execution, output flow control, interrupt, timeout, snapshot, restore, idle eviction, and resource accounting.
+
+Python is an optional sandboxed guest, not a platform implementation dependency. Rust REPL, WASM, and other guest kernels may implement the same protocol.
+
+Guest code cannot access AgentSession objects directly. Child creation, messages, goals, MCP, compaction, and artifacts use typed bridge requests back to the worker.
+
+In a strict Rust-only deployment, a Rust or WASM kernel replaces Python with an explicit loss of Python-library compatibility.
+
+---
+
+## Tool and Extension Boundaries
+
+Every tool declares schemas, behavior, timeout, output limit, repeatability, confirmation policy, and safe-parallel status.
+
+Read-only operations may run concurrently within bounds. Writes, shell commands, browser mutations, scheduler changes, and external communication are serialized unless a tool explicitly provides safe semantics.
+
+Skills are declarative instructions and resources. They have no execution authority by being loaded.
+
+First-party plugins compile into the Rust distribution. Third-party plugins use WASI components or separate processes with no ambient filesystem, network, environment, or credential access.
+
+MCP configuration and lifecycle live in the daemon. Session context receives only enabled and relevant MCP schemas.
+
+---
+
+## Security Boundaries
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│ UNTRUSTED EXTERNAL                                      │
+│ Models · Websites · Repositories · Channels · MCP      │
+└───────────────────────┬─────────────────────────────────┘
+                        │ normalized bounded protocols
+                        ▼
+┌─────────────────────────────────────────────────────────┐
+│ DAEMON AUTHORITY                                        │
+│ Sessions · Routing · Schedules · Credentials · Outbox  │
+└───────────────────────┬─────────────────────────────────┘
+                        │ private worker protocol
+                        ▼
+┌─────────────────────────────────────────────────────────┐
+│ WORKER AUTHORITY                                        │
+│ AgentSession · Context · Providers · Goals · Children  │
+└───────────────────────┬─────────────────────────────────┘
+                        │ restricted execution requests
+                        ▼
+┌─────────────────────────────────────────────────────────┐
+│ GUEST EXECUTION                                         │
+│ Shell · Browser · Kernel · Third-party plugins         │
+│ No daemon DB · No global credentials · Scoped mounts   │
+└─────────────────────────────────────────────────────────┘
+```
+
+Default protections:
+
+- Workspace confinement enabled.
+- Handle-relative file access and symlink defense.
+- Private/local network blocking for general web tools.
+- Redirect and DNS revalidation.
+- Minimal process environment.
+- Secrets supplied only to the specific owning adapter.
+- Third-party extensions isolated.
+- External sends and destructive actions confirmable by profile.
+- Cross-profile memory and workspace isolation.
+- Origin, CSRF, payload, and rate limits for browser mutations.
+- Bounded attachments, archives, outputs, and decompression.
+
+Security settings may become stricter at profile, workspace, session, or action scope. A narrower scope cannot relax an installation prohibition.
+
+---
+
+## Presence and User Experience
+
+Presence is a projection of actual state:
+
+- Available.
+- Thinking.
+- Using tools.
+- Waiting for child.
+- Waiting for external event.
+- Paused for user.
+- Scheduled to resume.
+- Completed.
+- Failed.
+
+The web and TUI consume the same snapshot and ordered-event model. The desktop application packages the web surface and daemon lifecycle. Messaging clients expose the subset their platform supports.
+
+Every full client supports session navigation, branching, stop, steering, retry, goals, plans, children, tools, artifacts, schedules, commitments, waiting, memory, knowledge, channels, and background-change review.
+
+Visual separation uses background contrast rather than decorative border strokes. Interfaces use restrained motion, no glow effects, no purple gradients, and no emoji-based status language. Accessibility includes keyboard-complete critical paths, visible focus, screen-reader labels, reduced motion, high contrast, and text alternatives.
+
+---
+
+## Recovery Model
+
+### Client disconnect
+
+Work continues according to action policy. Reconnect uses worker generation and event sequence. The server sends deltas when retained or a fresh snapshot followed by newer events.
+
+### Worker crash
+
+The supervisor creates a new generation, acquires the root-tree lease, validates session tails, reconstructs sessions and children, restores pending state, and marks unknown operations interrupted.
+
+### Provider failure
+
+Classify the failure, retry transient errors, use configured fallbacks, or stop. Partial content remains incomplete rather than being committed as a final answer.
+
+### Tool failure
+
+Persist structured failure, detect repeated identical attempts, change strategy within bounds, or terminate honestly. Non-repeatable external operations are checked before any retry.
+
+### Kernel failure
+
+Restart and restore the latest compatible best-effort snapshot. Report excluded variables or processes.
+
+### Search corruption
+
+Quarantine the derived index, continue with available retrieval modes, and rebuild from source files.
+
+### Channel failure
+
+Keep the delivery in its durable state, back off, and expose retry or permanent failure.
+
+### Refinement failure
+
+Restore the snapshot and leave source files unchanged.
+
+---
+
+## Non-Goals
+
+- No model-weight training in the runtime.
+- No claim of consciousness, emotion, or independent personhood.
+- No separate background agent loop.
+- No lightweight child presented as a durable agent.
+- No opaque vector index as the only copy of personal memory.
+- No client-specific runtime truth.
+- No unrestricted host execution merely because the user is local.
+- No third-party native code loaded into the daemon.
+- No automatic background mutation of trusted binaries or protected configuration.
+- No guarantee of external exactly-once delivery where a platform cannot provide it.
+- No hosted multi-tenant control plane in the first release.
+- No broad channel catalog, marketplace, or unattended high-impact operation before the core recovery path is proven.
+
+---
+
+## Verification Strategy
+
+Tests are executable contracts. Stubs are allowed only at true external boundaries; internal domain behavior uses real implementations and persisted formats.
+
+1. **Session durability:** Kill a worker during provider and tool activity; recover the exact committed branch, goal, pending actions, and children.
+2. **Reconnect:** Disconnect clients at every event boundary; prove ordered replay or explicit snapshot replacement without duplicate prompts.
+3. **Action convergence:** Mix user, steering, child, schedule, awareness, and follow-up actions; prove one ordering model.
+4. **Recursion:** Run durable children through completion, failure, cancellation, restart, and retention while enforcing depth and resource limits.
+5. **Memory ownership:** Edit and delete files outside the application; prove reload, retrieval update, derived-data deletion, and index rebuild.
+6. **Waiting:** Release active resources, restart the daemon, deliver a duplicated trigger, and resume once.
+7. **Channels:** Replay inbound events and fail outbound sends across restart; prove routing isolation and visible delivery state.
+8. **Refinement:** Attempt protected paths and invalid changes; prove rejection, byte-exact rollback, readable diff, and undo.
+9. **Sandboxing:** Attack paths, symlinks, network destinations, environment variables, plugins, kernels, and browsers; prove confinement.
+10. **Life loop:** Prove quiet hours, deduplication, batching, initiative limits, and truthful presence from real state.
+11. **Smarter work:** Compare direct, planned, recursive, and reviewed execution on a fixed corpus and publish task-quality, cost, latency, and failure results.
+12. **Clean install:** Start from release artifacts, configure two providers and one channel, complete a long recursive task, restart, and receive a scheduled result.
+
+No phase is complete because source exists, a UI renders, an endpoint returns success, or a model says work is done. Acceptance uses current packaged binaries and real process paths.
+
+---
+
+## Build Order
+
+```text
+contracts and formats
+  → Rust workspace and storage
+  → AgentConnection and daemon
+  → workers, AgentSession, action inbox, session trees
+  → providers and robust tool loop
+  → restricted execution and persistent kernels
+  → goals, planning, review, children, and recovery
+  → profiles, Markdown memory, retrieval, knowledge, and skills
+  → schedules, commitments, waiting, awareness, and attention
+  → channels and delivery
+  → plugins and MCP
+  → TUI, web, and desktop
+  → background refinement and learned skills
+  → adversarial, soak, packaging, and clean-install acceptance
+```
+
+Every wave leaves a runnable vertical slice. Later phases extend one runtime rather than replacing earlier paths.
+
+---
+
+## Final Statement
+
+Keith Agent is Delta-1's durable recursive execution model made useful as an everyday assistant through Gamma-3's distribution, readable memory, proactive delivery, and reversible adaptation.
+
+It feels alive through continuity, selective attention, fulfilled commitments, useful initiative, and truthful presence.
+
+It becomes smarter through context selection, planning, model routing, tool experience, recursive specialization, deterministic checks, and review.
+
+It becomes autonomous through durable goals, event-driven wake-up, explicit waiting, resource limits, recoverable execution, and reversible action.
+
+The runtime is Rust. The state belongs to the user. The process may die. The work continues.

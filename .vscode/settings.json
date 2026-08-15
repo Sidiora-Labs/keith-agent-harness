@@ -1,0 +1,10 @@
+{
+    "chat.mcp.serverSampling": {
+        "agent-keith/.mcp.json: codify": {
+            "allowedModels": [
+                "copilotcli/auto",
+                "copilot/auto"
+            ]
+        }
+    }
+}
