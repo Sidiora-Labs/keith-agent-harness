@@ -1231,7 +1231,7 @@ requires = ["7.4", "8.2", "9.2", "10.3"]
 
 [task.12.4]
 title  = "Local metrics, traces, logs, diagnostics, and privacy controls"
-status = "pending"
+status = "done"
 wave   = 20
 do_1   = "Implement declared metrics and correlation across commands, actions, turns, providers, tools, children, jobs, wakes, and deliveries"
 do_2   = "Implement structured logs with redaction and bounded retention"

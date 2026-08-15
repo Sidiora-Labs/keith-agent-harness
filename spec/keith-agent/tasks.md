@@ -417,7 +417,7 @@
     - Implement documented restore where supported and portable inspection elsewhere
     - Run create/export/restore/delete/rebuild/remnant-scan/isolation lifecycle
     - _Requirements: 44.1-44.5_
-  - [ ] 12.4 Local metrics, traces, logs, diagnostics, and privacy controls
+  - [x] 12.4 Local metrics, traces, logs, diagnostics, and privacy controls
     - Implement declared metrics and correlation across commands, actions, turns, providers, tools, children, jobs, wakes, and deliveries
     - Implement structured logs with redaction and bounded retention
     - Implement opt-in remote telemetry disclosure and controls
