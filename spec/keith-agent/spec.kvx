@@ -1091,7 +1091,7 @@ requires = ["5.1"]
 
 [task.10.2]
 title  = "Managed MCP client lifecycle and relevant schema selection"
-status = "pending"
+status = "done"
 wave   = 15
 do_1   = "Implement stdio/HTTP configuration, credentials, process/network lifecycle, health, reconnect, and cleanup"
 do_2   = "Implement schema cache/version and profile enablement"

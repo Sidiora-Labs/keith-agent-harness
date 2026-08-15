@@ -334,7 +334,7 @@
     - Keep first-party Rust extensions compiled into distributions
     - Run malicious resource, timeout, memory, crash, migration, and cleanup suite
     - _Requirements: 18.1-18.5_
-  - [ ] 10.2 Managed MCP client lifecycle and relevant schema selection
+  - [x] 10.2 Managed MCP client lifecycle and relevant schema selection
     - Implement stdio/HTTP configuration, credentials, process/network lifecycle, health, reconnect, and cleanup
     - Implement schema cache/version and profile enablement
     - Implement lexical/vector relevant tool projection under context limits
