@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 keith-agent-types = { path = "../agent-types" }
+keith-artifacts = { path = "../artifacts" }
 keith-model-registry = { path = "../model-registry" }
 keith-provider-core = { path = "../provider-core" }
 keith-session-store = { path = "../session-store" }

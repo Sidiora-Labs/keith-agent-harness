@@ -815,7 +815,7 @@ requires = ["1.3", "2.1"]
 
 [task.5.5]
 title  = "Artifact service and bounded output spill"
-status = "pending"
+status = "done"
 wave   = 9
 do_1   = "Implement artifact metadata, content roots, digest validation, atomic creation, and access checks"
 do_2   = "Implement tool/kernel spill with bounded previews and media-type handling"

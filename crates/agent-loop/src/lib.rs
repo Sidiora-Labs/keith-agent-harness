@@ -3,6 +3,7 @@
 use keith_agent_types::{
     ArtifactId, EntityId, ProfileId, TimestampError, ToolCallId, TurnId, UtcTimestamp,
 };
+use keith_artifacts::{ArtifactError, OutputSpill};
 use keith_model_registry::{CredentialResolver, ModelPurpose, ModelRegistry, RegistryError};
 use keith_provider_core::{
     CancellationToken, ContentBlock, Message, MessageRole, ModelEvent, ModelRequest, StopReason,
@@ -15,9 +16,6 @@ use keith_session_store::{
 use keith_tool_core::{ToolExecutionError, ToolExecutor, ToolInvocation};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -132,54 +130,6 @@ impl ContextCompactor for ConservativeCompactor {
     }
 }
 
-pub trait OutputSpill: Send + Sync {
-    /// # Errors
-    ///
-    /// Returns an artifact error when the bytes cannot be stored durably.
-    fn spill(&self, bytes: &[u8]) -> Result<SpilledOutput, AgentLoopError>;
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SpilledOutput {
-    pub artifact_id: ArtifactId,
-    pub path: PathBuf,
-    pub bytes: usize,
-}
-
-pub struct FileOutputSpill {
-    root: PathBuf,
-}
-
-impl FileOutputSpill {
-    /// # Errors
-    ///
-    /// Returns an I/O error when the artifact directory cannot be created or resolved.
-    pub fn open(root: impl AsRef<Path>) -> Result<Self, AgentLoopError> {
-        fs::create_dir_all(root.as_ref())?;
-        Ok(Self {
-            root: fs::canonicalize(root.as_ref())?,
-        })
-    }
-}
-
-impl OutputSpill for FileOutputSpill {
-    fn spill(&self, bytes: &[u8]) -> Result<SpilledOutput, AgentLoopError> {
-        let artifact_id = ArtifactId::new();
-        let path = self.root.join(format!("{artifact_id}.bin"));
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        Ok(SpilledOutput {
-            artifact_id,
-            path,
-            bytes: bytes.len(),
-        })
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentLoopConfig {
     pub max_turns: u32,
@@ -219,6 +169,8 @@ pub enum AgentLoopError {
     Session(#[from] SessionStoreError),
     #[error("artifact output failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("artifact service failed: {0}")]
+    Artifact(#[from] ArtifactError),
     #[error("clock failed: {0}")]
     Time(#[from] TimestampError),
     #[error("model response was empty")]
@@ -539,8 +491,8 @@ impl<'a> AgentLoop<'a> {
             let spilled = self.spill.spill(&bytes)?;
             (
                 format!(
-                    "Tool output stored as artifact {} ({} bytes)",
-                    spilled.artifact_id, spilled.bytes
+                    "Tool output stored as artifact {} ({} bytes, {}). Preview:\n{}",
+                    spilled.artifact_id, spilled.bytes, spilled.media_type, spilled.preview
                 ),
                 Some(spilled.artifact_id),
             )
@@ -845,6 +797,7 @@ fn add_usage(total: &mut Usage, next: Usage) {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::fs;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::process::Command;
@@ -853,6 +806,10 @@ mod tests {
     use std::time::Duration;
 
     use keith_agent_types::{Generation, RootTreeId, SessionId, WorkerId, WorkspaceId};
+    use keith_artifacts::{
+        ArtifactLimits, ArtifactScope, ArtifactService, ArtifactSource, ArtifactSpill,
+        RetentionPolicy,
+    };
     use keith_model_registry::{ModelRoute, ModelSelection};
     use keith_provider_adapters::{OpenAiProvider, ProviderHttpConfig};
     use keith_provider_core::{
@@ -1092,13 +1049,26 @@ mod tests {
         ProviderCredential::new("test-credential")
     }
 
+    fn test_spill(path: &std::path::Path) -> ArtifactSpill {
+        Arc::new(ArtifactService::open(path, ArtifactLimits::default()).unwrap()).scoped_spill(
+            ArtifactScope {
+                root_tree_id: RootTreeId::new(),
+                session_id: SessionId::new(),
+                profile_id: ProfileId::new(),
+            },
+            ArtifactSource::Tool,
+            "auto",
+            RetentionPolicy::Retain,
+        )
+    }
+
     #[test]
     fn text_turn_commits_only_after_complete_stream_and_orders_subscribers() {
         let provider = Arc::new(ScriptedProvider::new(vec![text_response("hello")])) as Arc<_>;
         let (_directory, store, session_id, profile_id, mut writer) = session();
         let registry = registry(provider, &profile_id);
         let artifacts = tempfile::tempdir().unwrap();
-        let spill = FileOutputSpill::open(artifacts.path()).unwrap();
+        let spill = test_spill(artifacts.path());
         let observed = Arc::new(Mutex::new(Vec::new()));
         let first = Arc::clone(&observed);
         let second = Arc::clone(&observed);
@@ -1158,7 +1128,7 @@ mod tests {
         let (_directory, store, session_id, profile_id, mut writer) = session();
         let registry = registry(provider, &profile_id);
         let artifacts = tempfile::tempdir().unwrap();
-        let spill = FileOutputSpill::open(artifacts.path()).unwrap();
+        let spill = test_spill(artifacts.path());
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&events);
         let mut loop_ = AgentLoop::new(
@@ -1213,7 +1183,7 @@ mod tests {
         let (_directory, store, session_id, profile_id, mut writer) = session();
         let registry = registry(provider, &profile_id);
         let artifacts = tempfile::tempdir().unwrap();
-        let spill = FileOutputSpill::open(artifacts.path()).unwrap();
+        let spill = test_spill(artifacts.path());
         let config = AgentLoopConfig {
             inline_tool_output_bytes: 8,
             ..AgentLoopConfig::default()
@@ -1271,7 +1241,7 @@ mod tests {
         let (_directory, _store, _session_id, profile_id, mut writer) = session();
         let first_registry = registry(provider, &profile_id);
         let artifacts = tempfile::tempdir().unwrap();
-        let spill = FileOutputSpill::open(artifacts.path()).unwrap();
+        let spill = test_spill(artifacts.path());
         let mut model_request = request(Vec::new());
         model_request.messages.extend([
             Message {
@@ -1347,7 +1317,7 @@ mod tests {
         let (_directory, _store, _session_id, profile_id, mut writer) = session();
         let registry = registry(provider, &profile_id);
         let artifacts = tempfile::tempdir().unwrap();
-        let spill = FileOutputSpill::open(artifacts.path()).unwrap();
+        let spill = test_spill(artifacts.path());
         let config = AgentLoopConfig {
             identical_failure_limit: 2,
             ..AgentLoopConfig::default()
@@ -1457,7 +1427,7 @@ mod tests {
         let (_directory, _store, _session_id, profile_id, mut writer) = session();
         let registry = registry(provider, &profile_id);
         let artifacts = tempfile::tempdir().unwrap();
-        let spill = FileOutputSpill::open(artifacts.path()).unwrap();
+        let spill = test_spill(artifacts.path());
         let mut model_request = request(Vec::new());
         model_request.model = "model-a".into();
         let mut loop_ = AgentLoop::new(

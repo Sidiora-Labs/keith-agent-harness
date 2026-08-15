@@ -168,7 +168,7 @@
     - Implement secret zeroization where practical and log/event/export filters
     - Scan every normal and failure path for seeded secret leakage
     - _Requirements: 9.5, 15.1-15.5_
-  - [ ] 5.5 Artifact service and bounded output spill
+  - [x] 5.5 Artifact service and bounded output spill
     - Implement artifact metadata, content roots, digest validation, atomic creation, and access checks
     - Implement tool/kernel spill with bounded previews and media-type handling
     - Implement child deliverables, list, inspect, download, archive, export, delete, and retention
