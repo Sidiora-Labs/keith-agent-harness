@@ -558,7 +558,7 @@ reqs   = ["1.1-1.6"]
 
 [task.1.2]
 title  = "Versioned common domain types and serialization contracts"
-status = "pending"
+status = "done"
 wave   = 1
 do_1   = "Implement typed IDs, versions, generations, sequences, revisions, UTC timestamps, and common errors"
 do_2   = "Implement canonical serialization and compatibility fixtures for persisted and wire-visible types"

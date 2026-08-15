@@ -10,7 +10,13 @@ fn main() -> ExitCode {
         Some("ci") => ci(),
         Some("clean-checkout") => clean_checkout(),
         Some("dependency-policy") => dependency_policy(&workspace_root()),
-        _ => Err("usage: cargo xtask <ci|clean-checkout|dependency-policy>".into()),
+        Some("schema-doc") => schema_document(
+            &workspace_root(),
+            matches!(env::args().nth(2).as_deref(), Some("--write")),
+        ),
+        _ => Err(
+            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]>".into(),
+        ),
     };
 
     match result {
@@ -34,6 +40,7 @@ fn ci() -> Result<(), String> {
     let root = workspace_root();
     run(&root, "cargo", &["fmt", "--all", "--", "--check"])?;
     dependency_policy(&root)?;
+    schema_document(&root, false)?;
     run(
         &root,
         "cargo",
@@ -60,6 +67,28 @@ fn ci() -> Result<(), String> {
         "RUSTDOCFLAGS",
         "-D warnings",
     )
+}
+
+fn schema_document(root: &Path, write: bool) -> Result<(), String> {
+    let path = root.join("docs/reference/common-types.md");
+    let expected = keith_agent_types::schema_markdown().map_err(|error| error.to_string())?;
+    if write {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::write(&path, expected).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let actual = fs::read_to_string(&path)
+        .map_err(|error| format!("schema document {} is missing: {error}", path.display()))?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "schema document {} is stale; run `cargo run -p keith-xtask -- schema-doc --write`",
+            path.display()
+        ))
+    }
 }
 
 fn clean_checkout() -> Result<(), String> {

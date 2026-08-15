@@ -14,7 +14,7 @@
     - Add deterministic local and CI entry points and a clean-checkout build
     - Document no-fake internal test policy and true external boundary adapters
     - _Requirements: 1.1-1.6_
-  - [ ] 1.2 Versioned common domain types and serialization contracts
+  - [x] 1.2 Versioned common domain types and serialization contracts
     - Implement typed IDs, versions, generations, sequences, revisions, UTC timestamps, and common errors
     - Implement canonical serialization and compatibility fixtures for persisted and wire-visible types
     - Add property tests for round trips, unknown fields/variants, IDs, and time-zone separation
