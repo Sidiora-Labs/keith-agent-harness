@@ -685,7 +685,7 @@ requires = ["2.3", "3.1"]
 
 [task.3.4]
 title  = "Correct branch-aware compaction and continuation"
-status = "pending"
+status = "done"
 wave   = 7
 do_1   = "Implement context-threshold detection and selected-range summarization requests"
 do_2   = "Atomically append compaction, update the active continuation leaf, and rebuild context"

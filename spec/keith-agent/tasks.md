@@ -90,7 +90,7 @@
     - Implement tail recovery, earlier-corruption quarantine, repair inspection, and export
     - Property-test arbitrary branch trees and crash at each append boundary
     - _Requirements: 7.1-7.4, 7.6-7.7_
-  - [ ] 3.4 Correct branch-aware compaction and continuation
+  - [x] 3.4 Correct branch-aware compaction and continuation
     - Implement context-threshold detection and selected-range summarization requests
     - Atomically append compaction, update the active continuation leaf, and rebuild context
     - Keep old leaf active on provider, validation, append, or selection failure

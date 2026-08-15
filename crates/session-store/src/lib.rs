@@ -182,7 +182,7 @@ pub enum SessionEntryPayload {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionEntry {
     pub version: SchemaVersion,
@@ -306,6 +306,106 @@ impl SessionIndex {
         Ok(entries)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the selected branch cannot be reconstructed.
+    pub fn compaction_request(
+        &self,
+        manifest: &SessionManifest,
+        estimated_tokens: u64,
+        policy: CompactionPolicy,
+    ) -> Result<Option<CompactionRequest>, SessionStoreError> {
+        validate_compaction_policy(policy)?;
+        if estimated_tokens < policy.trigger_tokens {
+            return Ok(None);
+        }
+        let Some(selected_leaf) = &manifest.active_leaf else {
+            return Ok(None);
+        };
+        let ancestry = self.ancestry(selected_leaf)?;
+        let previous_index = ancestry
+            .iter()
+            .rposition(|entry| matches!(entry.payload, SessionEntryPayload::Compaction { .. }));
+        let range_index = previous_index.map_or(0, |index| index + 1);
+        let Some(range_start) = ancestry.get(range_index) else {
+            return Ok(None);
+        };
+        Ok(Some(CompactionRequest {
+            id: EntityId::new(),
+            session_id: manifest.session_id.clone(),
+            selected_leaf: selected_leaf.clone(),
+            range_start: range_start.id.clone(),
+            range_end: selected_leaf.clone(),
+            previous_boundary: previous_index.map(|index| ancestry[index].id.clone()),
+            target_tokens: policy.target_tokens,
+            max_summary_bytes: policy.max_summary_bytes,
+            max_candidates: policy.max_candidates,
+            max_candidate_bytes: policy.max_candidate_bytes,
+        }))
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the selected branch or a compaction boundary is inconsistent.
+    pub fn reconstruct_context(
+        &self,
+        leaf: &EntryId,
+    ) -> Result<ReconstructedContext, SessionStoreError> {
+        let ancestry = self.ancestry(leaf)?;
+        let mut model = None;
+        let mut thinking_level = None;
+        let mut compaction_summary = None;
+        let mut boundary_index = None;
+        for (index, entry) in ancestry.iter().enumerate() {
+            match &entry.payload {
+                SessionEntryPayload::ModelChanged {
+                    provider,
+                    model: selected_model,
+                } => model = Some((provider.clone(), selected_model.clone())),
+                SessionEntryPayload::ThinkingChanged { level } => {
+                    thinking_level = Some(level.clone());
+                }
+                SessionEntryPayload::Compaction {
+                    summary,
+                    compacted_through,
+                } => {
+                    if !ancestry[..index]
+                        .iter()
+                        .any(|candidate| candidate.id == *compacted_through)
+                    {
+                        return Err(SessionStoreError::InvalidCompaction(
+                            "compaction boundary is not on the selected ancestry".into(),
+                        ));
+                    }
+                    compaction_summary = Some(summary.clone());
+                    boundary_index = Some(index);
+                }
+                SessionEntryPayload::UserMessage { .. }
+                | SessionEntryPayload::AssistantMessage { .. }
+                | SessionEntryPayload::ToolCall { .. }
+                | SessionEntryPayload::ToolResult { .. }
+                | SessionEntryPayload::BranchSummary { .. }
+                | SessionEntryPayload::GoalChanged { .. }
+                | SessionEntryPayload::PlanChanged { .. }
+                | SessionEntryPayload::ChildLinked { .. }
+                | SessionEntryPayload::Usage { .. }
+                | SessionEntryPayload::Lifecycle { .. }
+                | SessionEntryPayload::Custom { .. } => {}
+            }
+        }
+        let entries = boundary_index.map_or_else(
+            || ancestry.clone(),
+            |index| ancestry.iter().skip(index + 1).cloned().collect(),
+        );
+        Ok(ReconstructedContext {
+            selected_leaf: leaf.clone(),
+            compaction_summary,
+            model,
+            thinking_level,
+            entries,
+        })
+    }
+
     fn insert(&mut self, entry: SessionEntry) -> Result<(), SessionStoreError> {
         if self.entries.contains_key(&entry.id) {
             return Err(SessionStoreError::DuplicateEntry(entry.id));
@@ -368,6 +468,121 @@ pub struct SessionExport {
     pub entries: Vec<SessionEntry>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompactionPolicy {
+    pub trigger_tokens: u64,
+    pub target_tokens: u64,
+    pub max_summary_bytes: usize,
+    pub max_candidates: usize,
+    pub max_candidate_bytes: usize,
+}
+
+impl Default for CompactionPolicy {
+    fn default() -> Self {
+        Self {
+            trigger_tokens: 96_000,
+            target_tokens: 32_000,
+            max_summary_bytes: 256 * 1_024,
+            max_candidates: 128,
+            max_candidate_bytes: 16 * 1_024,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionRequest {
+    pub id: EntityId,
+    pub session_id: SessionId,
+    pub selected_leaf: EntryId,
+    pub range_start: EntryId,
+    pub range_end: EntryId,
+    pub previous_boundary: Option<EntryId>,
+    pub target_tokens: u64,
+    pub max_summary_bytes: usize,
+    pub max_candidates: usize,
+    pub max_candidate_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryKind {
+    Preference,
+    PersonalFact,
+    ProjectContext,
+    Routine,
+    Relationship,
+    Commitment,
+    Procedure,
+    DailySummary,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sensitivity {
+    Public,
+    Personal,
+    Sensitive,
+    Secret,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionClass {
+    CurrentState,
+    Daily,
+    Durable,
+    DoNotStore,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryCandidateDraft {
+    pub id: EntityId,
+    pub kind: MemoryKind,
+    pub text: String,
+    pub source_entries: Vec<EntryId>,
+    pub sensitivity: Sensitivity,
+    pub retention: RetentionClass,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitmentDraft {
+    pub id: EntityId,
+    pub description: String,
+    pub source_entries: Vec<EntryId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionOutput {
+    pub request_id: EntityId,
+    pub session_summary: String,
+    pub memory_candidates: Vec<MemoryCandidateDraft>,
+    pub daily_entry: Option<String>,
+    pub open_commitments: Vec<CommitmentDraft>,
+    pub unresolved_items: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactionEmission {
+    pub boundary: SessionEntry,
+    pub memory_candidates: Vec<MemoryCandidateDraft>,
+    pub daily_entry: Option<String>,
+    pub open_commitments: Vec<CommitmentDraft>,
+    pub unresolved_items: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReconstructedContext {
+    pub selected_leaf: EntryId,
+    pub compaction_summary: Option<String>,
+    pub model: Option<(String, String)>,
+    pub thinking_level: Option<String>,
+    pub entries: Vec<SessionEntry>,
+}
+
 #[derive(Debug, Error)]
 pub enum SessionStoreError {
     #[error("session storage I/O failed: {0}")]
@@ -404,6 +619,10 @@ pub enum SessionStoreError {
     InvalidLabel,
     #[error("history corruption at line {line}: {reason}")]
     CorruptHistory { line: usize, reason: String },
+    #[error("compaction configuration or output is invalid: {0}")]
+    InvalidCompaction(String),
+    #[error("compaction selected leaf changed before commit")]
+    StaleCompaction,
 }
 
 #[derive(Clone, Debug)]
@@ -690,9 +909,61 @@ impl SessionWriter {
         let mut history = OpenOptions::new().append(true).open(&history_path)?;
         history.write_all(&bytes)?;
         history.sync_all()?;
-        self.manifest.active_leaf = Some(entry.id.clone());
-        write_manifest(&self.directory, &self.manifest)?;
+        let mut next_manifest = self.manifest.clone();
+        next_manifest.active_leaf = Some(entry.id.clone());
+        write_manifest(&self.directory, &next_manifest)?;
+        self.manifest = next_manifest;
         Ok(entry)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the active ancestry is corrupt or the policy is invalid.
+    pub fn request_compaction(
+        &self,
+        estimated_tokens: u64,
+        policy: CompactionPolicy,
+    ) -> Result<Option<CompactionRequest>, SessionStoreError> {
+        self.ensure_writable()?;
+        parse_complete_history(&self.directory.join(HISTORY_FILE))?.compaction_request(
+            &self.manifest,
+            estimated_tokens,
+            policy,
+        )
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error for stale selection, invalid structured output, or a failed durable commit.
+    pub fn commit_compaction(
+        &mut self,
+        request: &CompactionRequest,
+        output: CompactionOutput,
+        timestamp: UtcTimestamp,
+    ) -> Result<CompactionEmission, SessionStoreError> {
+        self.ensure_writable()?;
+        if request.session_id != self.manifest.session_id
+            || self.manifest.active_leaf.as_ref() != Some(&request.selected_leaf)
+        {
+            return Err(SessionStoreError::StaleCompaction);
+        }
+        let index = parse_complete_history(&self.directory.join(HISTORY_FILE))?;
+        validate_compaction_output(request, &output, &index)?;
+        let boundary = self.append(
+            Some(request.selected_leaf.clone()),
+            timestamp,
+            SessionEntryPayload::Compaction {
+                summary: output.session_summary,
+                compacted_through: request.range_end.clone(),
+            },
+        )?;
+        Ok(CompactionEmission {
+            boundary,
+            memory_candidates: output.memory_candidates,
+            daily_entry: output.daily_entry,
+            open_commitments: output.open_commitments,
+            unresolved_items: output.unresolved_items,
+        })
     }
 
     /// # Errors
@@ -704,8 +975,11 @@ impl SessionWriter {
         if !index.entries.contains_key(leaf) {
             return Err(SessionStoreError::MissingEntry(leaf.clone()));
         }
-        self.manifest.active_leaf = Some(leaf.clone());
-        write_manifest(&self.directory, &self.manifest)
+        let mut next_manifest = self.manifest.clone();
+        next_manifest.active_leaf = Some(leaf.clone());
+        write_manifest(&self.directory, &next_manifest)?;
+        self.manifest = next_manifest;
+        Ok(())
     }
 
     /// # Errors
@@ -725,8 +999,11 @@ impl SessionWriter {
         if !index.entries.contains_key(leaf) {
             return Err(SessionStoreError::MissingEntry(leaf.clone()));
         }
-        self.manifest.branch_labels.insert(label, leaf.clone());
-        write_manifest(&self.directory, &self.manifest)
+        let mut next_manifest = self.manifest.clone();
+        next_manifest.branch_labels.insert(label, leaf.clone());
+        write_manifest(&self.directory, &next_manifest)?;
+        self.manifest = next_manifest;
+        Ok(())
     }
 
     /// # Errors
@@ -734,8 +1011,11 @@ impl SessionWriter {
     /// Returns an error when the archived manifest cannot be made durable.
     pub fn archive(&mut self) -> Result<(), SessionStoreError> {
         self.ensure_writable()?;
-        self.manifest.archived = true;
-        write_manifest(&self.directory, &self.manifest)
+        let mut next_manifest = self.manifest.clone();
+        next_manifest.archived = true;
+        write_manifest(&self.directory, &next_manifest)?;
+        self.manifest = next_manifest;
+        Ok(())
     }
 
     /// # Errors
@@ -833,6 +1113,128 @@ fn parse_complete_history(path: &Path) -> Result<SessionIndex, SessionStoreError
     Ok(inspection.index)
 }
 
+fn validate_compaction_policy(policy: CompactionPolicy) -> Result<(), SessionStoreError> {
+    if policy.target_tokens == 0
+        || policy.trigger_tokens <= policy.target_tokens
+        || policy.max_summary_bytes == 0
+        || policy.max_candidates == 0
+        || policy.max_candidate_bytes == 0
+    {
+        Err(SessionStoreError::InvalidCompaction(
+            "threshold, target, summary, and candidate limits must be consistent".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_compaction_output(
+    request: &CompactionRequest,
+    output: &CompactionOutput,
+    index: &SessionIndex,
+) -> Result<(), SessionStoreError> {
+    if output.request_id != request.id {
+        return Err(SessionStoreError::InvalidCompaction(
+            "structured output belongs to another request".into(),
+        ));
+    }
+    if output.session_summary.trim().is_empty()
+        || output.session_summary.len() > request.max_summary_bytes
+    {
+        return Err(SessionStoreError::InvalidCompaction(
+            "session summary is empty or oversized".into(),
+        ));
+    }
+    let candidate_count = output
+        .memory_candidates
+        .len()
+        .saturating_add(output.open_commitments.len())
+        .saturating_add(output.unresolved_items.len());
+    if candidate_count > request.max_candidates {
+        return Err(SessionStoreError::InvalidCompaction(
+            "structured output has too many candidates".into(),
+        ));
+    }
+    let ancestry = index.ancestry(&request.selected_leaf)?;
+    let start = ancestry
+        .iter()
+        .position(|entry| entry.id == request.range_start)
+        .ok_or_else(|| {
+            SessionStoreError::InvalidCompaction("range start is outside selected ancestry".into())
+        })?;
+    let end = ancestry
+        .iter()
+        .position(|entry| entry.id == request.range_end)
+        .ok_or_else(|| {
+            SessionStoreError::InvalidCompaction("range end is outside selected ancestry".into())
+        })?;
+    if start > end || request.range_end != request.selected_leaf {
+        return Err(SessionStoreError::InvalidCompaction(
+            "selected compaction range is inconsistent".into(),
+        ));
+    }
+    if request.previous_boundary.as_ref()
+        != start.checked_sub(1).map(|previous| &ancestry[previous].id)
+    {
+        return Err(SessionStoreError::InvalidCompaction(
+            "previous boundary does not precede selected range".into(),
+        ));
+    }
+    let selected_ids = ancestry[start..=end]
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<BTreeSet<_>>();
+    for candidate in &output.memory_candidates {
+        validate_candidate_text(&candidate.text, request.max_candidate_bytes)?;
+        validate_sources(&candidate.source_entries, &selected_ids)?;
+    }
+    for commitment in &output.open_commitments {
+        validate_candidate_text(&commitment.description, request.max_candidate_bytes)?;
+        validate_sources(&commitment.source_entries, &selected_ids)?;
+    }
+    if output
+        .daily_entry
+        .as_ref()
+        .is_some_and(|text| text.trim().is_empty() || text.len() > request.max_candidate_bytes)
+        || output
+            .unresolved_items
+            .iter()
+            .any(|text| text.trim().is_empty() || text.len() > request.max_candidate_bytes)
+    {
+        return Err(SessionStoreError::InvalidCompaction(
+            "daily or unresolved text is empty or oversized".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_candidate_text(text: &str, max_bytes: usize) -> Result<(), SessionStoreError> {
+    if text.trim().is_empty() || text.len() > max_bytes {
+        Err(SessionStoreError::InvalidCompaction(
+            "candidate text is empty or oversized".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_sources(
+    source_entries: &[EntryId],
+    selected_ids: &BTreeSet<EntryId>,
+) -> Result<(), SessionStoreError> {
+    if source_entries.is_empty()
+        || source_entries
+            .iter()
+            .any(|entry| !selected_ids.contains(entry))
+    {
+        Err(SessionStoreError::InvalidCompaction(
+            "candidate sources must belong to the selected range".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_new_session(session: &NewSession) -> Result<(), SessionStoreError> {
     let parent_valid = match session.kind {
         SessionKind::Root => session.parent_session_id.is_none(),
@@ -924,6 +1326,32 @@ mod tests {
                 content: vec![ContentBlock::Text { text: text.into() }],
                 provider_metadata: BTreeMap::new(),
             },
+        }
+    }
+
+    fn compaction_output(
+        request: &CompactionRequest,
+        source: &EntryId,
+        summary: &str,
+    ) -> CompactionOutput {
+        CompactionOutput {
+            request_id: request.id.clone(),
+            session_summary: summary.into(),
+            memory_candidates: vec![MemoryCandidateDraft {
+                id: EntityId::new(),
+                kind: MemoryKind::ProjectContext,
+                text: "durable candidate".into(),
+                source_entries: vec![source.clone()],
+                sensitivity: Sensitivity::Personal,
+                retention: RetentionClass::Durable,
+            }],
+            daily_entry: Some("daily entry".into()),
+            open_commitments: vec![CommitmentDraft {
+                id: EntityId::new(),
+                description: "finish the task".into(),
+                source_entries: vec![source.clone()],
+            }],
+            unresolved_items: vec!["confirm the result".into()],
         }
     }
 
@@ -1080,6 +1508,187 @@ mod tests {
             store.acquire_writer(&session_id, identity(2)),
             Err(SessionStoreError::Archived(_))
         ));
+    }
+
+    #[test]
+    fn compaction_threshold_commit_and_context_rebuild_follow_selected_ancestry() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+        let model = writer
+            .append(
+                None,
+                UtcTimestamp::UNIX_EPOCH,
+                SessionEntryPayload::ModelChanged {
+                    provider: "provider-a".into(),
+                    model: "model-a".into(),
+                },
+            )
+            .unwrap();
+        let message_entry = writer
+            .append(
+                Some(model.id),
+                UtcTimestamp::from_unix_millis(1),
+                message("long context"),
+            )
+            .unwrap();
+        let policy = CompactionPolicy {
+            trigger_tokens: 100,
+            target_tokens: 40,
+            ..CompactionPolicy::default()
+        };
+        assert!(writer.request_compaction(99, policy).unwrap().is_none());
+        let request = writer.request_compaction(100, policy).unwrap().unwrap();
+        let emission = writer
+            .commit_compaction(
+                &request,
+                compaction_output(&request, &message_entry.id, "first summary"),
+                UtcTimestamp::from_unix_millis(2),
+            )
+            .unwrap();
+        assert_eq!(emission.memory_candidates.len(), 1);
+        assert_eq!(
+            writer.manifest().active_leaf,
+            Some(emission.boundary.id.clone())
+        );
+        let continuation = writer
+            .append(
+                Some(emission.boundary.id),
+                UtcTimestamp::from_unix_millis(3),
+                message("after boundary"),
+            )
+            .unwrap();
+        let context = store
+            .load_index(&session_id)
+            .unwrap()
+            .reconstruct_context(&continuation.id)
+            .unwrap();
+        assert_eq!(context.compaction_summary.as_deref(), Some("first summary"));
+        assert_eq!(context.model, Some(("provider-a".into(), "model-a".into())));
+        assert_eq!(context.entries.len(), 1);
+        assert_eq!(context.entries[0].id, continuation.id);
+    }
+
+    #[test]
+    fn invalid_and_stale_compactions_leave_the_previous_leaf_active() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+        let root = writer
+            .append(None, UtcTimestamp::UNIX_EPOCH, message("root"))
+            .unwrap();
+        let left = writer
+            .append(
+                Some(root.id.clone()),
+                UtcTimestamp::from_unix_millis(1),
+                message("left"),
+            )
+            .unwrap();
+        let request = writer
+            .request_compaction(100_000, CompactionPolicy::default())
+            .unwrap()
+            .unwrap();
+        let mut invalid = compaction_output(&request, &left.id, "");
+        invalid.session_summary.clear();
+        assert!(matches!(
+            writer.commit_compaction(&request, invalid, UtcTimestamp::from_unix_millis(2)),
+            Err(SessionStoreError::InvalidCompaction(_))
+        ));
+        assert_eq!(writer.manifest().active_leaf, Some(left.id.clone()));
+        let right = writer
+            .append(
+                Some(root.id),
+                UtcTimestamp::from_unix_millis(3),
+                message("right"),
+            )
+            .unwrap();
+        assert!(matches!(
+            writer.commit_compaction(
+                &request,
+                compaction_output(&request, &left.id, "stale"),
+                UtcTimestamp::from_unix_millis(4),
+            ),
+            Err(SessionStoreError::StaleCompaction)
+        ));
+        assert_eq!(writer.manifest().active_leaf, Some(right.id));
+    }
+
+    #[test]
+    fn append_failure_exposes_no_candidates_and_keeps_the_manifest_leaf() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+        let leaf = writer
+            .append(None, UtcTimestamp::UNIX_EPOCH, message("leaf"))
+            .unwrap();
+        let request = writer
+            .request_compaction(100_000, CompactionPolicy::default())
+            .unwrap()
+            .unwrap();
+        fs::remove_file(writer.directory.join(HISTORY_FILE)).unwrap();
+        assert!(
+            writer
+                .commit_compaction(
+                    &request,
+                    compaction_output(&request, &leaf.id, "summary"),
+                    UtcTimestamp::from_unix_millis(1),
+                )
+                .is_err()
+        );
+        assert_eq!(writer.manifest().active_leaf, Some(leaf.id.clone()));
+        assert_eq!(
+            store.manifest(&session_id).unwrap().active_leaf,
+            Some(leaf.id)
+        );
+    }
+
+    #[test]
+    fn repeated_compaction_advances_ranges_without_sibling_drift() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+        let mut leaf = writer
+            .append(None, UtcTimestamp::UNIX_EPOCH, message("start"))
+            .unwrap();
+        for round in 0..3 {
+            let request = writer
+                .request_compaction(100_000, CompactionPolicy::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.range_end, leaf.id);
+            let emission = writer
+                .commit_compaction(
+                    &request,
+                    compaction_output(&request, &leaf.id, &format!("summary {round}")),
+                    UtcTimestamp::from_unix_millis(round * 2 + 1),
+                )
+                .unwrap();
+            leaf = writer
+                .append(
+                    Some(emission.boundary.id),
+                    UtcTimestamp::from_unix_millis(round * 2 + 2),
+                    message("continuation"),
+                )
+                .unwrap();
+        }
+        let index = store.load_index(&session_id).unwrap();
+        let context = index.reconstruct_context(&leaf.id).unwrap();
+        assert_eq!(context.compaction_summary.as_deref(), Some("summary 2"));
+        assert_eq!(context.entries.len(), 1);
+        assert_eq!(
+            index
+                .children_of(Some(&leaf.parent_id.clone().unwrap()))
+                .len(),
+            1
+        );
     }
 
     proptest! {
