@@ -12,6 +12,8 @@ pub enum Collection {
     WorkerGenerations,
     SessionCatalog,
     PendingActions,
+    Children,
+    ChildMessages,
     Goals,
     Plans,
     Commitments,
@@ -35,6 +37,8 @@ impl Collection {
             Self::WorkerGenerations => "worker_generations",
             Self::SessionCatalog => "session_catalog",
             Self::PendingActions => "pending_actions",
+            Self::Children => "children",
+            Self::ChildMessages => "child_messages",
             Self::Goals => "goals",
             Self::Plans => "plans",
             Self::Commitments => "commitments",
@@ -163,6 +167,20 @@ repository_trait!(
     delete_action
 );
 repository_trait!(GoalRepository, get_goal, list_goals, put_goal, delete_goal);
+repository_trait!(
+    ChildRepository,
+    get_child,
+    list_children,
+    put_child,
+    delete_child
+);
+repository_trait!(
+    ChildMessageRepository,
+    get_child_message,
+    list_child_messages,
+    put_child_message,
+    delete_child_message
+);
 repository_trait!(PlanRepository, get_plan, list_plans, put_plan, delete_plan);
 repository_trait!(
     CommitmentRepository,

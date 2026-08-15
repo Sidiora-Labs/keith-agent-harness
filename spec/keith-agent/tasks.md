@@ -193,7 +193,7 @@
     - Enforce turn, token, time, review, child, retry, process, storage, and cost bounds
     - Run restart, every-transition, exact-limit, cancellation, and terminal-summary tests
     - _Requirements: 20.1-20.6_
-  - [ ] 6.2 Full recursive child sessions and typed messaging
+  - [x] 6.2 Full recursive child sessions and typed messaging
     - Implement ChildSpec, workspace modes, status, heartbeat, limits, and retention
     - Create children through the same AgentSession runtime and session store
     - Implement durable parent/child messages and artifact references

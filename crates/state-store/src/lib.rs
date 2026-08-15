@@ -10,11 +10,11 @@ use std::time::Duration;
 use keith_agent_types::{CURRENT_SCHEMA_VERSION, EntityId, Revision, SchemaVersion, UtcTimestamp};
 use keith_state_store_core::{
     ActionRepository, AtomicStateRepository, AttentionRepository, CatalogRepository,
-    ChannelOffsetRepository, Collection, CommitReceipt, CommitmentRepository, DeliveryRepository,
-    GenerationRepository, GoalRepository, InitiativeRepository, JobAttemptRepository,
-    LeaseRepository, MigrationRepository, PlanRepository, RecordMutation, RefinementRepository,
-    RouteRepository, ScheduleRepository, ToolExperienceRepository, VersionedRecord, WaitRepository,
-    WritePrecondition,
+    ChannelOffsetRepository, ChildMessageRepository, ChildRepository, Collection, CommitReceipt,
+    CommitmentRepository, DeliveryRepository, GenerationRepository, GoalRepository,
+    InitiativeRepository, JobAttemptRepository, LeaseRepository, MigrationRepository,
+    PlanRepository, RecordMutation, RefinementRepository, RouteRepository, ScheduleRepository,
+    ToolExperienceRepository, VersionedRecord, WaitRepository, WritePrecondition,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
@@ -589,6 +589,22 @@ implement_repository!(
     delete_action
 );
 implement_repository!(
+    ChildRepository,
+    Collection::Children,
+    get_child,
+    list_children,
+    put_child,
+    delete_child
+);
+implement_repository!(
+    ChildMessageRepository,
+    Collection::ChildMessages,
+    get_child_message,
+    list_child_messages,
+    put_child_message,
+    delete_child_message
+);
+implement_repository!(
     GoalRepository,
     Collection::Goals,
     get_goal,
@@ -935,6 +951,8 @@ mod tests {
                 + GenerationRepository<Error = StoreError>
                 + CatalogRepository<Error = StoreError>
                 + ActionRepository<Error = StoreError>
+                + ChildRepository<Error = StoreError>
+                + ChildMessageRepository<Error = StoreError>
                 + GoalRepository<Error = StoreError>
                 + PlanRepository<Error = StoreError>
                 + CommitmentRepository<Error = StoreError>

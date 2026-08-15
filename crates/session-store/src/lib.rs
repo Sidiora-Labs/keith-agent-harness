@@ -599,6 +599,10 @@ pub enum SessionStoreError {
     PathEscape,
     #[error("session {0} is archived")]
     Archived(SessionId),
+    #[error("session {0} must be archived before deletion")]
+    NotArchived(SessionId),
+    #[error("session directory contains an unexpected entry")]
+    UnexpectedEntry,
     #[error("session {0} is quarantined")]
     Quarantined(SessionId),
     #[error("unsupported session schema {0}")]
@@ -839,6 +843,65 @@ impl SessionStore {
             fs::read(directory.join(MANIFEST_FILE))?,
             fs::read(directory.join(HISTORY_FILE))?,
         ))
+    }
+
+    /// Archives a session while holding its ordinary writer lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the writer lease or durable manifest update fails.
+    pub fn archive_session(
+        &self,
+        session_id: &SessionId,
+        identity: WriterIdentity,
+    ) -> Result<(), SessionStoreError> {
+        let mut writer = self.acquire_writer(session_id, identity)?;
+        writer.archive()
+    }
+
+    /// Permanently deletes the known files of an explicitly archived session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for live sessions, active writers, unexpected entries, or I/O failure.
+    pub fn delete_archived(&self, session_id: &SessionId) -> Result<(), SessionStoreError> {
+        let directory = self.session_directory(session_id)?;
+        let manifest = read_manifest(&directory)?;
+        if !manifest.archived {
+            return Err(SessionStoreError::NotArchived(session_id.clone()));
+        }
+        let lock_path = directory.join(WRITER_LOCK_FILE);
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        lock.try_lock_exclusive()
+            .map_err(|_| SessionStoreError::WriterLocked(session_id.clone()))?;
+        let mut removable = Vec::new();
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let metadata = entry.file_type()?;
+            let name = entry.file_name();
+            let known = matches!(
+                name.to_str(),
+                Some(MANIFEST_FILE | HISTORY_FILE | WRITER_LOCK_FILE | QUARANTINE_FILE)
+            );
+            if !known || metadata.is_dir() || metadata.is_symlink() {
+                return Err(SessionStoreError::UnexpectedEntry);
+            }
+            if name != WRITER_LOCK_FILE {
+                removable.push(entry.path());
+            }
+        }
+        for path in removable {
+            fs::remove_file(path)?;
+        }
+        drop(lock);
+        fs::remove_file(lock_path)?;
+        fs::remove_dir(directory)?;
+        sync_directory(&self.sessions)
     }
 
     fn session_directory(&self, session_id: &SessionId) -> Result<PathBuf, SessionStoreError> {
