@@ -200,6 +200,7 @@ typed_ids!(
     EntryId,
     GoalId,
     JobId,
+    KernelId,
     MessageId,
     ProcessInstanceId,
     ProfileId,

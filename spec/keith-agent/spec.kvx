@@ -826,7 +826,7 @@ requires = ["1.4", "3.3"]
 
 [task.5.6]
 title  = "Persistent guest-kernel broker and typed bridge"
-status = "pending"
+status = "done"
 wave   = 11
 do_1   = "Implement kernel protocol, broker lifecycle, output flow control, interrupt, timeout, and idle eviction"
 do_2   = "Implement one production guest kernel and a strict Rust/WASM alternative profile"

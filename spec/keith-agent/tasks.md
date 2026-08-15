@@ -174,7 +174,7 @@
     - Implement child deliverables, list, inspect, download, archive, export, delete, and retention
     - Test concurrent creation, restart, corruption, cross-scope access, oversize, cleanup, and stale refs
     - _Requirements: 16.1-16.6_
-  - [ ] 5.6 Persistent guest-kernel broker and typed bridge
+  - [x] 5.6 Persistent guest-kernel broker and typed bridge
     - Implement kernel protocol, broker lifecycle, output flow control, interrupt, timeout, and idle eviction
     - Implement one production guest kernel and a strict Rust/WASM alternative profile
     - Implement restricted mounts, environment, network, process, CPU, memory, and output limits
