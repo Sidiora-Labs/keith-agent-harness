@@ -219,6 +219,20 @@ impl ConnectionError {
             _ => false,
         }
     }
+
+    pub fn is_timed_out(&self) -> bool {
+        let timed_out = |error: &std::io::Error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+        };
+        match self {
+            Self::Io(error) | Self::Frame(FrameError::Io(error)) => timed_out(error),
+            Self::Frame(FrameError::Truncated { source, .. }) => timed_out(source),
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +254,17 @@ mod tests {
     use super::*;
 
     const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+
+    #[test]
+    fn timeout_classification_covers_direct_and_framed_io() {
+        let direct = ConnectionError::Io(std::io::Error::from(std::io::ErrorKind::TimedOut));
+        let framed = ConnectionError::Frame(FrameError::Io(std::io::Error::from(
+            std::io::ErrorKind::WouldBlock,
+        )));
+        assert!(direct.is_timed_out());
+        assert!(framed.is_timed_out());
+        assert!(!ConnectionError::Closed.is_timed_out());
+    }
 
     fn client_hello() -> ClientHello {
         ClientHello {

@@ -65,6 +65,12 @@ fn connect_when_ready(socket: &Path) -> UnixStream {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Ok(stream) = UnixStream::connect(socket) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
             return stream;
         }
         assert!(
@@ -75,7 +81,7 @@ fn connect_when_ready(socket: &Path) -> UnixStream {
     }
 }
 
-fn execute(socket: &Path, command: ClientCommand) -> CommandResult {
+fn open_connection(socket: &Path) -> (FramedTransport<UnixStream>, ClientId) {
     let mut transport = FramedTransport::new(connect_when_ready(socket), WireFormat::Json);
     let client_id = ClientId::new();
     transport
@@ -92,6 +98,11 @@ fn execute(socket: &Path, command: ClientCommand) -> CommandResult {
         transport.receive().unwrap(),
         WireMessage::ServerHello(_)
     ));
+    (transport, client_id)
+}
+
+fn execute(socket: &Path, command: ClientCommand) -> CommandResult {
+    let (mut transport, client_id) = open_connection(socket);
     transport
         .send(&WireMessage::Command(CommandEnvelope {
             protocol: CURRENT_PROTOCOL_VERSION,
@@ -146,6 +157,7 @@ fn daemon_process_is_lazy_contains_crashes_and_adopts_after_restart() {
     write_manifest(&data_root, &second_root, &second_session);
 
     let mut daemon = start_daemon(&data_root, &socket);
+    let _idle_connection = open_connection(&socket);
     let listed = execute(
         &socket,
         ClientCommand::ListSessions(SessionFilter::default()),

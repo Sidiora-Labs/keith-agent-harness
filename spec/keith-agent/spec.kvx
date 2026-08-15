@@ -1156,7 +1156,7 @@ requires = ["11.1"]
 
 [task.11.3]
 title  = "Rust/WASM web application and authenticated backend"
-status = "pending"
+status = "done"
 wave   = 18
 do_1   = "Build authenticated Rust web backend, exact-origin/CSRF mutation boundary, WebSocket connection, and asset delivery"
 do_2   = "Build Rust/WASM responsive shell with persistent mounted conversation and session subscriptions"

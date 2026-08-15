@@ -21,10 +21,14 @@ must_use_candidate = "allow"
 [workspace.dependencies]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
+axum = { version = "0.8.9", features = ["form", "http1", "json", "tokio", "ws"] }
 chrono = { version = "0.4.41", default-features = false, features = ["clock", "serde"] }
 chrono-tz = "0.10.4"
 crossterm = "0.29.0"
 fs2 = "0.4.3"
+futures-util = "0.3.34"
+getrandom = "0.3.4"
+js-sys = "0.3.104"
 os_pipe = "1.2.3"
 nix = { version = "0.30.1", features = ["process", "signal"] }
 proptest = "1.9.0"
@@ -39,12 +43,15 @@ sha2 = "0.10.9"
 signal-hook = "0.3.18"
 thiserror = "2.0.18"
 tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.9.8"
 tungstenite = { version = "0.28.0", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 unicode-width = "0.2.2"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 url = "2.5.8"
 ulid = "1.2.1"
+wasm-bindgen = "0.2.127"
+web-sys = "0.3.104"
 wasmtime = { version = "36.0.2", default-features = false, features = ["cranelift", "runtime"] }
 wat = "1.240.0"
 

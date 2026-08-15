@@ -373,7 +373,7 @@
     - Implement keyboard-only use, color fallbacks, Unicode width, narrow terminals, paste/editor, and terminal restoration
     - Enforce restrained visual rules and run terminal portability/recovery matrix
     - _Requirements: 38.1-38.6, 40.4_
-  - [ ] 11.3 Rust/WASM web application and authenticated backend
+  - [x] 11.3 Rust/WASM web application and authenticated backend
     - Build authenticated Rust web backend, exact-origin/CSRF mutation boundary, WebSocket connection, and asset delivery
     - Build Rust/WASM responsive shell with persistent mounted conversation and session subscriptions
     - Build sessions, goals, plans, children, tools, memory, knowledge, schedules, commitments, channels, settings, artifacts, and refinement surfaces

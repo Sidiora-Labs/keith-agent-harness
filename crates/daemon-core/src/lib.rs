@@ -10,6 +10,7 @@ use std::io;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -242,6 +243,8 @@ pub enum DaemonError {
     Connection(#[from] keith_connection::ConnectionError),
     #[error("daemon I/O failed: {0}")]
     Io(#[from] io::Error),
+    #[error("daemon state lock was poisoned")]
+    LockPoisoned,
     #[error("session {0} is not in the root catalog")]
     UnknownSession(SessionId),
     #[error("root {0} is not in the catalog")]
@@ -431,15 +434,31 @@ impl DaemonCore {
         }
         let listener = bind_permissioned_local(socket_path)?;
         listener.set_nonblocking(true)?;
-        while !shutdown.load(Ordering::Acquire) {
-            match listener.accept() {
-                Ok((stream, _)) => self.serve_connection(stream, shutdown)?,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    self.maintain()?;
-                    thread::sleep(self.options.maintenance_interval);
+        {
+            let shared = Mutex::new(&mut *self);
+            thread::scope(|scope| -> Result<(), DaemonError> {
+                while !shutdown.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            let shared = &shared;
+                            scope.spawn(move || {
+                                let _ = Self::serve_shared_connection(shared, stream, shutdown);
+                            });
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            let interval = {
+                                let mut daemon =
+                                    shared.lock().map_err(|_| DaemonError::LockPoisoned)?;
+                                daemon.maintain()?;
+                                daemon.options.maintenance_interval
+                            };
+                            thread::sleep(interval);
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
-                Err(error) => return Err(error.into()),
-            }
+                Ok(())
+            })?;
         }
         let result = self.shutdown();
         drop(listener);
@@ -452,12 +471,17 @@ impl DaemonCore {
     }
 
     #[cfg(unix)]
-    fn serve_connection(
-        &mut self,
+    fn serve_shared_connection(
+        shared: &Mutex<&mut Self>,
         stream: UnixStream,
         shutdown: &AtomicBool,
     ) -> Result<(), DaemonError> {
-        stream.set_read_timeout(Some(self.options.maintenance_interval))?;
+        let maintenance_interval = shared
+            .lock()
+            .map_err(|_| DaemonError::LockPoisoned)?
+            .options
+            .maintenance_interval;
+        stream.set_read_timeout(Some(maintenance_interval))?;
         let mut transport = FramedTransport::new(stream, WireFormat::Json);
         let WireMessage::ClientHello(client) = transport.receive()? else {
             return Ok(());
@@ -472,7 +496,11 @@ impl DaemonCore {
         let hello = negotiate(
             &client,
             CURRENT_PROTOCOL_VERSION,
-            self.instance_id.clone(),
+            shared
+                .lock()
+                .map_err(|_| DaemonError::LockPoisoned)?
+                .instance_id
+                .clone(),
             &features,
         )
         .map_err(keith_connection::ConnectionError::from)?;
@@ -481,13 +509,15 @@ impl DaemonCore {
         while !shutdown.load(Ordering::Acquire) {
             let message = match transport.receive() {
                 Ok(message) => message,
-                Err(keith_connection::ConnectionError::Io(error))
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    self.maintain()?;
+                Err(error) if error.is_timed_out() => {
+                    let events = {
+                        let mut daemon = shared.lock().map_err(|_| DaemonError::LockPoisoned)?;
+                        daemon.maintain()?;
+                        daemon.drain_client_events(&connected_client_id)?
+                    };
+                    for event in events {
+                        transport.send(&WireMessage::Event(event))?;
+                    }
                     continue;
                 }
                 Err(error) if error.is_interrupted() => {
@@ -502,49 +532,9 @@ impl DaemonCore {
             let WireMessage::Command(command) = message else {
                 continue;
             };
-            let mut recovery_events = Vec::new();
-            let result = if command.client_id != connected_client_id {
-                CommandResultEnvelope {
-                    protocol: negotiated,
-                    command_id: command.command_id,
-                    completed_at: UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
-                    result: CommandResult::Rejected(CommandError {
-                        error: CommonError::new(
-                            ErrorCode::Unauthorized,
-                            "command client ID does not match the connection",
-                            false,
-                        ),
-                        unsupported_feature: None,
-                    }),
-                }
-            } else if let Some(result) = self.command_ledger.result(&command.command_id) {
-                result.clone()
-            } else {
-                let result = if command.protocol.major != negotiated.major
-                    || command.protocol.minor > negotiated.minor
-                {
-                    CommandResult::Rejected(CommandError {
-                        error: CommonError::new(
-                            ErrorCode::UnsupportedVersion,
-                            "command envelope exceeds the negotiated protocol",
-                            false,
-                        ),
-                        unsupported_feature: None,
-                    })
-                } else {
-                    let (result, events) =
-                        self.execute_command(&connected_client_id, command.command);
-                    recovery_events = events;
-                    result
-                };
-                let envelope = CommandResultEnvelope {
-                    protocol: negotiated,
-                    command_id: command.command_id,
-                    completed_at: UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
-                    result,
-                };
-                self.command_ledger.record(envelope.clone());
-                envelope
+            let (result, recovery_events) = {
+                let mut daemon = shared.lock().map_err(|_| DaemonError::LockPoisoned)?;
+                daemon.handle_command(&connected_client_id, negotiated, command)
             };
             for event in recovery_events {
                 transport.send(&WireMessage::Event(event))?;
@@ -552,6 +542,80 @@ impl DaemonCore {
             transport.send(&WireMessage::CommandResult(result))?;
         }
         Ok(())
+    }
+
+    fn handle_command(
+        &mut self,
+        connected_client_id: &keith_agent_types::ClientId,
+        negotiated: keith_agent_types::ProtocolVersion,
+        command: keith_protocol::CommandEnvelope,
+    ) -> (CommandResultEnvelope, Vec<keith_protocol::EventEnvelope>) {
+        let mut recovery_events = Vec::new();
+        let result = if command.client_id != *connected_client_id {
+            CommandResultEnvelope {
+                protocol: negotiated,
+                command_id: command.command_id,
+                completed_at: UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+                result: CommandResult::Rejected(CommandError {
+                    error: CommonError::new(
+                        ErrorCode::Unauthorized,
+                        "command client ID does not match the connection",
+                        false,
+                    ),
+                    unsupported_feature: None,
+                }),
+            }
+        } else if let Some(result) = self.command_ledger.result(&command.command_id) {
+            result.clone()
+        } else {
+            let result = if command.protocol.major != negotiated.major
+                || command.protocol.minor > negotiated.minor
+            {
+                CommandResult::Rejected(CommandError {
+                    error: CommonError::new(
+                        ErrorCode::UnsupportedVersion,
+                        "command envelope exceeds the negotiated protocol",
+                        false,
+                    ),
+                    unsupported_feature: None,
+                })
+            } else {
+                let (result, events) = self.execute_command(connected_client_id, command.command);
+                recovery_events = events;
+                result
+            };
+            let envelope = CommandResultEnvelope {
+                protocol: negotiated,
+                command_id: command.command_id,
+                completed_at: UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+                result,
+            };
+            self.command_ledger.record(envelope.clone());
+            envelope
+        };
+        (result, recovery_events)
+    }
+
+    fn drain_client_events(
+        &mut self,
+        client_id: &keith_agent_types::ClientId,
+    ) -> Result<Vec<keith_protocol::EventEnvelope>, DaemonError> {
+        let mut events = Vec::new();
+        let mut remaining = self.options.client_queue_capacity;
+        for hub in self.event_hubs.values_mut() {
+            if remaining == 0 {
+                break;
+            }
+            match hub.poll(client_id, remaining) {
+                Ok(mut pending) => {
+                    remaining = remaining.saturating_sub(pending.len());
+                    events.append(&mut pending);
+                }
+                Err(EventStreamError::UnknownClient(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(events)
     }
 
     fn execute_command(
