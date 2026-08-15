@@ -1168,7 +1168,7 @@ requires = ["11.1"]
 
 [task.11.4]
 title  = "Rust desktop shell and local lifecycle"
-status = "pending"
+status = "done"
 wave   = 19
 do_1   = "Package the web client with daemon discovery/start/stop, local notifications, file integration, updates, and browser handoff"
 do_2   = "Keep all agent behavior behind AgentConnection"

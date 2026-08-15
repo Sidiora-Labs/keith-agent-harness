@@ -380,7 +380,7 @@
     - Keep credentials write-only and out of URLs, browser storage, bundles, and diagnostics
     - Run real-browser navigation, refresh, reconnect, restart, stream, memory edit, schedule, channel, and refinement journeys
     - _Requirements: 39.1-39.2, 39.4-39.6_
-  - [ ] 11.4 Rust desktop shell and local lifecycle
+  - [x] 11.4 Rust desktop shell and local lifecycle
     - Package the web client with daemon discovery/start/stop, local notifications, file integration, updates, and browser handoff
     - Keep all agent behavior behind AgentConnection
     - Implement first-run setup, crash reporting, safe update/rollback, and uninstall state choices
