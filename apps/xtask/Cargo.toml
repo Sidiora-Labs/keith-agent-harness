@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 keith-agent-types = { path = "../../crates/agent-types" }
+keith-protocol = { path = "../../crates/protocol" }
 
 [lints]
 workspace = true

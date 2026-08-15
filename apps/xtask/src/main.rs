@@ -14,8 +14,12 @@ fn main() -> ExitCode {
             &workspace_root(),
             matches!(env::args().nth(2).as_deref(), Some("--write")),
         ),
+        Some("protocol-doc") => protocol_document(
+            &workspace_root(),
+            matches!(env::args().nth(2).as_deref(), Some("--write")),
+        ),
         _ => Err(
-            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]>".into(),
+            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]|protocol-doc [--write]>".into(),
         ),
     };
 
@@ -41,6 +45,7 @@ fn ci() -> Result<(), String> {
     run(&root, "cargo", &["fmt", "--all", "--", "--check"])?;
     dependency_policy(&root)?;
     schema_document(&root, false)?;
+    protocol_document(&root, false)?;
     run(
         &root,
         "cargo",
@@ -69,23 +74,33 @@ fn ci() -> Result<(), String> {
     )
 }
 
+fn protocol_document(root: &Path, write: bool) -> Result<(), String> {
+    let path = root.join("docs/reference/agent-connection.md");
+    let expected = keith_protocol::schema_markdown().map_err(|error| error.to_string())?;
+    checked_generated_document(&path, expected, write)
+}
+
 fn schema_document(root: &Path, write: bool) -> Result<(), String> {
     let path = root.join("docs/reference/common-types.md");
     let expected = keith_agent_types::schema_markdown().map_err(|error| error.to_string())?;
+    checked_generated_document(&path, expected, write)
+}
+
+fn checked_generated_document(path: &Path, expected: String, write: bool) -> Result<(), String> {
     if write {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        fs::write(&path, expected).map_err(|error| error.to_string())?;
+        fs::write(path, expected).map_err(|error| error.to_string())?;
         return Ok(());
     }
-    let actual = fs::read_to_string(&path)
+    let actual = fs::read_to_string(path)
         .map_err(|error| format!("schema document {} is missing: {error}", path.display()))?;
     if actual == expected {
         Ok(())
     } else {
         Err(format!(
-            "schema document {} is stale; run `cargo run -p keith-xtask -- schema-doc --write`",
+            "generated document {} is stale; run the corresponding keith-xtask document command with --write",
             path.display()
         ))
     }

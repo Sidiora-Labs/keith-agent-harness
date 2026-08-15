@@ -37,7 +37,7 @@
 ## Phase 2 — AgentConnection and Supervision
 
 - [ ] 2. Public Protocol, Daemon, Root Catalog, Leases, Workers, and Event Replay
-  - [ ] 2.1 AgentConnection command, response, snapshot, and event protocol
+  - [x] 2.1 AgentConnection command, response, snapshot, and event protocol
     - Define ClientHello, ServerHello, resume cursors, command envelopes, command results, snapshots, events, and errors
     - Implement framed JSON, local binary, stdio, and WebSocket codecs over one type system
     - Implement protocol negotiation and feature discovery

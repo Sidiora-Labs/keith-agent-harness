@@ -596,7 +596,7 @@ status  = "pending"
 
 [task.2.1]
 title  = "AgentConnection command, response, snapshot, and event protocol"
-status = "pending"
+status = "done"
 wave   = 3
 do_1   = "Define ClientHello, ServerHello, resume cursors, command envelopes, command results, snapshots, events, and errors"
 do_2   = "Implement framed JSON, local binary, stdio, and WebSocket codecs over one type system"
