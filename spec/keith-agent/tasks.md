@@ -218,7 +218,7 @@
     - Fail ambiguous, missing, disabled, and unauthorized routes without fallback
     - Prove separate real models, memory, tools, channels, schedules, and workspaces
     - _Requirements: 23.1-23.5_
-  - [ ] 7.2 Human-readable workspace, atomic writes, and live reload
+  - [x] 7.2 Human-readable workspace, atomic writes, and live reload
     - Create AGENT, USER, RULE, MEMORY, daily, state, knowledge, skills, artifacts, backups, and metadata layout
     - Implement file watchers, validation, version records, and context invalidation
     - Implement atomic replacement, flush/sync, conflicts, proposed merges, snapshots, and restore
