@@ -649,7 +649,7 @@ status  = "pending"
 
 [task.3.1]
 title  = "AgentSession actor and domain state machines"
-status = "pending"
+status = "done"
 wave   = 5
 do_1   = "Implement the session actor, mailbox, run states, transition guards, and snapshots"
 do_2   = "Compose bounded input, turn, context, tool, compaction, goal, child, kernel, extension, and writer services"

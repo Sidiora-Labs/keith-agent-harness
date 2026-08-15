@@ -69,7 +69,7 @@
 ## Phase 3 — AgentSession, Actions, and Branched History
 
 - [ ] 3. Composable Session Actor, Unified Inbox, JSONL Trees, Branching, and Compaction
-  - [ ] 3.1 AgentSession actor and domain state machines
+  - [x] 3.1 AgentSession actor and domain state machines
     - Implement the session actor, mailbox, run states, transition guards, and snapshots
     - Compose bounded input, turn, context, tool, compaction, goal, child, kernel, extension, and writer services
     - Use traits for providers, tools, repositories, channels, and clients
