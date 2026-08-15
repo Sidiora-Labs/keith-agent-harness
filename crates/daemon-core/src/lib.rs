@@ -1,1 +1,525 @@
 #![forbid(unsafe_code)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
+
+use keith_agent_types::{
+    CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, CommonError, EntityId, ErrorCode, ProfileId,
+    RootTreeId, SchemaVersion, SessionId, UtcTimestamp,
+};
+#[cfg(unix)]
+use keith_connection::{AgentTransport, FramedTransport, bind_permissioned_local};
+use keith_protocol::{
+    ClientCommand, CommandError, CommandResult, CommandResultEnvelope, Feature, ResponsePayload,
+    SessionFilter, SessionState, SessionSummary, WireFormat, WireMessage, negotiate,
+};
+use keith_supervisor::{
+    SupervisorError, SupervisorOptions, WorkerEvent, WorkerStatus, WorkerSupervisor,
+};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+pub const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootManifest {
+    pub version: SchemaVersion,
+    pub root_tree_id: RootTreeId,
+    pub root_session_id: SessionId,
+    pub profile_id: ProfileId,
+    pub title: Option<String>,
+    pub state: SessionState,
+    pub updated_at: UtcTimestamp,
+}
+
+impl RootManifest {
+    pub fn summary(&self) -> SessionSummary {
+        SessionSummary {
+            session_id: self.root_session_id.clone(),
+            root_tree_id: self.root_tree_id.clone(),
+            profile_id: self.profile_id.clone(),
+            title: self.title.clone(),
+            state: self.state,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RootCatalog {
+    roots: BTreeMap<RootTreeId, RootManifest>,
+    sessions: BTreeMap<SessionId, RootTreeId>,
+}
+
+#[derive(Debug, Error)]
+pub enum CatalogError {
+    #[error("catalog I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("manifest {path} exceeds the metadata limit of {MAX_MANIFEST_BYTES} bytes")]
+    ManifestTooLarge { path: PathBuf },
+    #[error("manifest {path} is invalid: {source}")]
+    InvalidManifest {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    #[error("manifest {path} uses unsupported schema {version}")]
+    UnsupportedSchema {
+        path: PathBuf,
+        version: SchemaVersion,
+    },
+    #[error("manifest root {manifest} does not match directory root {directory}")]
+    RootMismatch {
+        manifest: RootTreeId,
+        directory: RootTreeId,
+    },
+    #[error("duplicate root session ID {0}")]
+    DuplicateSession(SessionId),
+}
+
+impl RootCatalog {
+    /// Discovers root trees by reading only their bounded manifest files.
+    ///
+    /// Session journals, snapshots, and other root contents are deliberately never opened.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when catalog directories or manifests are malformed or unreadable.
+    pub fn discover(data_root: &Path) -> Result<Self, CatalogError> {
+        let sessions_directory = data_root.join("sessions");
+        let entries = match fs::read_dir(&sessions_directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut catalog = Self::default();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let directory_root: RootTreeId = match entry.file_name().to_string_lossy().parse() {
+                Ok(root) => root,
+                Err(_) => continue,
+            };
+            let path = entry.path().join("manifest.json");
+            let metadata = match fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if metadata.len() > MAX_MANIFEST_BYTES {
+                return Err(CatalogError::ManifestTooLarge { path });
+            }
+            let bytes = fs::read(&path)?;
+            let manifest: RootManifest =
+                serde_json::from_slice(&bytes).map_err(|source| CatalogError::InvalidManifest {
+                    path: path.clone(),
+                    source,
+                })?;
+            if manifest.version != CURRENT_SCHEMA_VERSION {
+                return Err(CatalogError::UnsupportedSchema {
+                    path,
+                    version: manifest.version,
+                });
+            }
+            if manifest.root_tree_id != directory_root {
+                return Err(CatalogError::RootMismatch {
+                    manifest: manifest.root_tree_id,
+                    directory: directory_root,
+                });
+            }
+            if catalog
+                .sessions
+                .insert(
+                    manifest.root_session_id.clone(),
+                    manifest.root_tree_id.clone(),
+                )
+                .is_some()
+            {
+                return Err(CatalogError::DuplicateSession(manifest.root_session_id));
+            }
+            catalog
+                .roots
+                .insert(manifest.root_tree_id.clone(), manifest);
+        }
+        Ok(catalog)
+    }
+
+    pub fn len(&self) -> usize {
+        self.roots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
+
+    pub fn root(&self, root_tree_id: &RootTreeId) -> Option<&RootManifest> {
+        self.roots.get(root_tree_id)
+    }
+
+    pub fn root_for_session(&self, session_id: &SessionId) -> Option<&RootTreeId> {
+        self.sessions.get(session_id)
+    }
+
+    pub fn list(&self, filter: &SessionFilter) -> Vec<SessionSummary> {
+        self.roots
+            .values()
+            .filter(|manifest| {
+                filter
+                    .profile_id
+                    .as_ref()
+                    .is_none_or(|profile| profile == &manifest.profile_id)
+            })
+            .filter(|manifest| filter.include_archived || manifest.state != SessionState::Archived)
+            .map(RootManifest::summary)
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DaemonOptions {
+    pub supervisor: SupervisorOptions,
+    pub idle_evict_after: Duration,
+    pub maintenance_interval: Duration,
+}
+
+impl Default for DaemonOptions {
+    fn default() -> Self {
+        Self {
+            supervisor: SupervisorOptions::default(),
+            idle_evict_after: Duration::from_secs(15 * 60),
+            maintenance_interval: Duration::from_millis(100),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DaemonHealth {
+    pub instance_id: EntityId,
+    pub discovered_roots: usize,
+    pub workers: Vec<WorkerStatus>,
+    pub last_worker_events: Vec<WorkerEvent>,
+    pub shutting_down: bool,
+}
+
+pub struct DaemonCore {
+    instance_id: EntityId,
+    catalog: RootCatalog,
+    supervisor: WorkerSupervisor,
+    options: DaemonOptions,
+    last_worker_events: Vec<WorkerEvent>,
+    shutting_down: bool,
+}
+
+#[derive(Debug, Error)]
+pub enum DaemonError {
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
+    #[error(transparent)]
+    Supervisor(#[from] SupervisorError),
+    #[error("daemon endpoint failed: {0}")]
+    Connection(#[from] keith_connection::ConnectionError),
+    #[error("daemon I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("session {0} is not in the root catalog")]
+    UnknownSession(SessionId),
+}
+
+impl DaemonCore {
+    /// Opens the daemon catalog and adopts live workers without activating dormant roots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when catalog discovery or worker adoption fails.
+    pub fn open(
+        data_root: impl Into<PathBuf>,
+        worker_executable: impl Into<PathBuf>,
+        options: DaemonOptions,
+    ) -> Result<Self, DaemonError> {
+        let data_root = data_root.into();
+        fs::create_dir_all(&data_root)?;
+        let catalog = RootCatalog::discover(&data_root)?;
+        let mut supervisor = WorkerSupervisor::new(
+            data_root.join("runtime"),
+            worker_executable,
+            options.supervisor.clone(),
+        );
+        supervisor.adopt_existing()?;
+        Ok(Self {
+            instance_id: EntityId::new(),
+            catalog,
+            supervisor,
+            options,
+            last_worker_events: Vec::new(),
+            shutting_down: false,
+        })
+    }
+
+    pub fn catalog(&self) -> &RootCatalog {
+        &self.catalog
+    }
+
+    pub fn health(&self) -> DaemonHealth {
+        DaemonHealth {
+            instance_id: self.instance_id.clone(),
+            discovered_roots: self.catalog.len(),
+            workers: self.supervisor.statuses(),
+            last_worker_events: self.last_worker_events.clone(),
+            shutting_down: self.shutting_down,
+        }
+    }
+
+    /// Lazily activates the worker that owns a cataloged root session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is unknown or its worker cannot start.
+    pub fn activate_session(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<WorkerStatus, DaemonError> {
+        let root = self
+            .catalog
+            .root_for_session(session_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::UnknownSession(session_id.clone()))?;
+        if self.supervisor.mark_activity(&root) {
+            return self
+                .supervisor
+                .status(&root)
+                .ok_or_else(|| DaemonError::UnknownSession(session_id.clone()));
+        }
+        self.supervisor.restart(&root).map_err(DaemonError::from)
+    }
+
+    /// Runs worker monitoring and idle eviction once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when worker inspection or eviction fails.
+    pub fn maintain(&mut self) -> Result<(), DaemonError> {
+        self.last_worker_events = self.supervisor.monitor()?;
+        self.supervisor.evict_idle(self.options.idle_evict_after)?;
+        Ok(())
+    }
+
+    /// Drains all active and adopted workers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a worker cannot be drained or forcibly terminated.
+    pub fn shutdown(&mut self) -> Result<(), DaemonError> {
+        self.shutting_down = true;
+        self.supervisor.drain_all().map_err(DaemonError::from)
+    }
+
+    #[cfg(unix)]
+    /// Serves the permission-restricted local `AgentConnection` endpoint until shutdown is signaled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the endpoint, protocol journey, or maintenance loop fails.
+    pub fn serve_local(
+        &mut self,
+        socket_path: &Path,
+        shutdown: &AtomicBool,
+    ) -> Result<(), DaemonError> {
+        if let Some(parent) = socket_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::remove_file(socket_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let listener = bind_permissioned_local(socket_path)?;
+        listener.set_nonblocking(true)?;
+        while !shutdown.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _)) => self.serve_connection(stream, shutdown)?,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    self.maintain()?;
+                    thread::sleep(self.options.maintenance_interval);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let result = self.shutdown();
+        drop(listener);
+        match fs::remove_file(socket_path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) if result.is_ok() => return Err(error.into()),
+            Ok(()) | Err(_) => {}
+        }
+        result
+    }
+
+    #[cfg(unix)]
+    fn serve_connection(
+        &mut self,
+        stream: UnixStream,
+        shutdown: &AtomicBool,
+    ) -> Result<(), DaemonError> {
+        stream.set_read_timeout(Some(self.options.maintenance_interval))?;
+        let mut transport = FramedTransport::new(stream, WireFormat::Json);
+        let WireMessage::ClientHello(client) = transport.receive()? else {
+            return Ok(());
+        };
+        let features = BTreeSet::from([
+            Feature::SessionLifecycle,
+            Feature::FramedJson,
+            Feature::Replay,
+            Feature::Snapshots,
+        ]);
+        let hello = negotiate(
+            &client,
+            CURRENT_PROTOCOL_VERSION,
+            self.instance_id.clone(),
+            &features,
+        )
+        .map_err(keith_connection::ConnectionError::from)?;
+        let negotiated = hello.protocol;
+        transport.send(&WireMessage::ServerHello(hello))?;
+        while !shutdown.load(Ordering::Acquire) {
+            let message = match transport.receive() {
+                Ok(message) => message,
+                Err(keith_connection::ConnectionError::Io(error))
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    self.maintain()?;
+                    continue;
+                }
+                Err(error) if error.is_interrupted() => {
+                    if shutdown.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                Err(keith_connection::ConnectionError::Closed) => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+            let WireMessage::Command(command) = message else {
+                continue;
+            };
+            let result = if command.protocol.major != negotiated.major
+                || command.protocol.minor > negotiated.minor
+            {
+                CommandResult::Rejected(CommandError {
+                    error: CommonError::new(
+                        ErrorCode::UnsupportedVersion,
+                        "command envelope exceeds the negotiated protocol",
+                        false,
+                    ),
+                    unsupported_feature: None,
+                })
+            } else {
+                self.execute_command(command.command)
+            };
+            transport.send(&WireMessage::CommandResult(CommandResultEnvelope {
+                protocol: negotiated,
+                command_id: command.command_id,
+                completed_at: UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+                result,
+            }))?;
+        }
+        Ok(())
+    }
+
+    fn execute_command(&mut self, command: ClientCommand) -> CommandResult {
+        match command {
+            ClientCommand::ListSessions(filter) => CommandResult::Data(Box::new(
+                ResponsePayload::Sessions(self.catalog.list(&filter)),
+            )),
+            ClientCommand::AttachSession(attach) => match self.activate_session(&attach.session_id)
+            {
+                Ok(_) => CommandResult::Accepted { action_id: None },
+                Err(error) => CommandResult::Rejected(CommandError {
+                    error: CommonError::new(ErrorCode::NotFound, error.to_string(), false),
+                    unsupported_feature: None,
+                }),
+            },
+            ClientCommand::DetachSession { .. } => CommandResult::Accepted { action_id: None },
+            _ => CommandResult::Rejected(CommandError {
+                error: CommonError::new(
+                    ErrorCode::Unavailable,
+                    "command requires a session worker service that is not active on the daemon",
+                    true,
+                ),
+                unsupported_feature: None,
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(root: RootTreeId, session: SessionId) -> RootManifest {
+        RootManifest {
+            version: CURRENT_SCHEMA_VERSION,
+            root_tree_id: root,
+            root_session_id: session,
+            profile_id: ProfileId::new(),
+            title: Some("catalog entry".into()),
+            state: SessionState::Dormant,
+            updated_at: UtcTimestamp::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn discovery_reads_bounded_metadata_and_ignores_session_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = RootTreeId::new();
+        let session = SessionId::new();
+        let root_directory = directory.path().join("sessions").join(root.to_string());
+        fs::create_dir_all(&root_directory).unwrap();
+        fs::write(
+            root_directory.join("manifest.json"),
+            keith_agent_types::canonical_json_bytes(&manifest(root.clone(), session.clone()))
+                .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            root_directory.join("session.jsonl"),
+            b"this is deliberately corrupt and must not be loaded",
+        )
+        .unwrap();
+
+        let catalog = RootCatalog::discover(directory.path()).unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog.root_for_session(&session), Some(&root));
+        assert_eq!(
+            catalog.list(&SessionFilter::default())[0].session_id,
+            session
+        );
+    }
+
+    #[test]
+    fn oversized_manifest_is_rejected_before_reading_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = RootTreeId::new();
+        let root_directory = directory.path().join("sessions").join(root.to_string());
+        fs::create_dir_all(&root_directory).unwrap();
+        fs::write(
+            root_directory.join("manifest.json"),
+            vec![b' '; usize::try_from(MAX_MANIFEST_BYTES + 1).unwrap()],
+        )
+        .unwrap();
+        assert!(matches!(
+            RootCatalog::discover(directory.path()),
+            Err(CatalogError::ManifestTooLarge { .. })
+        ));
+    }
+}

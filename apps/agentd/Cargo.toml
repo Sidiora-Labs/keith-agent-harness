@@ -7,10 +7,25 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+keith-daemon-core = { path = "../../crates/daemon-core" }
+keith-worker-runtime = { path = "../../crates/worker-runtime" }
+signal-hook.workspace = true
+
+[dev-dependencies]
+keith-agent-types = { path = "../../crates/agent-types" }
+keith-connection = { path = "../../crates/connection" }
+keith-protocol = { path = "../../crates/protocol" }
+nix.workspace = true
+tempfile.workspace = true
+
 [[bin]]
 name = "agentd"
 path = "src/main.rs"
 
+[[bin]]
+name = "keith-daemon-worker-host"
+path = "tests/support/worker_process_host.rs"
+
 [lints]
 workspace = true
-

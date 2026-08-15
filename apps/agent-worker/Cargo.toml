@@ -7,10 +7,12 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+keith-worker-runtime = { path = "../../crates/worker-runtime" }
+
 [[bin]]
 name = "agent-worker"
 path = "src/main.rs"
 
 [lints]
 workspace = true
-

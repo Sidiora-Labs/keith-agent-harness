@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+keith-agent-types = { path = "../agent-types" }
+serde.workspace = true
+serde_json.workspace = true
+signal-hook.workspace = true
+thiserror.workspace = true
+
 [lints]
 workspace = true
-

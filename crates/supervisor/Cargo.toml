@@ -7,6 +7,18 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+keith-agent-types = { path = "../agent-types" }
+keith-worker-runtime = { path = "../worker-runtime" }
+nix.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "keith-worker-process-host"
+path = "tests/support/worker_process_host.rs"
+
 [lints]
 workspace = true
-

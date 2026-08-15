@@ -207,6 +207,20 @@ pub enum ConnectionError {
     UnexpectedWebSocketMessage,
 }
 
+impl ConnectionError {
+    pub fn is_interrupted(&self) -> bool {
+        match self {
+            Self::Io(error) | Self::Frame(FrameError::Io(error)) => {
+                error.kind() == std::io::ErrorKind::Interrupted
+            }
+            Self::Frame(FrameError::Truncated { source, .. }) => {
+                source.kind() == std::io::ErrorKind::Interrupted
+            }
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;

@@ -195,6 +195,17 @@ fn dependency_policy(root: &Path) -> Result<(), String> {
             "keith-worker-runtime",
         ]),
     )?;
+    reject_reachable(
+        &graph,
+        "keith-daemon-core",
+        &BTreeSet::from([
+            "keith-agent-loop",
+            "keith-provider-adapters",
+            "keith-tool-runner-core",
+            "keith-sandbox",
+            "keith-plugin-host",
+        ]),
+    )?;
 
     println!(
         "dependency policy passed for {} workspace packages",

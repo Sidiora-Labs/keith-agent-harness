@@ -608,7 +608,7 @@ requires = ["1.2"]
 
 [task.2.2]
 title  = "Daemon composition root and lazy root-session catalog"
-status = "pending"
+status = "done"
 wave   = 4
 do_1   = "Build agentd with public endpoints, lifecycle, structured shutdown, and health"
 do_2   = "Implement lazy discovery and metadata-only root-tree catalog"

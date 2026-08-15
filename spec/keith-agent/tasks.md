@@ -44,7 +44,7 @@
     - Generate client bindings/models needed by Rust clients and schema documentation
     - Run one conformance journey over every transport
     - _Requirements: 2.1-2.6_
-  - [ ] 2.2 Daemon composition root and lazy root-session catalog
+  - [x] 2.2 Daemon composition root and lazy root-session catalog
     - Build agentd with public endpoints, lifecycle, structured shutdown, and health
     - Implement lazy discovery and metadata-only root-tree catalog
     - Implement worker start, adoption, monitor, drain, restart, and idle eviction
