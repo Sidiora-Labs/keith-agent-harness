@@ -316,7 +316,7 @@
     - Run real inbound, reply, restart, schedule, attachment, failure, and isolation journeys
     - Document setup without exposing tokens or internal routing IDs
     - _Requirements: 36.5, 34.1-34.5, 35.1-35.6_
-  - [ ] 9.4 Explicit multi-profile and group routing
+  - [x] 9.4 Explicit multi-profile and group routing
     - Implement route priority and matching by channel, account, conversation/thread, sender, prefix, and explicit profile
     - Implement stable per-conversation, per-sender, per-thread, and explicit-only session policies
     - Implement group mention, memory, participant retention, tools, schedules, and proactive-post rules

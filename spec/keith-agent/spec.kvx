@@ -1062,7 +1062,7 @@ requires = ["9.2"]
 
 [task.9.4]
 title  = "Explicit multi-profile and group routing"
-status = "pending"
+status = "done"
 wave   = 17
 do_1   = "Implement route priority and matching by channel, account, conversation/thread, sender, prefix, and explicit profile"
 do_2   = "Implement stable per-conversation, per-sender, per-thread, and explicit-only session policies"
