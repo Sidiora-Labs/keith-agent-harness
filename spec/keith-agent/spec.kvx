@@ -909,7 +909,7 @@ requires = ["5.2", "7.1"]
 
 [task.7.3]
 title  = "Structured compaction outputs and memory-policy separation"
-status = "pending"
+status = "done"
 wave   = 13
 do_1   = "Define branch summary, memory candidate, daily entry, commitment, and unresolved-item output schema"
 do_2   = "Integrate one summarization pass with committed compaction"

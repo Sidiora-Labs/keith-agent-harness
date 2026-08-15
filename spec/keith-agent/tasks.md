@@ -225,7 +225,7 @@
     - Protect built-ins, backups, credentials, runtime metadata, and paths outside the profile root
     - Run external edit, conflict, crash, symlink, encoding, large-file, backup, and restore tests
     - _Requirements: 24.1-24.6_
-  - [ ] 7.3 Structured compaction outputs and memory-policy separation
+  - [x] 7.3 Structured compaction outputs and memory-policy separation
     - Define branch summary, memory candidate, daily entry, commitment, and unresolved-item output schema
     - Integrate one summarization pass with committed compaction
     - Route outputs to session, daily, durable memory, current state, and commitments under separate policies
