@@ -123,7 +123,7 @@
     - Allow user inspection/edit and preserve earlier plan revisions
     - Evaluate routing and plan quality on the fixed corpus
     - _Requirements: 11.1-11.3, 11.6_
-  - [ ] 4.4 Deterministic checks and bounded independent review
+  - [x] 4.4 Deterministic checks and bounded independent review
     - Implement file, command, schema, content, external-query, reviewer, and user checks
     - Run deterministic checks before optional model review
     - Give reviewer original request, plan, final response, artifacts, and check results

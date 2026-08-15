@@ -739,7 +739,7 @@ requires = ["4.2"]
 
 [task.4.4]
 title  = "Deterministic checks and bounded independent review"
-status = "pending"
+status = "done"
 wave   = 9
 do_1   = "Implement file, command, schema, content, external-query, reviewer, and user checks"
 do_2   = "Run deterministic checks before optional model review"
