@@ -270,7 +270,7 @@
     - Release active turn and evict eligible kernel/worker resources
     - Run every trigger across duplicates, cancellation, expiry, worker/daemon restart, and resume
     - _Requirements: 30.1-30.6_
-  - [ ] 8.3 Awareness normalization and current-state service
+  - [x] 8.3 Awareness normalization and current-state service
     - Implement AwarenessEvent sources, identities, deduplication, summaries, and artifact refs
     - Implement bounded watchers for files, repositories, children, processes, channels, goals, and idle
     - Implement current focus, project, relationship, commitment, routine, waiting, and feedback projections

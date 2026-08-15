@@ -985,7 +985,7 @@ requires = ["6.1", "8.1"]
 
 [task.8.3]
 title  = "Awareness normalization and current-state service"
-status = "pending"
+status = "done"
 wave   = 15
 do_1   = "Implement AwarenessEvent sources, identities, deduplication, summaries, and artifact refs"
 do_2   = "Implement bounded watchers for files, repositories, children, processes, channels, goals, and idle"
