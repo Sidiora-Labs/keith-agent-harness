@@ -256,7 +256,7 @@
 ## Phase 8 — Scheduler, Commitments, Awareness, Attention, and Presence
 
 - [ ] 8. The Persistent Life Loop
-  - [ ] 8.1 Persistent scheduler and missed-run recovery
+  - [x] 8.1 Persistent scheduler and missed-run recovery
     - Implement one-time, interval, calendar, time-zone, state, reply route, and missed-run models
     - Implement transactional claims, stable action IDs, retries, recurring advancement, pause/resume/update/delete
     - Enqueue due work through the AgentSession action inbox

@@ -961,7 +961,7 @@ status  = "pending"
 
 [task.8.1]
 title  = "Persistent scheduler and missed-run recovery"
-status = "pending"
+status = "done"
 wave   = 13
 do_1   = "Implement one-time, interval, calendar, time-zone, state, reply route, and missed-run models"
 do_2   = "Implement transactional claims, stable action IDs, retries, recurring advancement, pause/resume/update/delete"
