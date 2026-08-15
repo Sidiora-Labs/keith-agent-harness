@@ -245,7 +245,7 @@
     - Integrate knowledge sources with retrieval and context
     - Test links, rename, broken links, conflicts, deletion, search, and rebuild
     - _Requirements: 27.1-27.5_
-  - [ ] 7.6 Skill discovery, relevance selection, and lifecycle
+  - [x] 7.6 Skill discovery, relevance selection, and lifecycle
     - Implement SKILL package schema, provenance, global/project/profile precedence, and immutable built-ins
     - Implement relevance and ready-tool selection within context budgets
     - Keep loading declarative and route executable resources through tools/plugins/MCP

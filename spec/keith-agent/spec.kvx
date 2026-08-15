@@ -944,7 +944,7 @@ requires = ["7.4"]
 
 [task.7.6]
 title  = "Skill discovery, relevance selection, and lifecycle"
-status = "pending"
+status = "done"
 wave   = 14
 do_1   = "Implement SKILL package schema, provenance, global/project/profile precedence, and immutable built-ins"
 do_2   = "Implement relevance and ready-tool selection within context budgets"
