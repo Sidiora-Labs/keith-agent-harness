@@ -1144,7 +1144,7 @@ requires = ["2.4", "6.1", "8.5", "9.2"]
 
 [task.11.2]
 title  = "Ratatui terminal application"
-status = "pending"
+status = "done"
 wave   = 18
 do_1   = "Build attach, supervised-local, optional remote, startup, reconnect, and shutdown flows"
 do_2   = "Build streaming chat, composer, history, queue/steer/cancel/retry/branch/resume, sessions, and models"

@@ -366,7 +366,7 @@
     - Implement bounded history virtualization contracts and slow-client states
     - Run deterministic reducer, gap, duplicate, out-of-order, coalescing, and no-phantom-state tests
     - _Requirements: 8.1-8.5, 33.1-33.5, 40.1-40.2, 40.5_
-  - [ ] 11.2 Ratatui terminal application
+  - [x] 11.2 Ratatui terminal application
     - Build attach, supervised-local, optional remote, startup, reconnect, and shutdown flows
     - Build streaming chat, composer, history, queue/steer/cancel/retry/branch/resume, sessions, and models
     - Build goals, plans, children, tools, kernels, artifacts, schedules, commitments, waits, memory, knowledge, channels, refinement, logs, and diagnostics

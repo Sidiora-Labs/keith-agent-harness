@@ -546,10 +546,10 @@ impl DaemonCore {
                 self.command_ledger.record(envelope.clone());
                 envelope
             };
-            transport.send(&WireMessage::CommandResult(result))?;
             for event in recovery_events {
                 transport.send(&WireMessage::Event(event))?;
             }
+            transport.send(&WireMessage::CommandResult(result))?;
         }
         Ok(())
     }

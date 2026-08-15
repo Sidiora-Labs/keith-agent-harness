@@ -7,10 +7,26 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+crossterm.workspace = true
+keith-agent-types = { path = "../../crates/agent-types" }
+keith-connection = { path = "../../crates/connection" }
+keith-protocol = { path = "../../crates/protocol" }
+keith-ui-model = { path = "../../crates/ui-model" }
+ratatui.workspace = true
+signal-hook.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tungstenite.workspace = true
+unicode-width.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+keith-daemon-core = { path = "../../crates/daemon-core" }
+
 [[bin]]
 name = "agent-tui"
 path = "src/main.rs"
 
 [lints]
 workspace = true
-
