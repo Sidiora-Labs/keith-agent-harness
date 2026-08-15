@@ -239,7 +239,7 @@
     - Implement fallback, corruption quarantine, rebuild, deletion, and source citations
     - Run multilingual, identifier, spelling, semantic, corruption, deletion, and isolation corpus
     - _Requirements: 26.1-26.6_
-  - [ ] 7.5 Linked Markdown knowledge service
+  - [x] 7.5 Linked Markdown knowledge service
     - Implement knowledge page CRUD through workspace transactions
     - Implement relative-link extraction, backlinks, orphan detection, related pages, safe rename, and repair
     - Integrate knowledge sources with retrieval and context

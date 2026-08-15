@@ -933,7 +933,7 @@ requires = ["7.2"]
 
 [task.7.5]
 title  = "Linked Markdown knowledge service"
-status = "pending"
+status = "done"
 wave   = 14
 do_1   = "Implement knowledge page CRUD through workspace transactions"
 do_2   = "Implement relative-link extraction, backlinks, orphan detection, related pages, safe rename, and repair"

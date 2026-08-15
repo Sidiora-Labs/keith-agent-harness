@@ -288,6 +288,51 @@ impl PersonalWorkspace {
         )
     }
 
+    /// Atomically deletes an editable file or returns a human/agent conflict proposal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unauthorized paths, missing files, or persistence failure.
+    pub fn delete(
+        &self,
+        actor: WorkspaceActor,
+        path: impl AsRef<Path>,
+        expected: &FileToken,
+        now: UtcTimestamp,
+    ) -> Result<EditOutcome, PersonalWorkspaceError> {
+        let path = editable_path(path.as_ref())?;
+        authorize(actor, &path)?;
+        let _mutation = self.mutation()?;
+        self.scan_locked(now)?;
+        let mut state = self.state()?;
+        let current_token = token_from_state(&state, &path);
+        if &current_token != expected {
+            return Ok(EditOutcome::Conflict(self.merge_proposal(
+                &state,
+                &path,
+                expected,
+                &[],
+            )?));
+        }
+        let digest = expected
+            .digest
+            .as_ref()
+            .ok_or(PersonalWorkspaceError::MissingVersion)?;
+        self.inner
+            .filesystem
+            .delete(&path, &ExpectedPreimage::Sha256(digest.clone()))?;
+        let version = record_version(
+            &self.inner.root,
+            &mut state,
+            path,
+            None,
+            VersionOrigin::Agent,
+            now,
+        )?;
+        persist_index(&self.inner.root, &state)?;
+        Ok(EditOutcome::Written(version))
+    }
+
     fn edit_with_origin(
         &self,
         actor: WorkspaceActor,
