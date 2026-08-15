@@ -803,7 +803,7 @@ requires = ["5.1", "5.2"]
 
 [task.5.4]
 title  = "Credential store and adapter-scoped secret flow"
-status = "pending"
+status = "done"
 wave   = 9
 do_1   = "Implement OS/restricted encrypted credential backend and non-secret references"
 do_2   = "Implement provider, channel, MCP, and tool scoped in-memory resolution"

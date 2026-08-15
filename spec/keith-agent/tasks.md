@@ -161,7 +161,7 @@
     - Neutralize hostile page content and keep cookies/passwords/raw profiles outside model and client events
     - Run SSRF, rebinding, redirects, prompt injection, popup, download, secret, cancellation, and profile-isolation tests
     - _Requirements: 14.3-14.6, 15.3, 47.1-47.3_
-  - [ ] 5.4 Credential store and adapter-scoped secret flow
+  - [x] 5.4 Credential store and adapter-scoped secret flow
     - Implement OS/restricted encrypted credential backend and non-secret references
     - Implement provider, channel, MCP, and tool scoped in-memory resolution
     - Implement write-only authenticated browser configuration and redacted inspection
