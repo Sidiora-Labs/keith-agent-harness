@@ -42,6 +42,8 @@ tungstenite = { version = "0.28.0", default-features = false, features = ["hands
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 url = "2.5.8"
 ulid = "1.2.1"
+wasmtime = { version = "36.0.2", default-features = false, features = ["cranelift", "runtime"] }
+wat = "1.240.0"
 
 [profile.release]
 codegen-units = 1

@@ -1079,7 +1079,7 @@ status  = "pending"
 
 [task.10.1]
 title  = "WASI plugin SDK, host, lifecycle, and safe mode"
-status = "pending"
+status = "done"
 wave   = 15
 do_1   = "Define versioned manifest, tool/command hooks, requested resources, and host interface"
 do_2   = "Implement WASI stores with empty ambient authority and configured bounded grants"

@@ -327,7 +327,7 @@
 ## Phase 10 — Plugins, MCP, and Reversible Refinement
 
 - [ ] 10. WASI Extensions, Managed MCP, Background Workspace Evolution, and Learned Skills
-  - [ ] 10.1 WASI plugin SDK, host, lifecycle, and safe mode
+  - [x] 10.1 WASI plugin SDK, host, lifecycle, and safe mode
     - Define versioned manifest, tool/command hooks, requested resources, and host interface
     - Implement WASI stores with empty ambient authority and configured bounded grants
     - Implement discovery, validation, activation, health, disable, update, migration, uninstall, and safe mode
