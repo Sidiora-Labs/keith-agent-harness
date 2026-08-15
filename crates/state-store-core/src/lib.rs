@@ -22,6 +22,7 @@ pub enum Collection {
     ScheduledJobs,
     JobAttempts,
     RoutingRules,
+    ResourceGovernance,
     ChannelOffsets,
     Deliveries,
     AttentionCandidates,
@@ -48,6 +49,7 @@ impl Collection {
             Self::ScheduledJobs => "scheduled_jobs",
             Self::JobAttempts => "job_attempts",
             Self::RoutingRules => "routing_rules",
+            Self::ResourceGovernance => "resource_governance",
             Self::ChannelOffsets => "channel_offsets",
             Self::Deliveries => "deliveries",
             Self::AttentionCandidates => "attention_candidates",
@@ -219,6 +221,13 @@ repository_trait!(
     list_routes,
     put_route,
     delete_route
+);
+repository_trait!(
+    ResourceRepository,
+    get_resource_record,
+    list_resource_records,
+    put_resource_record,
+    delete_resource_record
 );
 repository_trait!(
     ChannelOffsetRepository,

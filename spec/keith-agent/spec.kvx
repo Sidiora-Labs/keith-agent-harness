@@ -868,7 +868,7 @@ requires = ["5.5", "6.1"]
 
 [task.6.3]
 title  = "Hierarchical budgets, fairness, and idle reclamation"
-status = "pending"
+status = "done"
 wave   = 12
 do_1   = "Implement installation, profile, tree, session, goal, action, provider, tool, child, kernel, browser, process, channel, and background limits"
 do_2   = "Implement resource accounting and user-safe projections"

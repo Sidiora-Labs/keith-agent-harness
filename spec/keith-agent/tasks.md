@@ -200,7 +200,7 @@
     - Implement cancellation, orphan detection, restart recovery, archive, and delete
     - Run nested, parallel, failure, parent restart, orphan, artifact, and limit journeys
     - _Requirements: 21.1-21.6_
-  - [ ] 6.3 Hierarchical budgets, fairness, and idle reclamation
+  - [x] 6.3 Hierarchical budgets, fairness, and idle reclamation
     - Implement installation, profile, tree, session, goal, action, provider, tool, child, kernel, browser, process, channel, and background limits
     - Implement resource accounting and user-safe projections
     - Implement fair semaphores and priority-aware scheduling

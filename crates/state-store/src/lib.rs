@@ -13,8 +13,8 @@ use keith_state_store_core::{
     ChannelOffsetRepository, ChildMessageRepository, ChildRepository, Collection, CommitReceipt,
     CommitmentRepository, DeliveryRepository, GenerationRepository, GoalRepository,
     InitiativeRepository, JobAttemptRepository, LeaseRepository, MigrationRepository,
-    PlanRepository, ProfileRepository, RecordMutation, RefinementRepository, RouteRepository,
-    ScheduleRepository, ToolExperienceRepository, VersionedRecord, WaitRepository,
+    PlanRepository, ProfileRepository, RecordMutation, RefinementRepository, ResourceRepository,
+    RouteRepository, ScheduleRepository, ToolExperienceRepository, VersionedRecord, WaitRepository,
     WritePrecondition,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -670,6 +670,14 @@ implement_repository!(
     delete_route
 );
 implement_repository!(
+    ResourceRepository,
+    Collection::ResourceGovernance,
+    get_resource_record,
+    list_resource_records,
+    put_resource_record,
+    delete_resource_record
+);
+implement_repository!(
     ChannelOffsetRepository,
     Collection::ChannelOffsets,
     get_channel_offset,
@@ -970,6 +978,7 @@ mod tests {
                 + ScheduleRepository<Error = StoreError>
                 + JobAttemptRepository<Error = StoreError>
                 + RouteRepository<Error = StoreError>
+                + ResourceRepository<Error = StoreError>
                 + ChannelOffsetRepository<Error = StoreError>
                 + DeliveryRepository<Error = StoreError>
                 + AttentionRepository<Error = StoreError>
