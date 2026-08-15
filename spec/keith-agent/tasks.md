@@ -7,7 +7,7 @@
 ## Phase 1 — Contracts and Rust Foundation
 
 - [ ] 1. Workspace, Common Types, Configuration, Storage Traits, and Test Harness
-  - [ ] 1.1 Cargo workspace and dependency-boundary enforcement
+  - [x] 1.1 Cargo workspace and dependency-boundary enforcement
     - Create the complete Cargo workspace and application layout from ../shematics.md
     - Define crate ownership and dependency rules and add automated forbidden-edge checks
     - Configure formatting, linting, compilation, documentation, dependency, license, and security checks

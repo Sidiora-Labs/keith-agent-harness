@@ -1,0 +1,16 @@
+[package]
+name = "keith-agent-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "agent-tui"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+

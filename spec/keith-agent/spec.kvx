@@ -547,7 +547,7 @@ status  = "pending"
 
 [task.1.1]
 title  = "Cargo workspace and dependency-boundary enforcement"
-status = "pending"
+status = "done"
 wave   = 1
 do_1   = "Create the complete Cargo workspace and application layout from ../shematics.md"
 do_2   = "Define crate ownership and dependency rules and add automated forbidden-edge checks"
