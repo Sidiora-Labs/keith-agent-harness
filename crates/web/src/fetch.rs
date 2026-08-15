@@ -559,6 +559,29 @@ mod tests {
     }
 
     #[test]
+    fn redirect_targets_are_revalidated_before_connection() {
+        let client = SafeWebClient::new(
+            WebPolicy::default(),
+            SequenceResolver::new([
+                vec![socket("93.184.216.34:443")],
+                vec![socket("169.254.169.254:80")],
+            ]),
+        );
+        let initial = client
+            .validator
+            .validate("https://public.invalid/start")
+            .expect("initial public destination");
+        let redirect = initial
+            .url
+            .join("http://metadata.invalid/latest")
+            .expect("redirect URL");
+        assert!(matches!(
+            client.validator.validate(redirect.as_str()),
+            Err(WebError::PrivateDestination)
+        ));
+    }
+
+    #[test]
     fn denies_secret_bearing_urls() {
         let validator = DestinationValidator::new(SequenceResolver::new([
             vec![socket("93.184.216.34:443")],

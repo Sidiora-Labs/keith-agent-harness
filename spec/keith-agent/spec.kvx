@@ -1243,7 +1243,7 @@ requires = ["2.2", "4.2", "5.4"]
 
 [task.12.5]
 title  = "Adversarial security and privacy integration gate"
-status = "pending"
+status = "done"
 wave   = 22
 do_1   = "Build the complete filesystem, process, network, content, archive, plugin, MCP, kernel, browser, and secret attack corpus"
 do_2   = "Build cross-profile, channel, session, route, lease, event, schedule, delivery, and deletion isolation attacks"

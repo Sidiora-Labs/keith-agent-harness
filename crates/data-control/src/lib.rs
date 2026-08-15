@@ -988,4 +988,18 @@ mod tests {
             Err(DataControlError::PathEscape)
         ));
     }
+
+    #[test]
+    fn compressed_archive_bombs_are_rejected_without_expansion() {
+        let zip_bomb = [
+            b'P', b'K', 3, 4, 20, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x7f,
+        ];
+        let gzip_bomb = [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3, 3, 0];
+        for bytes in [&zip_bomb[..], &gzip_bomb[..]] {
+            assert!(matches!(
+                PortableExport::from_bytes(bytes),
+                Err(DataControlError::Json(_))
+            ));
+        }
+    }
 }

@@ -956,6 +956,18 @@ esac
                     }
                     request.push_str(&line);
                 }
+                let content_length = request
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                let mut request_body = vec![0_u8; content_length];
+                reader
+                    .read_exact(&mut request_body)
+                    .expect("complete HTTP request body");
                 let (status, body) = if request.contains("Authorization: secret") {
                     (
                         "200 OK",

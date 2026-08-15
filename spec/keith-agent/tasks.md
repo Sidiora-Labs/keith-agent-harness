@@ -424,7 +424,7 @@
     - Implement user-reviewable bounded diagnostic bundles
     - Seed secrets/private content through every subsystem and prove redaction with actionable diagnostics
     - _Requirements: 45.1-45.6_
-  - [ ] 12.5 Adversarial security and privacy integration gate
+  - [x] 12.5 Adversarial security and privacy integration gate
     - Build the complete filesystem, process, network, content, archive, plugin, MCP, kernel, browser, and secret attack corpus
     - Build cross-profile, channel, session, route, lease, event, schedule, delivery, and deletion isolation attacks
     - Build browser origin, CSRF, authentication, payload, rate, rendering, terminal escape, and attachment attacks

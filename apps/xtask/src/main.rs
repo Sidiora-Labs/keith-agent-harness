@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+mod security;
+
 fn main() -> ExitCode {
     let result = match env::args().nth(1).as_deref() {
         Some("ci") => ci(),
@@ -18,8 +20,9 @@ fn main() -> ExitCode {
             &workspace_root(),
             matches!(env::args().nth(2).as_deref(), Some("--write")),
         ),
+        Some("security-gate") => security::run(&workspace_root()),
         _ => Err(
-            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]|protocol-doc [--write]>".into(),
+            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]|protocol-doc [--write]|security-gate>".into(),
         ),
     };
 
@@ -46,6 +49,7 @@ fn ci() -> Result<(), String> {
     dependency_policy(&root)?;
     schema_document(&root, false)?;
     protocol_document(&root, false)?;
+    security::run(&root)?;
     run(
         &root,
         "cargo",

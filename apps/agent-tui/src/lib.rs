@@ -647,6 +647,12 @@ mod tests {
     }
 
     #[test]
+    fn terminal_control_sequences_are_neutralized_before_rendering() {
+        let output = render::terminal_safe("safe\u{1b}[2J\u{7}still visible");
+        assert_eq!(output, "safe�[2J�still visible");
+    }
+
+    #[test]
     fn queue_cancel_retry_branch_resume_and_navigation_remain_protocol_commands() {
         let mut app = TuiApp::new(Accessibility::default());
         let session_id = SessionId::new();

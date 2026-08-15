@@ -74,7 +74,7 @@ fn render_tiny(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palette
         Line::from(format!("Status: {status}")),
         Line::from("Terminal is narrow. Resize for navigation and history."),
         Line::from("Ctrl-Q quit  Tab view  Enter send"),
-        Line::from(format!("> {}", app.composer)),
+        Line::from(format!("> {}", terminal_safe(&app.composer))),
     ]);
     frame.render_widget(
         Paragraph::new(text)
@@ -139,7 +139,7 @@ fn render_surface(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Pale
                 format!(
                     "{} {}  {:?}  {}",
                     if selected { ">" } else { " " },
-                    session.title.as_deref().unwrap_or("Untitled session"),
+                    terminal_safe(session.title.as_deref().unwrap_or("Untitled session")),
                     session.state,
                     session.session_id
                 )
@@ -174,7 +174,7 @@ fn chat_lines(app: &TuiApp, height: u16) -> Vec<String> {
     let start = end.saturating_sub(visible);
     snapshot.messages[start..end]
         .iter()
-        .map(|message| format!("{:?}: {}", message.role, message.text))
+        .map(|message| format!("{:?}: {}", message.role, terminal_safe(&message.text)))
         .collect()
 }
 
@@ -188,12 +188,12 @@ fn projection_lines(app: &TuiApp, surface: Surface) -> Vec<String> {
         Surface::Goals => snapshot
             .goals
             .iter()
-            .map(|goal| format!("{:?}  {}", goal.state, goal.objective))
+            .map(|goal| format!("{:?}  {}", goal.state, terminal_safe(&goal.objective)))
             .collect(),
         Surface::Queue => snapshot
             .actions
             .iter()
-            .map(|action| format!("{}  {}", action.state, action.source))
+            .map(|action| format!("{}  {}", action.state, terminal_safe(&action.source)))
             .collect(),
         Surface::Models => {
             vec!["Model selection is submitted through the shared SelectModel command.".into()]
@@ -201,12 +201,12 @@ fn projection_lines(app: &TuiApp, surface: Surface) -> Vec<String> {
         Surface::Plans => snapshot
             .plans
             .iter()
-            .map(|plan| format!("{}  {}", plan.state, plan.summary))
+            .map(|plan| format!("{}  {}", plan.state, terminal_safe(&plan.summary)))
             .collect(),
         Surface::Children => snapshot
             .children
             .iter()
-            .map(|child| format!("{}  {}", child.state, child.objective))
+            .map(|child| format!("{}  {}", child.state, terminal_safe(&child.objective)))
             .collect(),
         Surface::Tools => snapshot
             .tools
@@ -231,7 +231,7 @@ fn projection_lines(app: &TuiApp, surface: Surface) -> Vec<String> {
         Surface::Commitments => snapshot
             .commitments
             .iter()
-            .map(|item| format!("{}  {}", item.state, item.summary))
+            .map(|item| format!("{}  {}", item.state, terminal_safe(&item.summary)))
             .collect(),
         Surface::Waiting => snapshot
             .waits
@@ -242,13 +242,17 @@ fn projection_lines(app: &TuiApp, surface: Surface) -> Vec<String> {
             .confirmations
             .iter()
             .map(|confirmation| {
-                format!("{}  {}", confirmation.confirmation_id, confirmation.summary)
+                format!(
+                    "{}  {}",
+                    confirmation.confirmation_id,
+                    terminal_safe(&confirmation.summary)
+                )
             })
             .collect(),
         Surface::Memory => snapshot
             .memory_changes
             .iter()
-            .map(|change| format!("{:?}  {}", change.change, change.source))
+            .map(|change| format!("{:?}  {}", change.change, terminal_safe(&change.source)))
             .collect(),
         Surface::Diagnostics => vec![
             format!("Generation: {}", snapshot.generation.get()),
@@ -258,7 +262,7 @@ fn projection_lines(app: &TuiApp, surface: Surface) -> Vec<String> {
             format!("Composer display width: {}", app.composer_display_width()),
             format!("Queued commands: {}", app.pending_len()),
         ],
-        Surface::Logs => app.logs().iter().cloned().collect(),
+        Surface::Logs => app.logs().iter().map(|line| terminal_safe(line)).collect(),
         Surface::Artifacts => vec!["Artifacts are exposed by tool and export projections.".into()],
         Surface::Knowledge => {
             vec!["Knowledge changes use shared memory and command results.".into()]
@@ -277,7 +281,7 @@ fn render_composer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Pal
         " Message  Select a session before sending "
     };
     frame.render_widget(
-        Paragraph::new(app.composer.as_str())
+        Paragraph::new(terminal_safe(&app.composer))
             .block(Block::new().title(label))
             .style(Style::new().bg(palette.layer).fg(palette.text))
             .wrap(Wrap { trim: false }),
@@ -298,6 +302,19 @@ fn render_composer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Pal
             .min(area.bottom().saturating_sub(1));
         frame.set_cursor_position(Position::new(x, y));
     }
+}
+
+pub(crate) fn terminal_safe(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() && !matches!(character, '\n' | '\t') {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn render_status(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palette) {
