@@ -620,7 +620,7 @@ requires = ["1.4", "2.1"]
 
 [task.2.3]
 title  = "Root-tree leases, worker generations, and private framing"
-status = "pending"
+status = "done"
 wave   = 4
 do_1   = "Implement transactional leases, renewal, expiry, takeover, and stale-writer shutdown"
 do_2   = "Implement length-prefixed authenticated supervisor/worker framing"

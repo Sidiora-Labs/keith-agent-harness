@@ -51,7 +51,7 @@
     - Keep arbitrary execution and model turns outside the daemon
     - Process-test daemon restart and unrelated-worker crash containment
     - _Requirements: 3.1-3.6_
-  - [ ] 2.3 Root-tree leases, worker generations, and private framing
+  - [x] 2.3 Root-tree leases, worker generations, and private framing
     - Implement transactional leases, renewal, expiry, takeover, and stale-writer shutdown
     - Implement length-prefixed authenticated supervisor/worker framing
     - Implement worker generations, ready/heartbeat/idle/fatal/shutdown messages, and ownership checks

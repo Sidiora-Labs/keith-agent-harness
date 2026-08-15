@@ -247,11 +247,11 @@ impl DaemonCore {
         let data_root = data_root.into();
         fs::create_dir_all(&data_root)?;
         let catalog = RootCatalog::discover(&data_root)?;
-        let mut supervisor = WorkerSupervisor::new(
+        let mut supervisor = WorkerSupervisor::open(
             data_root.join("runtime"),
             worker_executable,
             options.supervisor.clone(),
-        );
+        )?;
         supervisor.adopt_existing()?;
         Ok(Self {
             instance_id: EntityId::new(),

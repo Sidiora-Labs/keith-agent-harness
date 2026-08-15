@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use keith_agent_types::{Generation, RootTreeId, UtcTimestamp, WorkerId};
 use keith_worker_runtime::{
+    LeaseError, LeaseGrant, LeaseManager, PrivateMessage, PrivateProtocolError, PrivateTransport,
     WorkerRegistration, WorkerRunState, read_registration, registration_path,
 };
 use nix::errno::Errno;
@@ -50,6 +52,11 @@ pub enum WorkerEvent {
         generation: Generation,
         success: Option<bool>,
     },
+    Fatal {
+        root_tree_id: RootTreeId,
+        generation: Generation,
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +65,7 @@ pub struct SupervisorOptions {
     pub drain_timeout: Duration,
     pub stale_heartbeat: Duration,
     pub heartbeat_interval: Duration,
+    pub lease_duration: Duration,
 }
 
 impl Default for SupervisorOptions {
@@ -67,12 +75,15 @@ impl Default for SupervisorOptions {
             drain_timeout: Duration::from_secs(2),
             stale_heartbeat: Duration::from_secs(2),
             heartbeat_interval: Duration::from_millis(100),
+            lease_duration: Duration::from_secs(2),
         }
     }
 }
 
 struct ManagedWorker {
     registration: WorkerRegistration,
+    grant: LeaseGrant,
+    control: Option<PrivateTransport<UnixStream>>,
     child: Option<Child>,
     last_activity: Instant,
     draining: bool,
@@ -80,8 +91,10 @@ struct ManagedWorker {
 
 pub struct WorkerSupervisor {
     state_dir: PathBuf,
+    lease_database: PathBuf,
     executable: PathBuf,
     options: SupervisorOptions,
+    leases: LeaseManager,
     workers: BTreeMap<RootTreeId, ManagedWorker>,
 }
 
@@ -91,6 +104,10 @@ pub enum SupervisorError {
     Io(#[from] std::io::Error),
     #[error("worker registration failed: {0}")]
     Registration(#[from] keith_worker_runtime::WorkerRuntimeError),
+    #[error(transparent)]
+    Lease(#[from] LeaseError),
+    #[error(transparent)]
+    Private(#[from] PrivateProtocolError),
     #[error("worker {0} is already active")]
     AlreadyActive(RootTreeId),
     #[error("worker {0} is not active")]
@@ -102,31 +119,56 @@ pub enum SupervisorError {
         root_tree_id: RootTreeId,
         status: std::process::ExitStatus,
     },
-    #[error("worker generation overflow for {0}")]
-    GenerationOverflow(RootTreeId),
     #[error("worker signal failed: {0}")]
     Signal(Errno),
+    #[error("route for root {root_tree_id} generation {generation:?} is stale")]
+    StaleRoute {
+        root_tree_id: RootTreeId,
+        generation: Generation,
+    },
+    #[error("lease duration must exceed two heartbeat intervals")]
+    InvalidLeaseDuration,
 }
 
 impl WorkerSupervisor {
-    pub fn new(
-        state_dir: impl Into<PathBuf>,
-        executable: impl Into<PathBuf>,
-        options: SupervisorOptions,
-    ) -> Self {
-        Self {
-            state_dir: state_dir.into(),
-            executable: executable.into(),
-            options,
-            workers: BTreeMap::new(),
-        }
-    }
-
-    /// Adopts live workers from their metadata registrations without starting new processes.
+    /// Opens the durable lease authority and constructs an empty supervisor.
     ///
     /// # Errors
     ///
-    /// Returns an error when the registration directory cannot be read or contains invalid data.
+    /// Returns an error when the lease database cannot be opened or timing is unsafe.
+    pub fn open(
+        state_dir: impl Into<PathBuf>,
+        executable: impl Into<PathBuf>,
+        options: SupervisorOptions,
+    ) -> Result<Self, SupervisorError> {
+        if options.heartbeat_interval.is_zero()
+            || options.lease_duration <= options.heartbeat_interval.saturating_mul(2)
+        {
+            return Err(SupervisorError::InvalidLeaseDuration);
+        }
+        let state_dir = state_dir.into();
+        fs::create_dir_all(&state_dir)?;
+        let lease_database = state_dir.join("leases.sqlite");
+        let leases = LeaseManager::open(&lease_database)?;
+        Ok(Self {
+            state_dir,
+            lease_database,
+            executable: executable.into(),
+            options,
+            leases,
+            workers: BTreeMap::new(),
+        })
+    }
+
+    pub fn lease_database_path(&self) -> &Path {
+        &self.lease_database
+    }
+
+    /// Adopts live workers only when their registration and durable lease agree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when registrations, leases, or authenticated control cannot be read.
     pub fn adopt_existing(&mut self) -> Result<Vec<WorkerStatus>, SupervisorError> {
         let directory = self.state_dir.join("workers");
         let entries = match fs::read_dir(directory) {
@@ -147,10 +189,21 @@ impl WorkerSupervisor {
             {
                 continue;
             }
+            let Some(grant) = self.leases.current(&registration.root_tree_id)? else {
+                continue;
+            };
+            if grant.worker_id != registration.worker_id
+                || grant.generation != registration.generation
+            {
+                continue;
+            }
+            let control = connect_control(&registration, &grant, self.options.startup_timeout)?;
             self.workers
                 .entry(registration.root_tree_id.clone())
                 .or_insert(ManagedWorker {
                     registration,
+                    grant,
+                    control: Some(control),
                     child: None,
                     last_activity: Instant::now(),
                     draining: false,
@@ -159,16 +212,12 @@ impl WorkerSupervisor {
         Ok(self.statuses())
     }
 
-    /// Starts a worker and waits for its production runtime to publish readiness.
+    /// Claims a lease, starts a worker, and authenticates its ready message.
     ///
     /// # Errors
     ///
-    /// Returns an error when a live worker already exists or the child cannot become ready.
-    pub fn start(
-        &mut self,
-        root_tree_id: RootTreeId,
-        generation: Generation,
-    ) -> Result<WorkerStatus, SupervisorError> {
+    /// Returns an error when a live worker exists or claim, process, or handshake fails.
+    pub fn start(&mut self, root_tree_id: RootTreeId) -> Result<WorkerStatus, SupervisorError> {
         if self
             .workers
             .get(&root_tree_id)
@@ -177,24 +226,26 @@ impl WorkerSupervisor {
             return Err(SupervisorError::AlreadyActive(root_tree_id));
         }
         self.workers.remove(&root_tree_id);
-        let heartbeat_ms = self.options.heartbeat_interval.as_millis().max(1);
-        let mut child = Command::new(&self.executable)
-            .arg("--state-dir")
-            .arg(&self.state_dir)
-            .arg("--root-tree")
-            .arg(root_tree_id.to_string())
-            .arg("--generation")
-            .arg(generation.get().to_string())
-            .arg("--heartbeat-ms")
-            .arg(heartbeat_ms.to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let grant =
+            self.leases
+                .claim(&root_tree_id, WorkerId::new(), self.options.lease_duration)?;
+        let control_socket = self.state_dir.join("control").join(format!(
+            "{}-{}.sock",
+            root_tree_id,
+            grant.generation.get()
+        ));
+        let mut child = match self.spawn(&grant, &control_socket) {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = self.leases.release(&grant);
+                return Err(error);
+            }
+        };
         let deadline = Instant::now() + self.options.startup_timeout;
         let path = registration_path(&self.state_dir, &root_tree_id);
         loop {
             if let Some(status) = child.try_wait()? {
+                let _ = self.leases.release(&grant);
                 return Err(SupervisorError::StartupExit {
                     root_tree_id,
                     status,
@@ -202,27 +253,74 @@ impl WorkerSupervisor {
             }
             if let Ok(registration) = read_registration(&path)
                 && registration.pid == child.id()
-                && registration.root_tree_id == root_tree_id
-                && registration.generation == generation
+                && registration.worker_id == grant.worker_id
+                && registration.generation == grant.generation
                 && registration.state == WorkerRunState::Ready
             {
-                let worker = ManagedWorker {
-                    registration,
-                    child: Some(child),
-                    last_activity: Instant::now(),
-                    draining: false,
-                };
-                let status = status_for(&worker, self.options.stale_heartbeat);
-                self.workers.insert(root_tree_id, worker);
-                return Ok(status);
+                match connect_control(&registration, &grant, self.options.startup_timeout) {
+                    Ok(control) => {
+                        let worker = ManagedWorker {
+                            registration,
+                            grant,
+                            control: Some(control),
+                            child: Some(child),
+                            last_activity: Instant::now(),
+                            draining: false,
+                        };
+                        let status = status_for(&worker, self.options.stale_heartbeat);
+                        self.workers.insert(root_tree_id, worker);
+                        return Ok(status);
+                    }
+                    Err(error) if Instant::now() < deadline => {
+                        let _ = error;
+                    }
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = self.leases.release(&grant);
+                        return Err(error);
+                    }
+                }
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = self.leases.release(&grant);
                 return Err(SupervisorError::StartupTimeout { root_tree_id });
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn spawn(&self, grant: &LeaseGrant, control_socket: &Path) -> Result<Child, SupervisorError> {
+        let heartbeat_ms = self.options.heartbeat_interval.as_millis().max(1);
+        let lease_ms = self.options.lease_duration.as_millis().max(1);
+        Command::new(&self.executable)
+            .arg("--state-dir")
+            .arg(&self.state_dir)
+            .arg("--lease-db")
+            .arg(&self.lease_database)
+            .arg("--control-socket")
+            .arg(control_socket)
+            .arg("--root-tree")
+            .arg(grant.root_tree_id.to_string())
+            .arg("--worker-id")
+            .arg(grant.worker_id.to_string())
+            .arg("--generation")
+            .arg(grant.generation.get().to_string())
+            .arg("--authentication")
+            .arg(grant.authentication.to_string())
+            .arg("--expires-at")
+            .arg(grant.expires_at.unix_millis().to_string())
+            .arg("--heartbeat-ms")
+            .arg(heartbeat_ms.to_string())
+            .arg("--lease-ms")
+            .arg(lease_ms.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(SupervisorError::from)
     }
 
     pub fn statuses(&self) -> Vec<WorkerStatus> {
@@ -245,7 +343,32 @@ impl WorkerSupervisor {
         })
     }
 
-    /// Refreshes registrations and reports exits without disturbing unrelated workers.
+    /// Rejects stale-generation routing before a command reaches a worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless both in-memory and durable ownership match.
+    pub fn validate_route(
+        &self,
+        root_tree_id: &RootTreeId,
+        generation: Generation,
+    ) -> Result<(), SupervisorError> {
+        let Some(worker) = self.workers.get(root_tree_id) else {
+            return Err(SupervisorError::StaleRoute {
+                root_tree_id: root_tree_id.clone(),
+                generation,
+            });
+        };
+        if worker.grant.generation != generation || self.leases.validate(&worker.grant).is_err() {
+            return Err(SupervisorError::StaleRoute {
+                root_tree_id: root_tree_id.clone(),
+                generation,
+            });
+        }
+        Ok(())
+    }
+
+    /// Refreshes registrations and private messages and isolates worker exits.
     ///
     /// # Errors
     ///
@@ -254,18 +377,40 @@ impl WorkerSupervisor {
         let roots: Vec<_> = self.workers.keys().cloned().collect();
         let mut events = Vec::new();
         for root in roots {
-            let exited = {
-                let Some(worker) = self.workers.get_mut(&root) else {
-                    continue;
-                };
-                let status = if let Some(child) = worker.child.as_mut() {
+            let mut exited = None;
+            if let Some(worker) = self.workers.get_mut(&root) {
+                exited = if let Some(child) = worker.child.as_mut() {
                     child.try_wait()?.map(|status| status.success())
                 } else if process_is_alive(worker.registration.pid) {
                     None
                 } else {
                     Some(false)
                 };
-                if status.is_none() {
+                if exited.is_none() {
+                    if let Some(control) = worker.control.as_mut() {
+                        match control.receive() {
+                            Ok(PrivateMessage::Heartbeat { at }) => {
+                                worker.registration.heartbeat_at = at;
+                            }
+                            Ok(PrivateMessage::Fatal { reason }) => {
+                                events.push(WorkerEvent::Fatal {
+                                    root_tree_id: root.clone(),
+                                    generation: worker.registration.generation,
+                                    reason,
+                                });
+                            }
+                            Ok(
+                                PrivateMessage::Idle { since: _ }
+                                | PrivateMessage::Ready { .. }
+                                | PrivateMessage::ShutdownAck
+                                | PrivateMessage::SupervisorHello
+                                | PrivateMessage::Shutdown { .. },
+                            ) => {}
+                            Err(error) if error.is_retryable_io() => {}
+                            Err(error) if error.is_connection_loss() => worker.control = None,
+                            Err(_) => worker.control = None,
+                        }
+                    }
                     let path = registration_path(&self.state_dir, &root);
                     if let Ok(registration) = read_registration(&path)
                         && registration.pid == worker.registration.pid
@@ -274,11 +419,11 @@ impl WorkerSupervisor {
                         worker.registration = registration;
                     }
                 }
-                status
-            };
+            }
             if let Some(success) = exited
                 && let Some(worker) = self.workers.remove(&root)
             {
+                let _ = self.leases.release(&worker.grant);
                 events.push(WorkerEvent::Exited {
                     root_tree_id: root,
                     generation: worker.registration.generation,
@@ -289,18 +434,31 @@ impl WorkerSupervisor {
         Ok(events)
     }
 
-    /// Gracefully stops a worker, forcing termination after the configured deadline.
+    /// Requests authenticated drain, then uses OS termination at the deadline.
     ///
     /// # Errors
     ///
-    /// Returns an error when no worker exists or signaling fails.
+    /// Returns an error when no worker exists or fallback signaling fails.
     pub fn drain(&mut self, root_tree_id: &RootTreeId) -> Result<(), SupervisorError> {
         let worker = self
             .workers
             .get_mut(root_tree_id)
             .ok_or_else(|| SupervisorError::NotActive(root_tree_id.clone()))?;
         worker.draining = true;
-        signal(worker.registration.pid, Signal::SIGTERM)?;
+        let deadline_at = UtcTimestamp::now()
+            .ok()
+            .and_then(|now| add_duration(now, self.options.drain_timeout))
+            .unwrap_or(UtcTimestamp::UNIX_EPOCH);
+        let requested = worker.control.as_mut().is_some_and(|control| {
+            control
+                .send(PrivateMessage::Shutdown {
+                    deadline: deadline_at,
+                })
+                .is_ok()
+        });
+        if !requested {
+            signal(worker.registration.pid, Signal::SIGTERM)?;
+        }
         let pid = worker.registration.pid;
         let deadline = Instant::now() + self.options.drain_timeout;
         while process_is_alive(pid) && Instant::now() < deadline {
@@ -316,8 +474,39 @@ impl WorkerSupervisor {
                 thread::sleep(Duration::from_millis(5));
             }
         }
-        self.workers.remove(root_tree_id);
-        Ok(())
+        let worker = self
+            .workers
+            .remove(root_tree_id)
+            .ok_or_else(|| SupervisorError::NotActive(root_tree_id.clone()))?;
+        match self.leases.release(&worker.grant) {
+            Ok(()) | Err(LeaseError::OwnershipLost(_)) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Immediately terminates and replaces a worker with a new generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when termination, release, or replacement startup fails.
+    pub fn force_replace(
+        &mut self,
+        root_tree_id: &RootTreeId,
+    ) -> Result<WorkerStatus, SupervisorError> {
+        let mut worker = self
+            .workers
+            .remove(root_tree_id)
+            .ok_or_else(|| SupervisorError::NotActive(root_tree_id.clone()))?;
+        signal(worker.registration.pid, Signal::SIGKILL)?;
+        if let Some(child) = worker.child.as_mut() {
+            let _ = child.wait();
+        } else {
+            while process_is_alive(worker.registration.pid) {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        self.leases.release(&worker.grant)?;
+        self.start(root_tree_id.clone())
     }
 
     /// Stops all workers as part of structured daemon shutdown.
@@ -338,28 +527,16 @@ impl WorkerSupervisor {
         first_error.map_or(Ok(()), Err)
     }
 
-    /// Restarts a worker with the next generation.
+    /// Gracefully replaces a worker with the next transactionally assigned generation.
     ///
     /// # Errors
     ///
-    /// Returns an error when shutdown, generation advancement, or startup fails.
+    /// Returns an error when drain or replacement startup fails.
     pub fn restart(&mut self, root_tree_id: &RootTreeId) -> Result<WorkerStatus, SupervisorError> {
-        let generation = self
-            .workers
-            .get(root_tree_id)
-            .map(|worker| worker.registration.generation)
-            .or_else(|| {
-                read_registration(&registration_path(&self.state_dir, root_tree_id))
-                    .ok()
-                    .map(|registration| registration.generation)
-            })
-            .unwrap_or(Generation::ZERO)
-            .checked_next()
-            .ok_or_else(|| SupervisorError::GenerationOverflow(root_tree_id.clone()))?;
         if self.workers.contains_key(root_tree_id) {
             self.drain(root_tree_id)?;
         }
-        self.start(root_tree_id.clone(), generation)
+        self.start(root_tree_id.clone())
     }
 
     /// Drains workers whose supervisor-observed activity exceeds `idle_limit`.
@@ -378,6 +555,59 @@ impl WorkerSupervisor {
             self.drain(root)?;
         }
         Ok(roots)
+    }
+}
+
+fn connect_control(
+    registration: &WorkerRegistration,
+    grant: &LeaseGrant,
+    timeout: Duration,
+) -> Result<PrivateTransport<UnixStream>, SupervisorError> {
+    let deadline = Instant::now() + timeout;
+    'connect: loop {
+        match UnixStream::connect(&registration.control_socket) {
+            Ok(stream) => {
+                stream.set_read_timeout(Some(Duration::from_millis(20)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+                let mut control = PrivateTransport::new(stream, grant.clone())?;
+                if let Err(error) = control.send(PrivateMessage::SupervisorHello) {
+                    if error.is_connection_loss() && Instant::now() < deadline {
+                        thread::sleep(Duration::from_millis(10));
+                        continue 'connect;
+                    }
+                    return Err(error.into());
+                }
+                loop {
+                    match control.receive() {
+                        Ok(PrivateMessage::Ready { pid }) if pid == registration.pid => {
+                            return Ok(control);
+                        }
+                        Ok(PrivateMessage::Heartbeat { .. } | PrivateMessage::Idle { .. }) => {}
+                        Ok(_) => return Err(PrivateProtocolError::StaleRoute.into()),
+                        Err(error) if error.is_retryable_io() && Instant::now() < deadline => {}
+                        Err(error) if error.is_connection_loss() && Instant::now() < deadline => {
+                            thread::sleep(Duration::from_millis(10));
+                            continue 'connect;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(SupervisorError::StartupTimeout {
+                            root_tree_id: registration.root_tree_id.clone(),
+                        });
+                    }
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 
@@ -460,6 +690,13 @@ fn read_resources(pid: u32) -> WorkerResourceState {
     }
 }
 
+fn add_duration(timestamp: UtcTimestamp, duration: Duration) -> Option<UtcTimestamp> {
+    i64::try_from(duration.as_millis())
+        .ok()
+        .and_then(|millis| timestamp.unix_millis().checked_add(millis))
+        .map(UtcTimestamp::from_unix_millis)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,11 +704,12 @@ mod tests {
     #[test]
     fn missing_registration_directory_is_an_empty_adoption_set() {
         let directory = tempfile::tempdir().unwrap();
-        let mut supervisor = WorkerSupervisor::new(
+        let mut supervisor = WorkerSupervisor::open(
             directory.path(),
             "/not/started/by-this-test",
             SupervisorOptions::default(),
-        );
+        )
+        .unwrap();
         assert!(supervisor.adopt_existing().unwrap().is_empty());
     }
 }

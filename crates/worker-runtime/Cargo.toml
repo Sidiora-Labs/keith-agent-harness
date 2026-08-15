@@ -8,11 +8,19 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+fs2.workspace = true
 keith-agent-types = { path = "../agent-types" }
+keith-connection = { path = "../connection" }
+keith-framing = { path = "../framing" }
+keith-state-store = { path = "../state-store" }
+keith-state-store-core = { path = "../state-store-core" }
 serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
