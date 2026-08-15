@@ -76,7 +76,7 @@
     - Make root and child construction use the same implementation
     - Property-test legal/illegal transitions and restart reconstruction
     - _Requirements: 5.1-5.6_
-  - [ ] 3.2 Persistent unified action inbox and action pump
+  - [x] 3.2 Persistent unified action inbox and action pump
     - Implement SessionAction, sources, priorities, delivery policies, limits, reply routes, and lifecycle
     - Implement FIFO-within-priority selection, expiry, cancellation, steering, and turn-boundary delivery
     - Persist pending/running/waiting/terminal action state

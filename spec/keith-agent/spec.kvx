@@ -661,7 +661,7 @@ requires = ["1.4", "2.3"]
 
 [task.3.2]
 title  = "Persistent unified action inbox and action pump"
-status = "pending"
+status = "done"
 wave   = 6
 do_1   = "Implement SessionAction, sources, priorities, delivery policies, limits, reply routes, and lifecycle"
 do_2   = "Implement FIFO-within-priority selection, expiry, cancellation, steering, and turn-boundary delivery"
