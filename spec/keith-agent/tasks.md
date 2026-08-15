@@ -147,7 +147,7 @@
     - Implement bounded lifecycle events, safe parallel grouping, cancellation, output limits, and retries
     - Build conformance harness and core read-only test tool
     - _Requirements: 13.1-13.6_
-  - [ ] 5.2 Workspace-rooted files and restricted shell runner
+  - [x] 5.2 Workspace-rooted files and restricted shell runner
     - Implement handle-relative list/read/search/write/edit/rename/copy/delete operations with path and symlink defense
     - Implement atomic writes, expected preimages, size bounds, cancellation, and change summaries
     - Implement argv-safe restricted process runner with minimal environment, working directory, limits, streaming, and process-tree cleanup

@@ -779,7 +779,7 @@ requires = ["3.1", "4.1"]
 
 [task.5.2]
 title  = "Workspace-rooted files and restricted shell runner"
-status = "pending"
+status = "done"
 wave   = 9
 do_1   = "Implement handle-relative list/read/search/write/edit/rename/copy/delete operations with path and symlink defense"
 do_2   = "Implement atomic writes, expected preimages, size bounds, cancellation, and change summaries"

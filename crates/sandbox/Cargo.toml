@@ -10,3 +10,5 @@ publish = false
 [lints]
 workspace = true
 
+[dependencies]
+serde.workspace = true
