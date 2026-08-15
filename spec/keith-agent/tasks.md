@@ -211,7 +211,7 @@
 ## Phase 7 — Profiles, Readable Memory, Knowledge, and Skills
 
 - [ ] 7. Profile Routing, Workspace State, Consolidation, Hybrid Retrieval, Knowledge, and Procedures
-  - [ ] 7.1 Profile registry and real model/workspace routing
+  - [x] 7.1 Profile registry and real model/workspace routing
     - Implement AgentProfile, WorkspaceId, model/tool/skill/MCP/plugin/channel/autonomy/notification/refinement settings
     - Implement deterministic route resolution before session creation
     - Persist profile snapshots in session metadata and apply deliberate updates

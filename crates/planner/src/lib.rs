@@ -899,6 +899,7 @@ mod tests {
                 workspace_id: WorkspaceId::new(),
                 created_at: UtcTimestamp::UNIX_EPOCH,
                 label: None,
+                profile_snapshot: None,
             })
             .unwrap();
         let mut writer = sessions

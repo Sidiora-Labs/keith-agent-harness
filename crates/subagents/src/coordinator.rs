@@ -192,6 +192,7 @@ where
                 workspace_id,
                 created_at: now,
                 label: Some(record.objective.clone()),
+                profile_snapshot: None,
             })?;
             let identity = child_identity(&record);
             let handle = AgentSession::spawn(identity, self.services(&record), 64)?;

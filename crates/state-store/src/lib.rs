@@ -13,8 +13,9 @@ use keith_state_store_core::{
     ChannelOffsetRepository, ChildMessageRepository, ChildRepository, Collection, CommitReceipt,
     CommitmentRepository, DeliveryRepository, GenerationRepository, GoalRepository,
     InitiativeRepository, JobAttemptRepository, LeaseRepository, MigrationRepository,
-    PlanRepository, RecordMutation, RefinementRepository, RouteRepository, ScheduleRepository,
-    ToolExperienceRepository, VersionedRecord, WaitRepository, WritePrecondition,
+    PlanRepository, ProfileRepository, RecordMutation, RefinementRepository, RouteRepository,
+    ScheduleRepository, ToolExperienceRepository, VersionedRecord, WaitRepository,
+    WritePrecondition,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
@@ -589,6 +590,14 @@ implement_repository!(
     delete_action
 );
 implement_repository!(
+    ProfileRepository,
+    Collection::Profiles,
+    get_profile,
+    list_profiles,
+    put_profile,
+    delete_profile
+);
+implement_repository!(
     ChildRepository,
     Collection::Children,
     get_child,
@@ -951,6 +960,7 @@ mod tests {
                 + GenerationRepository<Error = StoreError>
                 + CatalogRepository<Error = StoreError>
                 + ActionRepository<Error = StoreError>
+                + ProfileRepository<Error = StoreError>
                 + ChildRepository<Error = StoreError>
                 + ChildMessageRepository<Error = StoreError>
                 + GoalRepository<Error = StoreError>

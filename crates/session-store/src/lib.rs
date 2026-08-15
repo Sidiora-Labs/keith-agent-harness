@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use keith_agent_types::{
     ArtifactId, CURRENT_SCHEMA_VERSION, ChildId, EntityId, EntryId, Generation, GoalId, ProfileId,
-    RootTreeId, SchemaVersion, SessionId, ToolCallId, UtcTimestamp, WorkerId, WorkspaceId,
-    canonical_json_bytes,
+    Revision, RootTreeId, SchemaVersion, SessionId, ToolCallId, UtcTimestamp, WorkerId,
+    WorkspaceId, canonical_json_bytes,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,6 +39,60 @@ pub struct NewSession {
     pub workspace_id: WorkspaceId,
     pub created_at: UtcTimestamp,
     pub label: Option<String>,
+    pub profile_snapshot: Option<ProfileSnapshotMetadata>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileSnapshotMetadata {
+    pub version: SchemaVersion,
+    pub profile_id: ProfileId,
+    pub workspace_id: WorkspaceId,
+    pub revision: Revision,
+    pub captured_at: UtcTimestamp,
+    pub digest: String,
+    pub snapshot: serde_json::Value,
+}
+
+impl ProfileSnapshotMetadata {
+    /// Creates metadata with a digest over the canonical structured snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the snapshot cannot be serialized canonically.
+    pub fn new(
+        profile_id: ProfileId,
+        workspace_id: WorkspaceId,
+        revision: Revision,
+        captured_at: UtcTimestamp,
+        snapshot: serde_json::Value,
+    ) -> Result<Self, SessionStoreError> {
+        let digest = snapshot_digest(&snapshot)?;
+        Ok(Self {
+            version: CURRENT_SCHEMA_VERSION,
+            profile_id,
+            workspace_id,
+            revision,
+            captured_at,
+            digest,
+            snapshot,
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the stored digest or schema version is invalid.
+    pub fn verify(&self) -> Result<(), SessionStoreError> {
+        if self.version.major != CURRENT_SCHEMA_VERSION.major
+            || self.version.minor > CURRENT_SCHEMA_VERSION.minor
+            || self.digest != snapshot_digest(&self.snapshot)?
+        {
+            return Err(SessionStoreError::InvalidProfileSnapshot(
+                "schema version or digest mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -54,6 +108,8 @@ pub struct SessionManifest {
     pub created_at: UtcTimestamp,
     pub active_leaf: Option<EntryId>,
     pub label: Option<String>,
+    #[serde(default)]
+    pub profile_snapshot: Option<ProfileSnapshotMetadata>,
     pub branch_labels: BTreeMap<String, EntryId>,
     pub archived: bool,
 }
@@ -71,6 +127,7 @@ impl From<NewSession> for SessionManifest {
             created_at: value.created_at,
             active_leaf: None,
             label: value.label,
+            profile_snapshot: value.profile_snapshot,
             branch_labels: BTreeMap::new(),
             archived: false,
         }
@@ -627,6 +684,10 @@ pub enum SessionStoreError {
     InvalidCompaction(String),
     #[error("compaction selected leaf changed before commit")]
     StaleCompaction,
+    #[error("profile snapshot is invalid: {0}")]
+    InvalidProfileSnapshot(String),
+    #[error("profile snapshot changed before the deliberate update")]
+    StaleProfileSnapshot,
 }
 
 #[derive(Clone, Debug)]
@@ -1081,6 +1142,40 @@ impl SessionWriter {
         Ok(())
     }
 
+    /// Deliberately replaces the pinned route/profile snapshot using an optimistic digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the expected snapshot is stale or the replacement is invalid.
+    pub fn update_profile_snapshot(
+        &mut self,
+        expected_digest: Option<&str>,
+        replacement: ProfileSnapshotMetadata,
+    ) -> Result<(), SessionStoreError> {
+        self.ensure_writable()?;
+        let current_digest = self
+            .manifest
+            .profile_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.digest.as_str());
+        if current_digest != expected_digest {
+            return Err(SessionStoreError::StaleProfileSnapshot);
+        }
+        replacement.verify()?;
+        if replacement.profile_id != self.manifest.profile_id
+            || replacement.workspace_id != self.manifest.workspace_id
+        {
+            return Err(SessionStoreError::InvalidProfileSnapshot(
+                "profile or workspace identity differs from the session".into(),
+            ));
+        }
+        let mut next_manifest = self.manifest.clone();
+        next_manifest.profile_snapshot = Some(replacement);
+        write_manifest(&self.directory, &next_manifest)?;
+        self.manifest = next_manifest;
+        Ok(())
+    }
+
     /// # Errors
     ///
     /// Returns an error when history cannot be reconstructed.
@@ -1303,14 +1398,23 @@ fn validate_new_session(session: &NewSession) -> Result<(), SessionStoreError> {
         SessionKind::Root => session.parent_session_id.is_none(),
         SessionKind::DurableChild => session.parent_session_id.is_some(),
     };
-    if parent_valid {
-        Ok(())
-    } else {
-        Err(SessionStoreError::CorruptHistory {
+    if !parent_valid {
+        return Err(SessionStoreError::CorruptHistory {
             line: 0,
             reason: "session kind and parent identity disagree".into(),
-        })
+        });
     }
+    if let Some(snapshot) = &session.profile_snapshot {
+        snapshot.verify()?;
+        if snapshot.profile_id != session.profile_id
+            || snapshot.workspace_id != session.workspace_id
+        {
+            return Err(SessionStoreError::InvalidProfileSnapshot(
+                "profile or workspace identity differs from the new session".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn read_manifest(directory: &Path) -> Result<SessionManifest, SessionStoreError> {
@@ -1319,10 +1423,30 @@ fn read_manifest(directory: &Path) -> Result<SessionManifest, SessionStoreError>
     if manifest.version.major != CURRENT_SCHEMA_VERSION.major
         || manifest.version.minor > CURRENT_SCHEMA_VERSION.minor
     {
-        Err(SessionStoreError::UnsupportedVersion(manifest.version))
-    } else {
-        Ok(manifest)
+        return Err(SessionStoreError::UnsupportedVersion(manifest.version));
     }
+    if let Some(snapshot) = &manifest.profile_snapshot {
+        snapshot.verify()?;
+        if snapshot.profile_id != manifest.profile_id
+            || snapshot.workspace_id != manifest.workspace_id
+        {
+            return Err(SessionStoreError::InvalidProfileSnapshot(
+                "profile or workspace identity differs from the manifest".into(),
+            ));
+        }
+    }
+    Ok(manifest)
+}
+
+fn snapshot_digest(snapshot: &serde_json::Value) -> Result<String, SessionStoreError> {
+    let digest = Sha256::digest(canonical_json_bytes(snapshot)?);
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").map_err(|_| {
+            SessionStoreError::InvalidProfileSnapshot("digest formatting failed".into())
+        })?;
+    }
+    Ok(encoded)
 }
 
 fn write_manifest(directory: &Path, manifest: &SessionManifest) -> Result<(), SessionStoreError> {
@@ -1370,6 +1494,7 @@ mod tests {
             workspace_id: WorkspaceId::new(),
             created_at: UtcTimestamp::UNIX_EPOCH,
             label: Some("test".into()),
+            profile_snapshot: None,
         }
     }
 

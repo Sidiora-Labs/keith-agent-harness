@@ -11,6 +11,7 @@ pub enum Collection {
     WorkerLeases,
     WorkerGenerations,
     SessionCatalog,
+    Profiles,
     PendingActions,
     Children,
     ChildMessages,
@@ -36,6 +37,7 @@ impl Collection {
             Self::WorkerLeases => "worker_leases",
             Self::WorkerGenerations => "worker_generations",
             Self::SessionCatalog => "session_catalog",
+            Self::Profiles => "profiles",
             Self::PendingActions => "pending_actions",
             Self::Children => "children",
             Self::ChildMessages => "child_messages",
@@ -167,6 +169,13 @@ repository_trait!(
     delete_action
 );
 repository_trait!(GoalRepository, get_goal, list_goals, put_goal, delete_goal);
+repository_trait!(
+    ProfileRepository,
+    get_profile,
+    list_profiles,
+    put_profile,
+    delete_profile
+);
 repository_trait!(
     ChildRepository,
     get_child,

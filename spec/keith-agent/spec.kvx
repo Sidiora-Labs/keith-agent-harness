@@ -885,7 +885,7 @@ status  = "pending"
 
 [task.7.1]
 title  = "Profile registry and real model/workspace routing"
-status = "pending"
+status = "done"
 wave   = 11
 do_1   = "Implement AgentProfile, WorkspaceId, model/tool/skill/MCP/plugin/channel/autonomy/notification/refinement settings"
 do_2   = "Implement deterministic route resolution before session creation"
