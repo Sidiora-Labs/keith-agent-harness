@@ -232,7 +232,7 @@
     - Persist source references, sensitivity, retention, correction, supersession, and deletion metadata
     - Test destination separation, bounds, correction, deletion, and restart
     - _Requirements: 25.1-25.6_
-  - [ ] 7.4 Lexical, trigram, and optional vector retrieval
+  - [x] 7.4 Lexical, trigram, and optional vector retrieval
     - Implement source parser, chunks, versions, profile filters, and index lifecycle
     - Implement full-text and trigram retrieval with normalized rank merger
     - Implement optional embeddings and vector index behind replaceable traits

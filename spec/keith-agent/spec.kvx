@@ -921,7 +921,7 @@ requires = ["3.4", "7.2"]
 
 [task.7.4]
 title  = "Lexical, trigram, and optional vector retrieval"
-status = "pending"
+status = "done"
 wave   = 13
 do_1   = "Implement source parser, chunks, versions, profile filters, and index lifecycle"
 do_2   = "Implement full-text and trigram retrieval with normalized rank merger"
