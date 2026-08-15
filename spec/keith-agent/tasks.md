@@ -186,7 +186,7 @@
 ## Phase 6 — Goals, Recursive Agents, and Resource Control
 
 - [ ] 6. Durable Goals, Child Sessions, Messaging, Heartbeats, Limits, and Reclamation
-  - [ ] 6.1 Durable goal state machine and autonomous continuation
+  - [x] 6.1 Durable goal state machine and autonomous continuation
     - Implement Goal, states, limits, usage, plan/wait links, summaries, and transition validation
     - Implement continuation by enqueueing ordinary actions
     - Implement pause, resume, edit, cancel, archive, and client projections

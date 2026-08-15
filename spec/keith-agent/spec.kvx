@@ -844,7 +844,7 @@ status  = "pending"
 
 [task.6.1]
 title  = "Durable goal state machine and autonomous continuation"
-status = "pending"
+status = "done"
 wave   = 10
 do_1   = "Implement Goal, states, limits, usage, plan/wait links, summaries, and transition validation"
 do_2   = "Implement continuation by enqueueing ordinary actions"
