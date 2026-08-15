@@ -309,7 +309,7 @@
     - Expose delivery state in full clients
     - Fault sends around acknowledgement and restart and prove deduplication or honest possible-duplicate state
     - _Requirements: 35.1-35.6_
-  - [ ] 9.3 First production messaging adapter
+  - [x] 9.3 First production messaging adapter
     - Select one high-value platform and implement authentication, inbound, outbound, attachments, typing/streaming where supported, rate limits, and reconnect
     - Implement stable identity mapping, update cursors, message deduplication, and delivery receipts
     - Route all work through AgentConnection and the shared action inbox

@@ -89,7 +89,10 @@ impl InboundMessage {
         {
             return Err(GatewayError::Malformed);
         }
-        if self.intent != InboundIntent::Cancel && self.text.trim().is_empty() {
+        if self.intent != InboundIntent::Cancel
+            && self.text.trim().is_empty()
+            && self.attachments.is_empty()
+        {
             return Err(GatewayError::Malformed);
         }
         Ok(())

@@ -1050,7 +1050,7 @@ requires = ["9.1"]
 
 [task.9.3]
 title  = "First production messaging adapter"
-status = "pending"
+status = "done"
 wave   = 17
 do_1   = "Select one high-value platform and implement authentication, inbound, outbound, attachments, typing/streaming where supported, rate limits, and reconnect"
 do_2   = "Implement stable identity mapping, update cursors, message deduplication, and delivery receipts"
