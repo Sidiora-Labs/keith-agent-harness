@@ -295,7 +295,7 @@
 ## Phase 9 — Multi-Channel Gateway and Durable Delivery
 
 - [ ] 9. Normalized Messaging, Explicit Routing, First Adapter, Groups, and Outbox
-  - [ ] 9.1 Channel core, gateway process, and per-conversation queues
+  - [x] 9.1 Channel core, gateway process, and per-conversation queues
     - Define InboundMessage, ReplyRoute, attachments, adapter features, send, receipts, and retry classes
     - Build channel-gateway as a separate Rust process using AgentConnection
     - Implement per-session ordering, global concurrency, inbound deduplication, bounded attachments, and reconnect

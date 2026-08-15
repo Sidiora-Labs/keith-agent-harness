@@ -1026,7 +1026,7 @@ status  = "pending"
 
 [task.9.1]
 title  = "Channel core, gateway process, and per-conversation queues"
-status = "pending"
+status = "done"
 wave   = 15
 do_1   = "Define InboundMessage, ReplyRoute, attachments, adapter features, send, receipts, and retry classes"
 do_2   = "Build channel-gateway as a separate Rust process using AgentConnection"

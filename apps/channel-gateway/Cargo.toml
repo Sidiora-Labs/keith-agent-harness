@@ -7,10 +7,17 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+keith-agent-types = { path = "../../crates/agent-types" }
+keith-channel-core = { path = "../../crates/channel-core" }
+keith-connection = { path = "../../crates/connection" }
+keith-protocol = { path = "../../crates/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+
 [[bin]]
 name = "channel-gateway"
 path = "src/main.rs"
 
 [lints]
 workspace = true
-
