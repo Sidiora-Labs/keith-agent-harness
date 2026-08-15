@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod events;
+
+pub use events::*;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -12,13 +16,14 @@ use std::time::Duration;
 
 use keith_agent_types::{
     CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, CommonError, EntityId, ErrorCode, ProfileId,
-    RootTreeId, SchemaVersion, SessionId, UtcTimestamp,
+    Revision, RootTreeId, SchemaVersion, Sequence, SessionId, UtcTimestamp,
 };
 #[cfg(unix)]
 use keith_connection::{AgentTransport, FramedTransport, bind_permissioned_local};
 use keith_protocol::{
     ClientCommand, CommandError, CommandResult, CommandResultEnvelope, Feature, ResponsePayload,
-    SessionFilter, SessionState, SessionSummary, WireFormat, WireMessage, negotiate,
+    SessionFilter, SessionSnapshot, SessionState, SessionSummary, WireFormat, WireMessage,
+    negotiate,
 };
 use keith_supervisor::{
     SupervisorError, SupervisorOptions, WorkerEvent, WorkerStatus, WorkerSupervisor,
@@ -189,6 +194,9 @@ pub struct DaemonOptions {
     pub supervisor: SupervisorOptions,
     pub idle_evict_after: Duration,
     pub maintenance_interval: Duration,
+    pub replay_capacity: usize,
+    pub client_queue_capacity: usize,
+    pub command_dedup_capacity: usize,
 }
 
 impl Default for DaemonOptions {
@@ -197,6 +205,9 @@ impl Default for DaemonOptions {
             supervisor: SupervisorOptions::default(),
             idle_evict_after: Duration::from_secs(15 * 60),
             maintenance_interval: Duration::from_millis(100),
+            replay_capacity: 4_096,
+            client_queue_capacity: 256,
+            command_dedup_capacity: 4_096,
         }
     }
 }
@@ -216,6 +227,8 @@ pub struct DaemonCore {
     supervisor: WorkerSupervisor,
     options: DaemonOptions,
     last_worker_events: Vec<WorkerEvent>,
+    event_hubs: BTreeMap<RootTreeId, EventHub>,
+    command_ledger: CommandLedger,
     shutting_down: bool,
 }
 
@@ -231,6 +244,10 @@ pub enum DaemonError {
     Io(#[from] io::Error),
     #[error("session {0} is not in the root catalog")]
     UnknownSession(SessionId),
+    #[error("root {0} is not in the catalog")]
+    UnknownRoot(RootTreeId),
+    #[error(transparent)]
+    EventStream(#[from] EventStreamError),
 }
 
 impl DaemonCore {
@@ -253,12 +270,15 @@ impl DaemonCore {
             options.supervisor.clone(),
         )?;
         supervisor.adopt_existing()?;
+        let command_ledger = CommandLedger::new(options.command_dedup_capacity)?;
         Ok(Self {
             instance_id: EntityId::new(),
             catalog,
             supervisor,
             options,
             last_worker_events: Vec::new(),
+            event_hubs: BTreeMap::new(),
+            command_ledger,
             shutting_down: false,
         })
     }
@@ -277,6 +297,14 @@ impl DaemonCore {
         }
     }
 
+    pub fn event_hub(&self, root_tree_id: &RootTreeId) -> Option<&EventHub> {
+        self.event_hubs.get(root_tree_id)
+    }
+
+    pub fn event_hub_mut(&mut self, root_tree_id: &RootTreeId) -> Option<&mut EventHub> {
+        self.event_hubs.get_mut(root_tree_id)
+    }
+
     /// Lazily activates the worker that owns a cataloged root session.
     ///
     /// # Errors
@@ -291,13 +319,60 @@ impl DaemonCore {
             .root_for_session(session_id)
             .cloned()
             .ok_or_else(|| DaemonError::UnknownSession(session_id.clone()))?;
-        if self.supervisor.mark_activity(&root) {
-            return self
-                .supervisor
+        let status = if self.supervisor.mark_activity(&root) {
+            self.supervisor
                 .status(&root)
-                .ok_or_else(|| DaemonError::UnknownSession(session_id.clone()));
+                .ok_or_else(|| DaemonError::UnknownSession(session_id.clone()))?
+        } else {
+            self.supervisor.restart(&root)?
+        };
+        self.ensure_event_hub(&root, status.generation)?;
+        Ok(status)
+    }
+
+    fn ensure_event_hub(
+        &mut self,
+        root_tree_id: &RootTreeId,
+        generation: keith_agent_types::Generation,
+    ) -> Result<(), DaemonError> {
+        let manifest = self
+            .catalog
+            .root(root_tree_id)
+            .ok_or_else(|| DaemonError::UnknownRoot(root_tree_id.clone()))?;
+        let snapshot = SessionSnapshot {
+            session: manifest.summary(),
+            generation,
+            through_sequence: Sequence::ZERO,
+            active_action: None,
+            messages: Vec::new(),
+            goals: Vec::new(),
+            children: Vec::new(),
+            schedules: Vec::new(),
+            tools: Vec::new(),
+            confirmations: Vec::new(),
+            waits: Vec::new(),
+            deliveries: Vec::new(),
+            revision: Revision::ZERO,
+        };
+        match self.event_hubs.get_mut(root_tree_id) {
+            Some(hub) if hub.generation() != generation => {
+                hub.replace_generation(generation, snapshot)?;
+            }
+            Some(_) => {}
+            None => {
+                self.event_hubs.insert(
+                    root_tree_id.clone(),
+                    EventHub::new(
+                        root_tree_id.clone(),
+                        generation,
+                        snapshot,
+                        self.options.replay_capacity,
+                        self.options.client_queue_capacity,
+                    )?,
+                );
+            }
         }
-        self.supervisor.restart(&root).map_err(DaemonError::from)
+        Ok(())
     }
 
     /// Runs worker monitoring and idle eviction once.
@@ -373,6 +448,7 @@ impl DaemonCore {
         let WireMessage::ClientHello(client) = transport.receive()? else {
             return Ok(());
         };
+        let connected_client_id = client.client_id.clone();
         let features = BTreeSet::from([
             Feature::SessionLifecycle,
             Feature::FramedJson,
@@ -412,53 +488,153 @@ impl DaemonCore {
             let WireMessage::Command(command) = message else {
                 continue;
             };
-            let result = if command.protocol.major != negotiated.major
-                || command.protocol.minor > negotiated.minor
-            {
-                CommandResult::Rejected(CommandError {
-                    error: CommonError::new(
-                        ErrorCode::UnsupportedVersion,
-                        "command envelope exceeds the negotiated protocol",
-                        false,
-                    ),
-                    unsupported_feature: None,
-                })
+            let mut recovery_events = Vec::new();
+            let result = if command.client_id != connected_client_id {
+                CommandResultEnvelope {
+                    protocol: negotiated,
+                    command_id: command.command_id,
+                    completed_at: UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+                    result: CommandResult::Rejected(CommandError {
+                        error: CommonError::new(
+                            ErrorCode::Unauthorized,
+                            "command client ID does not match the connection",
+                            false,
+                        ),
+                        unsupported_feature: None,
+                    }),
+                }
+            } else if let Some(result) = self.command_ledger.result(&command.command_id) {
+                result.clone()
             } else {
-                self.execute_command(command.command)
+                let result = if command.protocol.major != negotiated.major
+                    || command.protocol.minor > negotiated.minor
+                {
+                    CommandResult::Rejected(CommandError {
+                        error: CommonError::new(
+                            ErrorCode::UnsupportedVersion,
+                            "command envelope exceeds the negotiated protocol",
+                            false,
+                        ),
+                        unsupported_feature: None,
+                    })
+                } else {
+                    let (result, events) =
+                        self.execute_command(&connected_client_id, command.command);
+                    recovery_events = events;
+                    result
+                };
+                let envelope = CommandResultEnvelope {
+                    protocol: negotiated,
+                    command_id: command.command_id,
+                    completed_at: UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+                    result,
+                };
+                self.command_ledger.record(envelope.clone());
+                envelope
             };
-            transport.send(&WireMessage::CommandResult(CommandResultEnvelope {
-                protocol: negotiated,
-                command_id: command.command_id,
-                completed_at: UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
-                result,
-            }))?;
+            transport.send(&WireMessage::CommandResult(result))?;
+            for event in recovery_events {
+                transport.send(&WireMessage::Event(event))?;
+            }
         }
         Ok(())
     }
 
-    fn execute_command(&mut self, command: ClientCommand) -> CommandResult {
+    fn execute_command(
+        &mut self,
+        client_id: &keith_agent_types::ClientId,
+        command: ClientCommand,
+    ) -> (CommandResult, Vec<keith_protocol::EventEnvelope>) {
         match command {
-            ClientCommand::ListSessions(filter) => CommandResult::Data(Box::new(
-                ResponsePayload::Sessions(self.catalog.list(&filter)),
-            )),
-            ClientCommand::AttachSession(attach) => match self.activate_session(&attach.session_id)
-            {
-                Ok(_) => CommandResult::Accepted { action_id: None },
-                Err(error) => CommandResult::Rejected(CommandError {
-                    error: CommonError::new(ErrorCode::NotFound, error.to_string(), false),
+            ClientCommand::ListSessions(filter) => (
+                CommandResult::Data(Box::new(ResponsePayload::Sessions(
+                    self.catalog.list(&filter),
+                ))),
+                Vec::new(),
+            ),
+            ClientCommand::AttachSession(attach) => {
+                match self.activate_and_attach(client_id, &attach) {
+                    Ok(recovery) => (
+                        recovery.snapshot.map_or(
+                            CommandResult::Accepted { action_id: None },
+                            |snapshot| {
+                                CommandResult::Data(Box::new(ResponsePayload::Snapshot(Box::new(
+                                    snapshot,
+                                ))))
+                            },
+                        ),
+                        recovery.events,
+                    ),
+                    Err(error) => (
+                        CommandResult::Rejected(CommandError {
+                            error: CommonError::new(ErrorCode::NotFound, error.to_string(), false),
+                            unsupported_feature: None,
+                        }),
+                        Vec::new(),
+                    ),
+                }
+            }
+            ClientCommand::DetachSession { session_id } => {
+                if let Some(root) = self.catalog.root_for_session(&session_id)
+                    && let Some(hub) = self.event_hubs.get_mut(root)
+                {
+                    hub.detach(client_id);
+                }
+                (CommandResult::Accepted { action_id: None }, Vec::new())
+            }
+            ClientCommand::AcknowledgeEvents(acknowledgement) => {
+                let result = self
+                    .event_hubs
+                    .get_mut(&acknowledgement.root_tree_id)
+                    .ok_or_else(|| EventStreamError::UnknownClient(client_id.clone()))
+                    .and_then(|hub| {
+                        hub.acknowledge(
+                            client_id,
+                            acknowledgement.generation,
+                            acknowledgement.through_sequence,
+                        )
+                    });
+                match result {
+                    Ok(()) => (CommandResult::Accepted { action_id: None }, Vec::new()),
+                    Err(error) => (
+                        CommandResult::Rejected(CommandError {
+                            error: CommonError::new(ErrorCode::Conflict, error.to_string(), false),
+                            unsupported_feature: None,
+                        }),
+                        Vec::new(),
+                    ),
+                }
+            }
+            _ => (
+                CommandResult::Rejected(CommandError {
+                    error: CommonError::new(
+                        ErrorCode::Unavailable,
+                        "command requires a session worker service that is not active on the daemon",
+                        true,
+                    ),
                     unsupported_feature: None,
                 }),
-            },
-            ClientCommand::DetachSession { .. } => CommandResult::Accepted { action_id: None },
-            _ => CommandResult::Rejected(CommandError {
-                error: CommonError::new(
-                    ErrorCode::Unavailable,
-                    "command requires a session worker service that is not active on the daemon",
-                    true,
-                ),
-                unsupported_feature: None,
-            }),
+                Vec::new(),
+            ),
         }
+    }
+
+    fn activate_and_attach(
+        &mut self,
+        client_id: &keith_agent_types::ClientId,
+        attach: &keith_protocol::AttachSession,
+    ) -> Result<RecoveryBatch, DaemonError> {
+        self.activate_session(&attach.session_id)?;
+        let root = self
+            .catalog
+            .root_for_session(&attach.session_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::UnknownSession(attach.session_id.clone()))?;
+        let hub = self
+            .event_hubs
+            .get_mut(&root)
+            .ok_or(DaemonError::UnknownRoot(root))?;
+        Ok(hub.attach(client_id.clone(), attach.resume.as_ref()))
     }
 }
 

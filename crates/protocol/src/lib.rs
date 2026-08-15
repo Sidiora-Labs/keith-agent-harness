@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use keith_agent_types::{
     ActionId, ArtifactId, CURRENT_PROTOCOL_VERSION, ChildId, ClientId, CommandId, CommonError,
-    EntityId, Generation, GoalId, JobId, MessageId, ProfileId, ProtocolVersion, Revision,
-    RootTreeId, Sequence, SessionId, UtcTimestamp, WorkspaceId,
+    DeliveryId, EntityId, Generation, GoalId, JobId, MessageId, ProfileId, ProtocolVersion,
+    Revision, RootTreeId, Sequence, SessionId, ToolCallId, UtcTimestamp, WorkspaceId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -87,6 +87,7 @@ pub enum ClientCommand {
     CreateSession(CreateSession),
     AttachSession(AttachSession),
     DetachSession { session_id: SessionId },
+    AcknowledgeEvents(EventAcknowledgement),
     ResumeSession { session_id: SessionId },
     BranchSession(BranchRequest),
     SelectBranch(SelectBranch),
@@ -127,6 +128,13 @@ pub struct CreateSession {
 pub struct AttachSession {
     pub session_id: SessionId,
     pub resume: Option<ResumeCursor>,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct EventAcknowledgement {
+    pub root_tree_id: RootTreeId,
+    pub generation: Generation,
+    pub through_sequence: Sequence,
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -390,6 +398,10 @@ pub struct SessionSnapshot {
     pub goals: Vec<GoalProjection>,
     pub children: Vec<ChildProjection>,
     pub schedules: Vec<ScheduleProjection>,
+    pub tools: Vec<ToolProjection>,
+    pub confirmations: Vec<ConfirmationProjection>,
+    pub waits: Vec<WaitProjection>,
+    pub deliveries: Vec<DeliveryProjection>,
     pub revision: Revision,
 }
 
@@ -457,6 +469,33 @@ pub struct ScheduleProjection {
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct ToolProjection {
+    pub tool_call_id: ToolCallId,
+    pub state: String,
+    pub terminal: bool,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct ConfirmationProjection {
+    pub confirmation_id: EntityId,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct WaitProjection {
+    pub wait_id: EntityId,
+    pub state: String,
+    pub terminal: bool,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct DeliveryProjection {
+    pub delivery_id: DeliveryId,
+    pub state: String,
+    pub terminal: bool,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
 pub struct MemoryResult {
     pub source: String,
     pub excerpt: String,
@@ -490,7 +529,7 @@ pub struct EventEnvelope {
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event", content = "payload")]
 pub enum DaemonEvent {
-    Snapshot(SessionSnapshot),
+    Snapshot(Box<SessionSnapshot>),
     CommandAccepted {
         command_id: CommandId,
     },
@@ -507,9 +546,15 @@ pub enum DaemonEvent {
     GoalChanged(GoalProjection),
     ChildChanged(ChildProjection),
     ScheduleChanged(ScheduleProjection),
+    ToolChanged(ToolProjection),
+    WaitChanged(WaitProjection),
+    DeliveryChanged(DeliveryProjection),
     ConfirmationRequested {
         confirmation_id: EntityId,
         summary: String,
+    },
+    ConfirmationResolved {
+        confirmation_id: EntityId,
     },
     Warning(CommonError),
     Error(CommonError),

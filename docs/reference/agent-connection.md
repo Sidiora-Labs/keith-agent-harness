@@ -421,6 +421,22 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
           "properties": {
             "command": {
               "type": "string",
+              "const": "acknowledge_events"
+            },
+            "parameters": {
+              "$ref": "#/$defs/EventAcknowledgement"
+            }
+          },
+          "required": [
+            "command",
+            "parameters"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
               "const": "resume_session"
             },
             "parameters": {
@@ -1006,6 +1022,21 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "deny"
       ]
     },
+    "ConfirmationProjection": {
+      "type": "object",
+      "properties": {
+        "confirmation_id": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "confirmation_id",
+        "summary"
+      ]
+    },
     "ConfirmationResolution": {
       "type": "object",
       "properties": {
@@ -1342,6 +1373,54 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
           "properties": {
             "event": {
               "type": "string",
+              "const": "tool_changed"
+            },
+            "payload": {
+              "$ref": "#/$defs/ToolProjection"
+            }
+          },
+          "required": [
+            "event",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "wait_changed"
+            },
+            "payload": {
+              "$ref": "#/$defs/WaitProjection"
+            }
+          },
+          "required": [
+            "event",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "delivery_changed"
+            },
+            "payload": {
+              "$ref": "#/$defs/DeliveryProjection"
+            }
+          },
+          "required": [
+            "event",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
               "const": "confirmation_requested"
             },
             "payload": {
@@ -1357,6 +1436,30 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
               "required": [
                 "confirmation_id",
                 "summary"
+              ]
+            }
+          },
+          "required": [
+            "event",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "confirmation_resolved"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "confirmation_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "confirmation_id"
               ]
             }
           },
@@ -1407,6 +1510,25 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "when_idle"
       ]
     },
+    "DeliveryProjection": {
+      "type": "object",
+      "properties": {
+        "delivery_id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "terminal": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "delivery_id",
+        "state",
+        "terminal"
+      ]
+    },
     "ErrorCode": {
       "type": "string",
       "enum": [
@@ -1422,6 +1544,29 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "cancelled",
         "corrupt_state",
         "internal"
+      ]
+    },
+    "EventAcknowledgement": {
+      "type": "object",
+      "properties": {
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "root_tree_id": {
+          "type": "string"
+        },
+        "through_sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "root_tree_id",
+        "generation",
+        "through_sequence"
       ]
     },
     "EventEnvelope": {
@@ -2124,6 +2269,18 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
             "$ref": "#/$defs/ChildProjection"
           }
         },
+        "confirmations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConfirmationProjection"
+          }
+        },
+        "deliveries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryProjection"
+          }
+        },
         "generation": {
           "type": "integer",
           "format": "uint64",
@@ -2159,6 +2316,18 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolProjection"
+          }
+        },
+        "waits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WaitProjection"
+          }
         }
       },
       "required": [
@@ -2169,6 +2338,10 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "goals",
         "children",
         "schedules",
+        "tools",
+        "confirmations",
+        "waits",
+        "deliveries",
         "revision"
       ]
     },
@@ -2269,6 +2442,25 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "delivery"
       ]
     },
+    "ToolProjection": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "terminal": {
+          "type": "boolean"
+        },
+        "tool_call_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_call_id",
+        "state",
+        "terminal"
+      ]
+    },
     "UpdateGoal": {
       "type": "object",
       "properties": {
@@ -2337,6 +2529,25 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
       },
       "required": [
         "job_id"
+      ]
+    },
+    "WaitProjection": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "terminal": {
+          "type": "boolean"
+        },
+        "wait_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wait_id",
+        "state",
+        "terminal"
       ]
     }
   }

@@ -168,7 +168,7 @@ fn daemon_process_is_lazy_contains_crashes_and_adopts_after_restart() {
                     resume: None,
                 })
             ),
-            CommandResult::Accepted { .. }
+            CommandResult::Data(_)
         ));
     }
     let first_pid = wait_for_worker(&data_root, &first_root);

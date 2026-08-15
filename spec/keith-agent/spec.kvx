@@ -632,7 +632,7 @@ requires = ["2.2"]
 
 [task.2.4]
 title  = "Ordered events, replay buffers, snapshots, and reconnect"
-status = "pending"
+status = "done"
 wave   = 5
 do_1   = "Implement per-generation monotonic event sequencing and bounded replay"
 do_2   = "Implement reconstructible snapshots and snapshot-then-delta recovery"

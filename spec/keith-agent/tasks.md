@@ -58,7 +58,7 @@
     - Add file-level local writer protection as a second guard
     - Race-test simultaneous claims, renewal loss, stale routing, drain, and forced replacement
     - _Requirements: 4.1-4.5_
-  - [ ] 2.4 Ordered events, replay buffers, snapshots, and reconnect
+  - [x] 2.4 Ordered events, replay buffers, snapshots, and reconnect
     - Implement per-generation monotonic event sequencing and bounded replay
     - Implement reconstructible snapshots and snapshot-then-delta recovery
     - Implement slow-client bounds, safe coalescing, and non-droppable terminal state
