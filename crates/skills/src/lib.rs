@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod synthesis;
+
+pub use synthesis::*;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
@@ -153,6 +157,8 @@ struct SkillLedger {
     next_revision: Revision,
     enabled: BTreeMap<String, bool>,
     installed_at: BTreeMap<String, UtcTimestamp>,
+    #[serde(default)]
+    origins: BTreeMap<String, String>,
     history: BTreeMap<String, Vec<SkillHistoryEntry>>,
 }
 
@@ -163,6 +169,7 @@ impl Default for SkillLedger {
             next_revision: Revision::ZERO,
             enabled: BTreeMap::new(),
             installed_at: BTreeMap::new(),
+            origins: BTreeMap::new(),
             history: BTreeMap::new(),
         }
     }
@@ -362,6 +369,7 @@ impl SkillRegistry {
     ) -> Result<SkillPackage, SkillError> {
         let _guard = self.lock()?;
         let source = source.into();
+        let origin = origin.into();
         let parsed = parse_skill(&source, self.limits.max_skill_bytes)?;
         self.scan_workspace(now)?;
         let path = profile_skill_path(&parsed.manifest.id)?;
@@ -383,13 +391,16 @@ impl SkillRegistry {
         )?;
         ledger.enabled.insert(parsed.manifest.id.clone(), true);
         ledger.installed_at.insert(parsed.manifest.id.clone(), now);
+        ledger
+            .origins
+            .insert(parsed.manifest.id.clone(), origin.clone());
         persist_ledger(&self.workspace.layout().root, &ledger)?;
         package_from_parsed(
             parsed,
             source,
             SkillProvenance {
                 scope: SkillScope::Profile,
-                origin: origin.into(),
+                origin,
                 source_path: path,
                 digest: token.digest.ok_or(SkillError::InvalidPackage)?,
                 installed_at: Some(now),
@@ -438,6 +449,7 @@ impl SkillRegistry {
             now,
             self.limits.max_history_per_skill,
         )?;
+        ledger.origins.insert(id.into(), "profile update".into());
         persist_ledger(&self.workspace.layout().root, &ledger)?;
         package_from_parsed(
             parsed,
@@ -511,13 +523,15 @@ impl SkillRegistry {
             self.limits.max_history_per_skill,
         )?;
         ledger.enabled.insert(id.into(), true);
+        let rollback_origin = format!("rollback from revision {}", revision.get());
+        ledger.origins.insert(id.into(), rollback_origin.clone());
         persist_ledger(&self.workspace.layout().root, &ledger)?;
         package_from_parsed(
             parsed,
             source,
             SkillProvenance {
                 scope: SkillScope::Profile,
-                origin: format!("rollback from revision {}", revision.get()),
+                origin: rollback_origin,
                 source_path: path,
                 digest: token.digest.ok_or(SkillError::InvalidPackage)?,
                 installed_at: ledger.installed_at.get(id).copied(),
@@ -786,12 +800,21 @@ fn discover_root(
             .history
             .get(&parsed.manifest.id)
             .and_then(|history| history.last());
+        let effective_origin = if scope == SkillScope::Profile {
+            ledger
+                .origins
+                .get(&parsed.manifest.id)
+                .cloned()
+                .unwrap_or_else(|| origin.into())
+        } else {
+            origin.into()
+        };
         packages.push(package_from_parsed(
             parsed,
             source.clone(),
             SkillProvenance {
                 scope,
-                origin: origin.into(),
+                origin: effective_origin,
                 source_path: relative_path,
                 digest: digest(&source),
                 installed_at: (scope == SkillScope::Profile)

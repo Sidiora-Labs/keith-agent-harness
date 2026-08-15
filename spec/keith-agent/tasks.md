@@ -348,7 +348,7 @@
     - Handle concurrent user edits with conflict rather than overwrite
     - Run prompt injection, protected path, malformed patch, validation, crash rollback, restart, diff, and undo suite
     - _Requirements: 37.1-37.7_
-  - [ ] 10.4 Validation-gated candidate skill synthesis
+  - [x] 10.4 Validation-gated candidate skill synthesis
     - Detect successful repeated workflows from committed session/tool outcomes
     - Generate secret-free candidate skills with triggers, inputs, steps, validation, failures, and stop conditions
     - Run clean-workspace applicability, safety, and regression cases

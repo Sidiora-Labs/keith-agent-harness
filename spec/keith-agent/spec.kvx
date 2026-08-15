@@ -1115,7 +1115,7 @@ requires = ["7.2", "7.4", "8.1"]
 
 [task.10.4]
 title  = "Validation-gated candidate skill synthesis"
-status = "pending"
+status = "done"
 wave   = 19
 do_1   = "Detect successful repeated workflows from committed session/tool outcomes"
 do_2   = "Generate secret-free candidate skills with triggers, inputs, steps, validation, failures, and stop conditions"
