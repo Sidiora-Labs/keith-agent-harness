@@ -751,7 +751,7 @@ requires = ["4.3"]
 
 [task.4.5]
 title  = "Tool/provider experience and adaptive route history"
-status = "pending"
+status = "done"
 wave   = 10
 do_1   = "Persist task-category success, typed failure, latency, timeout, correction, and recovery for tools/providers"
 do_2   = "Use bounded history in model, provider, tool, skill, timeout, and fallback routing"

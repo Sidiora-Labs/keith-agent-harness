@@ -130,7 +130,7 @@
     - Implement accept, revise, ask-user, and stop with bounded pass count
     - Test false-positive, revision, user-decision, deterministic failure, and review-budget paths
     - _Requirements: 11.4-11.6_
-  - [ ] 4.5 Tool/provider experience and adaptive route history
+  - [x] 4.5 Tool/provider experience and adaptive route history
     - Persist task-category success, typed failure, latency, timeout, correction, and recovery for tools/providers
     - Use bounded history in model, provider, tool, skill, timeout, and fallback routing
     - Implement recovery of preference after readiness returns and explicit profile overrides
