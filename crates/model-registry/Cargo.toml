@@ -7,6 +7,14 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+keith-agent-types = { path = "../agent-types" }
+keith-provider-core = { path = "../provider-core" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+keith-provider-adapters = { path = "../provider-adapters" }
+
 [lints]
 workspace = true
-

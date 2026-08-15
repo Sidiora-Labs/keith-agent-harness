@@ -702,7 +702,7 @@ status  = "pending"
 
 [task.4.1]
 title  = "Provider core, model registry, and two production adapters"
-status = "pending"
+status = "done"
 wave   = 7
 do_1   = "Implement normalized requests, events, content, tools, usage, errors, cancellation, and token counting"
 do_2   = "Implement model registry, profile routes, fallbacks, runtime overrides, and credential references"

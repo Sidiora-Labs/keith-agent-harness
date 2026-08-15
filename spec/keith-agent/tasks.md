@@ -101,7 +101,7 @@
 ## Phase 4 — Providers and Robust Turn Execution
 
 - [ ] 4. Model Registry, Provider Adapters, Streaming Loop, Planning, Review, and Routing Experience
-  - [ ] 4.1 Provider core, model registry, and two production adapters
+  - [x] 4.1 Provider core, model registry, and two production adapters
     - Implement normalized requests, events, content, tools, usage, errors, cancellation, and token counting
     - Implement model registry, profile routes, fallbacks, runtime overrides, and credential references
     - Implement two production provider adapters with streaming and tools
