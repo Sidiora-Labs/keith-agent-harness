@@ -136,6 +136,8 @@ pub enum ManifestError {
     AmbientAuthority,
     #[error("separate-process plugins are not accepted by the embedded WASI host")]
     UnsupportedKind,
+    #[error("plugin manifest exceeds the configured compatibility bound")]
+    TooLarge,
 }
 
 impl PluginManifest {
@@ -145,6 +147,18 @@ impl PluginManifest {
     ///
     /// Returns a bounded, safe validation error for malformed or incompatible input.
     pub fn parse(input: &str) -> Result<Self, ManifestError> {
+        Self::parse_bounded(input, 64 * 1_024)
+    }
+
+    /// Parses a supported manifest version under an explicit compatibility byte bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded, safe validation error for oversized, malformed, or incompatible input.
+    pub fn parse_bounded(input: &str, max_bytes: usize) -> Result<Self, ManifestError> {
+        if max_bytes == 0 || input.len() > max_bytes {
+            return Err(ManifestError::TooLarge);
+        }
         let manifest: Self =
             toml::from_str(input).map_err(|error| ManifestError::Toml(error.to_string()))?;
         manifest.validate()?;

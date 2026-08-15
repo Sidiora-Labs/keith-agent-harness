@@ -526,6 +526,49 @@ pub struct SessionExport {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LegacySessionExportLimits {
+    pub max_manifest_bytes: usize,
+    pub max_history_bytes: usize,
+    pub max_entries: usize,
+}
+
+impl Default for LegacySessionExportLimits {
+    fn default() -> Self {
+        Self {
+            max_manifest_bytes: 64 * 1_024,
+            max_history_bytes: 256 * 1_024 * 1_024,
+            max_entries: 1_000_000,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySessionManifestV0 {
+    schema_version: u16,
+    kind: SessionKind,
+    session_id: SessionId,
+    root_tree_id: RootTreeId,
+    parent_session_id: Option<SessionId>,
+    profile_id: ProfileId,
+    workspace_id: WorkspaceId,
+    created_at: UtcTimestamp,
+    active_leaf: Option<EntryId>,
+    label: Option<String>,
+    branch_labels: BTreeMap<String, EntryId>,
+    archived: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySessionEntryV0 {
+    id: EntryId,
+    parent_id: Option<EntryId>,
+    timestamp: UtcTimestamp,
+    payload: SessionEntryPayload,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompactionPolicy {
     pub trigger_tokens: u64,
     pub target_tokens: u64,
@@ -688,6 +731,8 @@ pub enum SessionStoreError {
     InvalidProfileSnapshot(String),
     #[error("profile snapshot changed before the deliberate update")]
     StaleProfileSnapshot,
+    #[error("legacy session export exceeded its configured bound")]
+    LegacyExportLimit,
 }
 
 #[derive(Clone, Debug)]
@@ -904,6 +949,98 @@ impl SessionStore {
             fs::read(directory.join(MANIFEST_FILE))?,
             fs::read(directory.join(HISTORY_FILE))?,
         ))
+    }
+
+    /// Converts the supported v0 manifest and JSONL history into a current standalone export.
+    ///
+    /// This function never writes either input and is deliberately separate from ordinary startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported versions, configured bounds, malformed JSONL, or invalid
+    /// ancestry and manifest references.
+    pub fn migrate_legacy_export(
+        manifest_bytes: &[u8],
+        history_bytes: &[u8],
+        limits: LegacySessionExportLimits,
+    ) -> Result<SessionExport, SessionStoreError> {
+        if limits.max_manifest_bytes == 0
+            || limits.max_history_bytes == 0
+            || limits.max_entries == 0
+            || manifest_bytes.len() > limits.max_manifest_bytes
+            || history_bytes.len() > limits.max_history_bytes
+        {
+            return Err(SessionStoreError::LegacyExportLimit);
+        }
+        let legacy: LegacySessionManifestV0 = serde_json::from_slice(manifest_bytes)?;
+        if legacy.schema_version != 0 {
+            return Err(SessionStoreError::UnsupportedVersion(SchemaVersion::new(
+                legacy.schema_version,
+                0,
+            )));
+        }
+        validate_new_session(&NewSession {
+            kind: legacy.kind,
+            session_id: legacy.session_id.clone(),
+            root_tree_id: legacy.root_tree_id.clone(),
+            parent_session_id: legacy.parent_session_id.clone(),
+            profile_id: legacy.profile_id.clone(),
+            workspace_id: legacy.workspace_id.clone(),
+            created_at: legacy.created_at,
+            label: legacy.label.clone(),
+            profile_snapshot: None,
+        })?;
+        let mut index = SessionIndex::default();
+        for (offset, line) in history_bytes.split(|byte| *byte == b'\n').enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            if index.len() >= limits.max_entries {
+                return Err(SessionStoreError::LegacyExportLimit);
+            }
+            let old: LegacySessionEntryV0 = serde_json::from_slice(line).map_err(|error| {
+                SessionStoreError::CorruptHistory {
+                    line: offset + 1,
+                    reason: error.to_string(),
+                }
+            })?;
+            index.insert(SessionEntry::new(
+                old.id,
+                old.parent_id,
+                old.timestamp,
+                old.payload,
+            )?)?;
+        }
+        let known = |id: &EntryId| index.get(id).is_some();
+        if legacy.active_leaf.as_ref().is_some_and(|id| !known(id))
+            || legacy.branch_labels.values().any(|id| !known(id))
+        {
+            return Err(SessionStoreError::CorruptHistory {
+                line: 0,
+                reason: "legacy manifest references an unknown history entry".into(),
+            });
+        }
+        let mut entries = index.entries.into_values().collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
+        Ok(SessionExport {
+            version: CURRENT_SCHEMA_VERSION,
+            manifest: SessionManifest {
+                version: CURRENT_SCHEMA_VERSION,
+                kind: legacy.kind,
+                session_id: legacy.session_id,
+                root_tree_id: legacy.root_tree_id,
+                parent_session_id: legacy.parent_session_id,
+                profile_id: legacy.profile_id,
+                workspace_id: legacy.workspace_id,
+                created_at: legacy.created_at,
+                active_leaf: legacy.active_leaf,
+                label: legacy.label,
+                profile_snapshot: None,
+                branch_labels: legacy.branch_labels,
+                archived: legacy.archived,
+            },
+            entries,
+        })
     }
 
     /// Archives a session while holding its ordinary writer lease.

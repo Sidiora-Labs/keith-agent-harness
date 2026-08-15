@@ -435,7 +435,7 @@
 ## Phase 13 — Cross-Platform Packaging, Migration, and Performance
 
 - [ ] 13. Supported Platforms, Reproducible Releases, Clean Install, Upgrade, Rollback, and Soak
-  - [ ] 13.1 Protocol, state, session, workspace, and plugin migration suite
+  - [x] 13.1 Protocol, state, session, workspace, and plugin migration suite
     - Implement transactional state migrations and backups
     - Implement bounded prior-version readers for protocol/session/workspace/plugin schemas
     - Implement explicit migrated-session export rather than in-place JSONL rewrite

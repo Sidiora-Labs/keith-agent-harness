@@ -1260,7 +1260,7 @@ status  = "pending"
 
 [task.13.1]
 title  = "Protocol, state, session, workspace, and plugin migration suite"
-status = "pending"
+status = "done"
 wave   = 21
 do_1   = "Implement transactional state migrations and backups"
 do_2   = "Implement bounded prior-version readers for protocol/session/workspace/plugin schemas"

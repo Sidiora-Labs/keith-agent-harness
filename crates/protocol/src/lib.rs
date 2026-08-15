@@ -696,6 +696,8 @@ pub enum ProtocolError {
         message: ProtocolVersion,
         negotiated: ProtocolVersion,
     },
+    #[error("protocol message exceeds the configured {limit}-byte compatibility bound")]
+    MessageTooLarge { limit: usize },
 }
 
 /// # Errors
@@ -771,6 +773,24 @@ pub fn decode_negotiated(
     } else {
         Ok(message)
     }
+}
+
+/// Decodes a negotiated current or prior-minor envelope under an explicit compatibility bound.
+///
+/// # Errors
+///
+/// Returns an error before parsing when the message exceeds `max_bytes`, or for malformed and
+/// incompatible envelopes.
+pub fn decode_negotiated_bounded(
+    format: WireFormat,
+    bytes: &[u8],
+    negotiated: ProtocolVersion,
+    max_bytes: usize,
+) -> Result<WireMessage, ProtocolError> {
+    if max_bytes == 0 || bytes.len() > max_bytes {
+        return Err(ProtocolError::MessageTooLarge { limit: max_bytes });
+    }
+    decode_negotiated(format, bytes, negotiated)
 }
 
 /// # Errors
