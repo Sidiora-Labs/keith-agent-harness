@@ -550,7 +550,7 @@ impl<'a> SkillSynthesisService<'a> {
             .open(&temporary)?;
         file.write_all(&keith_agent_types::canonical_json_bytes(candidate)?)?;
         file.sync_all()?;
-        fs::rename(&temporary, &path)?;
+        keith_platform::replace_file(&temporary, &path)?;
         File::open(&self.candidate_root)?.sync_all()?;
         Ok(())
     }

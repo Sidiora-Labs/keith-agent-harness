@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::net::{Shutdown, SocketAddr};
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
+use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,12 +16,16 @@ use futures_util::{SinkExt, StreamExt};
 use keith_agent_types::{
     CURRENT_PROTOCOL_VERSION, ClientId, CommandId, ProfileId, Sequence, SessionId, UtcTimestamp,
 };
-use keith_connection::{AgentTransport, FramedTransport};
+use keith_connection::{
+    AgentTransport, FramedTransport, LocalStream, connect_local, set_local_read_timeout,
+    set_local_write_timeout,
+};
 use keith_credentials::{
     BrowserWritePolicy, CredentialOwner, CredentialRef, CsrfToken, EncryptedCredentialStore,
-    MasterKey, SecretValue,
+    MasterKey, NativeMasterKeyStore, SecretValue,
 };
 use keith_framing::FrameError;
+use keith_platform::PlatformPaths;
 use keith_protocol::{
     AttachSession, ClientCommand, ClientHello, CommandEnvelope, CommandResult,
     CommandResultEnvelope, Feature, ProfileSummary, ResponsePayload, ResumeCursor, SessionFilter,
@@ -75,6 +77,12 @@ impl std::fmt::Debug for WebServerConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CredentialKeySource {
+    Environment(String),
+    Native { service: String, account: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerArguments {
     pub bind: SocketAddr,
     pub exact_origin: String,
@@ -82,7 +90,7 @@ pub struct ServerArguments {
     pub asset_root: PathBuf,
     pub credential_root: PathBuf,
     pub login_secret_env: String,
-    pub credential_key_env: String,
+    pub credential_key_source: CredentialKeySource,
 }
 
 #[derive(Debug, Error)]
@@ -207,7 +215,10 @@ impl ServerArguments {
         let mut asset_root = PathBuf::from("apps/agent-web/static");
         let mut credential_root = None;
         let mut login_secret_env = "KEITH_WEB_LOGIN_SECRET".to_owned();
-        let mut credential_key_env = "KEITH_CREDENTIAL_KEY".to_owned();
+        let mut credential_key_source = CredentialKeySource::Native {
+            service: "keith-agent".to_owned(),
+            account: "web-credential-master-key".to_owned(),
+        };
         while let Some(argument) = arguments.next() {
             let argument = argument
                 .into_string()
@@ -240,22 +251,48 @@ impl ServerArguments {
                         .map_err(|_| "environment name must be UTF-8".to_owned())?;
                 }
                 "--credential-key-env" => {
-                    credential_key_env = value
-                        .into_string()
-                        .map_err(|_| "environment name must be UTF-8".to_owned())?;
+                    credential_key_source = CredentialKeySource::Environment(
+                        value
+                            .into_string()
+                            .map_err(|_| "environment name must be UTF-8".to_owned())?,
+                    );
+                }
+                "--credential-key-native-account" => {
+                    credential_key_source = CredentialKeySource::Native {
+                        service: "keith-agent".to_owned(),
+                        account: value
+                            .into_string()
+                            .map_err(|_| "native account must be UTF-8".to_owned())?,
+                    };
                 }
                 _ => return Err(format!("unknown argument {argument}")),
             }
         }
+        let platform_paths = if daemon_socket.is_none() || credential_root.is_none() {
+            Some(PlatformPaths::discover().map_err(|error| error.to_string())?)
+        } else {
+            None
+        };
+        let daemon_socket = daemon_socket.or_else(|| {
+            platform_paths
+                .as_ref()
+                .map(|paths| paths.daemon_endpoint.clone())
+        });
+        let credential_root = credential_root.or_else(|| {
+            platform_paths
+                .as_ref()
+                .map(|paths| paths.credential_root.clone())
+        });
         Ok(Some(Self {
             bind,
             exact_origin,
-            daemon_socket: daemon_socket.ok_or_else(|| "--socket is required".to_owned())?,
+            daemon_socket: daemon_socket
+                .ok_or_else(|| "native daemon endpoint is unavailable".to_owned())?,
             asset_root,
             credential_root: credential_root
-                .ok_or_else(|| "--credential-root is required".to_owned())?,
+                .ok_or_else(|| "native credential root is unavailable".to_owned())?,
             login_secret_env,
-            credential_key_env,
+            credential_key_source,
         }))
     }
 
@@ -268,18 +305,28 @@ impl ServerArguments {
         let login_secret = std::env::var_os(&self.login_secret_env)
             .ok_or_else(|| format!("{} is unavailable", self.login_secret_env))?
             .into_encoded_bytes();
-        let mut encoded_key = std::env::var_os(&self.credential_key_env)
-            .ok_or_else(|| format!("{} is unavailable", self.credential_key_env))?
-            .into_encoded_bytes();
-        let decoded_key = decode_key(&encoded_key)?;
-        encoded_key.fill(0);
+        let credential_key = match self.credential_key_source {
+            CredentialKeySource::Environment(environment) => {
+                let mut encoded_key = std::env::var_os(&environment)
+                    .ok_or_else(|| format!("{environment} is unavailable"))?
+                    .into_encoded_bytes();
+                let decoded_key = decode_key(&encoded_key)?;
+                encoded_key.fill(0);
+                MasterKey::from_bytes(decoded_key)
+            }
+            CredentialKeySource::Native { service, account } => {
+                NativeMasterKeyStore::new(service, account)
+                    .and_then(|store| store.load_or_create())
+                    .map_err(|error| error.to_string())?
+            }
+        };
         Ok(WebServerConfig {
             bind: self.bind,
             exact_origin: self.exact_origin,
             daemon_socket: self.daemon_socket,
             asset_root: self.asset_root,
             credential_root: self.credential_root,
-            credential_key: MasterKey::from_bytes(decoded_key),
+            credential_key,
             login_secret,
             session_lifetime: Duration::from_secs(8 * 60 * 60),
             mutation_limit_per_second: 24,
@@ -511,9 +558,8 @@ async fn subscription_socket(
     resume: ResumeQuery,
 ) {
     let (sender, mut receiver) = mpsc::channel(EVENT_QUEUE_CAPACITY);
-    let (shutdown_sender, shutdown_receiver) = std::sync::mpsc::sync_channel(1);
     tokio::task::spawn_blocking(move || {
-        let _ = bridge.subscribe(&profile, &session, resume, &sender, &shutdown_sender);
+        let _ = bridge.subscribe(&profile, &session, resume, &sender);
     });
     let (mut websocket_sender, mut websocket_receiver) = socket.split();
     loop {
@@ -538,9 +584,6 @@ async fn subscription_socket(
             }
         }
     }
-    if let Ok(stream) = shutdown_receiver.try_recv() {
-        let _ = stream.shutdown(Shutdown::Both);
-    }
 }
 
 #[derive(Clone)]
@@ -561,15 +604,10 @@ enum BridgeError {
     Scope,
     #[error("agent response serialization failed")]
     Serialize(#[from] serde_json::Error),
-    #[cfg(not(unix))]
-    #[error("agent connection is unsupported on this platform")]
-    Unsupported,
 }
 
-#[cfg(unix)]
 struct NativeClient {
-    transport: FramedTransport<UnixStream>,
-    shutdown: UnixStream,
+    transport: FramedTransport<LocalStream>,
     client_id: ClientId,
     protocol: keith_agent_types::ProtocolVersion,
     server_hello: keith_protocol::ServerHello,
@@ -632,7 +670,6 @@ impl DaemonBridge {
         session: &SessionId,
         resume: ResumeQuery,
         output: &mpsc::Sender<String>,
-        shutdown_sender: &std::sync::mpsc::SyncSender<UnixStream>,
     ) -> Result<(), BridgeError> {
         let mut client = self.connect()?;
         if !client
@@ -687,40 +724,23 @@ impl DaemonBridge {
                 Err(error) => return Err(error.into()),
             }
         }
-        client
-            .shutdown
-            .set_read_timeout(None)
-            .map_err(keith_connection::ConnectionError::from)?;
-        shutdown_sender
-            .send(
-                client
-                    .shutdown
-                    .try_clone()
-                    .map_err(keith_connection::ConnectionError::from)?,
-            )
-            .map_err(|_| BridgeError::Response)?;
         while !output.is_closed() {
             match client.transport.receive() {
                 Ok(message @ WireMessage::Event(_)) => send_bounded(output, &message)?,
                 Ok(_) => {}
                 Err(keith_connection::ConnectionError::Closed) => return Ok(()),
+                Err(error) if connection_timed_out(&error) => {}
                 Err(error) => return Err(error.into()),
             }
         }
         Ok(())
     }
 
-    #[cfg(unix)]
     fn connect(&self) -> Result<NativeClient, BridgeError> {
-        let stream = keith_connection::connect_local(&self.socket_path)?;
-        let shutdown = stream
-            .try_clone()
+        let stream = connect_local(&self.socket_path)?;
+        set_local_read_timeout(&stream, Some(self.timeout))
             .map_err(keith_connection::ConnectionError::from)?;
-        stream
-            .set_read_timeout(Some(self.timeout))
-            .map_err(keith_connection::ConnectionError::from)?;
-        stream
-            .set_write_timeout(Some(self.timeout))
+        set_local_write_timeout(&stream, Some(self.timeout))
             .map_err(keith_connection::ConnectionError::from)?;
         let mut transport = FramedTransport::new(stream, WireFormat::Json);
         let client_id = ClientId::new();
@@ -750,20 +770,13 @@ impl DaemonBridge {
         };
         Ok(NativeClient {
             transport,
-            shutdown,
             client_id,
             protocol: server_hello.protocol,
             server_hello,
         })
     }
-
-    #[cfg(not(unix))]
-    fn connect(&self) -> Result<NativeClient, BridgeError> {
-        Err(BridgeError::Unsupported)
-    }
 }
 
-#[cfg(unix)]
 impl NativeClient {
     fn envelope(&self, session_id: Option<SessionId>, command: ClientCommand) -> CommandEnvelope {
         CommandEnvelope {
@@ -829,10 +842,6 @@ impl NativeClient {
     }
 }
 
-#[cfg(not(unix))]
-struct NativeClient;
-
-#[cfg(unix)]
 fn validate_command_scope(
     client: &mut NativeClient,
     profile: &ProfileId,
@@ -1057,9 +1066,36 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(parsed.login_secret_env, "TEST_LOGIN");
-        assert_eq!(parsed.credential_key_env, "TEST_KEY");
+        assert_eq!(
+            parsed.credential_key_source,
+            CredentialKeySource::Environment("TEST_KEY".into())
+        );
         assert!(!format!("{parsed:?}").contains("secret-value"));
-        assert!(ServerArguments::parse(["agent-web", "--socket", "/tmp/agent.sock"]).is_err());
+        let native = ServerArguments::parse([
+            "agent-web",
+            "--socket",
+            "/tmp/agent.sock",
+            "--credential-root",
+            "/tmp/credentials",
+            "--credential-key-native-account",
+            "desktop",
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            native.credential_key_source,
+            CredentialKeySource::Native {
+                service: "keith-agent".into(),
+                account: "desktop".into(),
+            }
+        );
+        let defaults = ServerArguments::parse(["agent-web"]).unwrap().unwrap();
+        assert!(defaults.daemon_socket.is_absolute());
+        assert!(defaults.credential_root.is_absolute());
+        assert!(matches!(
+            defaults.credential_key_source,
+            CredentialKeySource::Native { .. }
+        ));
     }
 
     #[test]

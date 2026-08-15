@@ -12,6 +12,7 @@ fs2.workspace = true
 keith-agent-types = { path = "../agent-types" }
 keith-connection = { path = "../connection" }
 keith-framing = { path = "../framing" }
+keith-platform = { path = "../platform" }
 keith-state-store = { path = "../state-store" }
 keith-state-store-core = { path = "../state-store-core" }
 serde.workspace = true

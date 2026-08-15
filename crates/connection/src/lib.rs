@@ -3,15 +3,26 @@
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
-#[cfg(unix)]
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
+use interprocess::TryClone;
+#[cfg(unix)]
+use interprocess::local_socket::GenericFilePath;
+#[cfg(windows)]
+use interprocess::local_socket::GenericNamespaced;
+use interprocess::local_socket::prelude::*;
+use interprocess::local_socket::{ListenerNonblockingMode, ListenerOptions, Name};
 use keith_framing::{FrameError, LengthDelimitedCodec};
 use keith_protocol::{WireFormat, WireMessage, decode, encode};
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tungstenite::{Message, WebSocket};
+
+pub type LocalListener = LocalSocketListener;
+pub type LocalStream = LocalSocketStream;
 
 pub trait AgentTransport {
     /// # Errors
@@ -25,22 +36,123 @@ pub trait AgentTransport {
     fn receive(&mut self) -> Result<WireMessage, ConnectionError>;
 }
 
-#[cfg(unix)]
 /// # Errors
 ///
 /// Returns an I/O error when the local endpoint cannot be bound or restricted to its owner.
-pub fn bind_permissioned_local(path: &Path) -> Result<UnixListener, ConnectionError> {
-    let listener = UnixListener::bind(path)?;
+pub fn bind_permissioned_local(path: &Path) -> Result<LocalListener, ConnectionError> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let name = local_name(path)?;
+    let listener = ListenerOptions::new().name(name).create_sync()?;
+    #[cfg(unix)]
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     Ok(listener)
 }
 
-#[cfg(unix)]
 /// # Errors
 ///
 /// Returns an I/O error when the permission-restricted local endpoint cannot be connected.
-pub fn connect_local(path: &Path) -> Result<UnixStream, ConnectionError> {
-    UnixStream::connect(path).map_err(ConnectionError::from)
+pub fn connect_local(path: &Path) -> Result<LocalStream, ConnectionError> {
+    LocalStream::connect(local_name(path)?).map_err(ConnectionError::from)
+}
+
+/// # Errors
+///
+/// Returns an I/O error when listener nonblocking mode cannot be changed.
+pub fn set_local_listener_nonblocking(
+    listener: &LocalListener,
+    nonblocking: bool,
+) -> std::io::Result<()> {
+    listener.set_nonblocking(if nonblocking {
+        ListenerNonblockingMode::Accept
+    } else {
+        ListenerNonblockingMode::Neither
+    })
+}
+
+/// # Errors
+///
+/// Returns an I/O error when accepting a local connection fails.
+pub fn accept_local(listener: &LocalListener) -> std::io::Result<LocalStream> {
+    listener.accept()
+}
+
+/// # Errors
+///
+/// Returns an I/O error when the receive timeout cannot be changed.
+pub fn set_local_read_timeout(
+    stream: &LocalStream,
+    timeout: Option<Duration>,
+) -> std::io::Result<()> {
+    stream.set_recv_timeout(timeout)
+}
+
+/// # Errors
+///
+/// Returns an I/O error when the send timeout cannot be changed.
+pub fn set_local_write_timeout(
+    stream: &LocalStream,
+    timeout: Option<Duration>,
+) -> std::io::Result<()> {
+    stream.set_send_timeout(timeout)
+}
+
+/// # Errors
+///
+/// Returns an I/O error when the operating-system local stream cannot be cloned.
+pub fn clone_local_stream(stream: &LocalStream) -> std::io::Result<LocalStream> {
+    stream.try_clone()
+}
+
+/// Creates a real bidirectional operating-system local transport pair.
+///
+/// # Errors
+///
+/// Returns an I/O error when the temporary endpoint cannot be bound or connected.
+pub fn local_stream_pair() -> Result<(LocalStream, LocalStream), ConnectionError> {
+    static NEXT_PAIR: AtomicU64 = AtomicU64::new(1);
+    let path = std::env::temp_dir().join(format!(
+        "keith-local-pair-{}-{}.sock",
+        std::process::id(),
+        NEXT_PAIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    #[cfg(unix)]
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let listener = bind_permissioned_local(&path)?;
+    let client = connect_local(&path)?;
+    let server = accept_local(&listener)?;
+    drop(listener);
+    Ok((client, server))
+}
+
+#[cfg(unix)]
+fn local_name(path: &Path) -> Result<Name<'static>, ConnectionError> {
+    path.as_os_str()
+        .to_os_string()
+        .to_fs_name::<GenericFilePath>()
+        .map(Name::into_owned)
+        .map_err(ConnectionError::from)
+}
+
+#[cfg(windows)]
+fn local_name(path: &Path) -> Result<Name<'static>, ConnectionError> {
+    let digest = Sha256::digest(path.as_os_str().to_string_lossy().as_bytes());
+    format!("keith-agent-{digest:x}")
+        .to_ns_name::<GenericNamespaced>()
+        .map(Name::into_owned)
+        .map_err(ConnectionError::from)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn local_name(_path: &Path) -> Result<Name<'static>, ConnectionError> {
+    Err(ConnectionError::UnsupportedLocalTransport)
 }
 
 pub struct FramedTransport<S> {
@@ -205,6 +317,8 @@ pub enum ConnectionError {
     InvalidUtf8,
     #[error("WebSocket message kind did not match the negotiated wire format")]
     UnexpectedWebSocketMessage,
+    #[error("this platform has no local transport backend")]
+    UnsupportedLocalTransport,
 }
 
 impl ConnectionError {
@@ -341,9 +455,8 @@ mod tests {
             .unwrap();
     }
 
-    #[cfg(unix)]
-    fn run_unix_journey(format: WireFormat) {
-        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+    fn run_local_journey(format: WireFormat) {
+        let (client_stream, server_stream) = local_stream_pair().unwrap();
         let server = thread::spawn(move || {
             server_journey(&mut FramedTransport::new(server_stream, format));
         });
@@ -352,14 +465,14 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn framed_json_conformance_over_permissionable_local_stream() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("agent.sock");
         let listener = bind_permissioned_local(&path).unwrap();
+        #[cfg(unix)]
         assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = accept_local(&listener).unwrap();
             server_journey(&mut FramedTransport::new(stream, WireFormat::Json));
         });
         let stream = connect_local(&path).unwrap();
@@ -368,9 +481,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn binary_conformance_over_permissionable_local_stream() {
-        run_unix_journey(WireFormat::Binary);
+        run_local_journey(WireFormat::Binary);
     }
 
     #[test]

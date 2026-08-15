@@ -3,7 +3,6 @@
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +14,10 @@ use keith_agent_types::{
     CURRENT_SCHEMA_VERSION, EntityId, Generation, Revision, RootTreeId, SchemaVersion,
     UtcTimestamp, WorkerId,
 };
-use keith_connection::bind_permissioned_local;
+use keith_connection::{
+    LocalListener, LocalStream, accept_local, bind_permissioned_local,
+    set_local_listener_nonblocking, set_local_read_timeout, set_local_write_timeout,
+};
 use keith_framing::{FrameError, LengthDelimitedCodec};
 use keith_state_store::{EmbeddedStore, FileBackupHook, StoreError};
 use keith_state_store_core::{
@@ -672,7 +674,7 @@ pub fn run_worker(
         Err(error) => return Err(error.into()),
     }
     let listener = bind_permissioned_local(&arguments.control_socket)?;
-    listener.set_nonblocking(true)?;
+    set_local_listener_nonblocking(&listener, true)?;
     let started_at = UtcTimestamp::now()?;
     let mut registration = WorkerRegistration {
         version: CURRENT_SCHEMA_VERSION,
@@ -689,7 +691,7 @@ pub fn run_worker(
     registration.state = WorkerRunState::Ready;
     write_registration(&arguments.state_dir, &registration)?;
     let mut grant = arguments.grant.clone();
-    let mut control: Option<PrivateTransport<UnixStream>> = None;
+    let mut control: Option<PrivateTransport<LocalStream>> = None;
     let mut next_heartbeat = Instant::now();
     let mut heartbeat_count = 0_u64;
     let mut requested_shutdown = false;
@@ -722,15 +724,15 @@ pub fn run_worker(
 }
 
 fn service_control(
-    listener: &UnixListener,
-    control: &mut Option<PrivateTransport<UnixStream>>,
+    listener: &LocalListener,
+    control: &mut Option<PrivateTransport<LocalStream>>,
     grant: &LeaseGrant,
 ) -> Result<bool, WorkerRuntimeError> {
     if control.is_none() {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                stream.set_read_timeout(Some(Duration::from_millis(5)))?;
-                stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+        match accept_local(listener) {
+            Ok(stream) => {
+                set_local_read_timeout(&stream, Some(Duration::from_millis(5)))?;
+                set_local_write_timeout(&stream, Some(Duration::from_secs(1)))?;
                 *control = Some(PrivateTransport::new(stream, grant.clone())?);
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -777,7 +779,7 @@ fn renew_and_publish(
     grant: &mut LeaseGrant,
     arguments: &WorkerArguments,
     registration: &mut WorkerRegistration,
-    control: &mut Option<PrivateTransport<UnixStream>>,
+    control: &mut Option<PrivateTransport<LocalStream>>,
     heartbeat_count: u64,
 ) -> Result<(), WorkerRuntimeError> {
     let Ok(renewed) = manager.renew(grant, arguments.lease_duration) else {
@@ -837,7 +839,7 @@ fn write_registration(
     let bytes = keith_agent_types::canonical_json_bytes(registration)?;
     fs::write(&temporary, bytes)?;
     File::open(&temporary)?.sync_all()?;
-    fs::rename(&temporary, &path)?;
+    keith_platform::replace_file(&temporary, &path)?;
     File::open(parent)?.sync_all()?;
     Ok(())
 }

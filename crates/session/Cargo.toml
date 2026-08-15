@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 keith-agent-types = { path = "../agent-types" }
+keith-platform = { path = "../platform" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

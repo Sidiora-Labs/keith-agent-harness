@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+mod platform;
 mod security;
 
 fn main() -> ExitCode {
@@ -21,8 +22,9 @@ fn main() -> ExitCode {
             matches!(env::args().nth(2).as_deref(), Some("--write")),
         ),
         Some("security-gate") => security::run(&workspace_root()),
+        Some("platform-gate") => platform::run(&workspace_root()),
         _ => Err(
-            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]|protocol-doc [--write]|security-gate>".into(),
+            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]|protocol-doc [--write]|security-gate|platform-gate>".into(),
         ),
     };
 
@@ -246,8 +248,7 @@ fn dependency_graph(manifests: &[PathBuf]) -> Result<BTreeMap<String, BTreeSet<S
     let mut graph = BTreeMap::new();
     for (manifest, name) in names {
         let content = fs::read_to_string(manifest).map_err(|error| error.to_string())?;
-        let dependencies = content
-            .lines()
+        let dependencies = production_dependency_lines(&content)
             .filter_map(dependency_name)
             .filter(|dependency| package_names.contains(*dependency))
             .map(str::to_owned)
@@ -255,6 +256,20 @@ fn dependency_graph(manifests: &[PathBuf]) -> Result<BTreeMap<String, BTreeSet<S
         graph.insert(name, dependencies);
     }
     Ok(graph)
+}
+
+fn production_dependency_lines(content: &str) -> impl Iterator<Item = &str> {
+    let mut production = false;
+    content.lines().filter(move |line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            production = trimmed == "[dependencies]"
+                || (trimmed.starts_with("[target.") && trimmed.ends_with(".dependencies]"));
+            false
+        } else {
+            production
+        }
+    })
 }
 
 fn package_name(content: &str) -> Option<String> {
@@ -355,5 +370,26 @@ fn run_with_env(
         Ok(())
     } else {
         Err(format!("{program} {} failed with {status}", args.join(" ")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dependency_policy_excludes_test_only_edges_and_keeps_target_runtime_edges() {
+        let manifest = r#"
+            [dependencies]
+            keith-runtime = { path = "../runtime" }
+            [dev-dependencies]
+            keith-test-support = { path = "../test-support" }
+            [target.'cfg(windows)'.dependencies]
+            keith-windows = { path = "../windows" }
+        "#;
+        let dependencies = production_dependency_lines(manifest)
+            .filter_map(dependency_name)
+            .collect::<Vec<_>>();
+        assert_eq!(dependencies, ["keith-runtime", "keith-windows"]);
     }
 }

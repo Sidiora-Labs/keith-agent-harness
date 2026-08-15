@@ -1065,7 +1065,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), PersonalWorkspaceError>
             .open(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::rename(&temporary, path)?;
+        keith_platform::replace_file(&temporary, path)?;
         sync_directory(parent)
     })();
     if result.is_err() {

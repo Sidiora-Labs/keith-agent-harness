@@ -18,6 +18,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 keith-channel-adapters = { path = "../channel-adapters" }
+keith-connection = { path = "../connection" }
 keith-state-store = { path = "../state-store" }
 tempfile.workspace = true
 

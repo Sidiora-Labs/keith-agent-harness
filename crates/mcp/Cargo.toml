@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 keith-agent-types = { path = "../agent-types" }
 keith-credentials = { path = "../credentials" }
+keith-platform = { path = "../platform" }
 nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

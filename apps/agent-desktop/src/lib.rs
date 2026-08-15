@@ -4,8 +4,6 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -15,9 +13,10 @@ use keith_agent_types::{
     CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, ClientId, CommandId, EntityId, SchemaVersion,
     UtcTimestamp,
 };
-#[cfg(unix)]
-use keith_connection::{AgentTransport, FramedTransport};
-#[cfg(unix)]
+use keith_connection::{
+    AgentTransport, FramedTransport, connect_local, set_local_read_timeout, set_local_write_timeout,
+};
+use keith_platform::PlatformPaths;
 use keith_protocol::{
     ClientCommand, ClientHello, CommandEnvelope, CommandResult, ResponsePayload, SessionFilter,
     SessionSummary, WireFormat, WireMessage,
@@ -77,6 +76,21 @@ pub struct DesktopSettings {
 pub struct DesktopBootstrap;
 
 impl DesktopBootstrap {
+    /// Creates or reopens desktop state in the native platform locations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when platform paths cannot be discovered or initialized.
+    pub fn initialize_default(web_origin: &str) -> Result<DesktopSettings, DesktopError> {
+        let paths = PlatformPaths::discover().map_err(|_| DesktopError::InvalidConfiguration)?;
+        let mut settings = Self::initialize(&paths.state_root, &paths.data_root, web_origin)?;
+        if settings.daemon_socket != paths.daemon_endpoint {
+            settings.daemon_socket = paths.daemon_endpoint;
+            atomic_json(&settings.state_root.join("desktop.json"), &settings)?;
+        }
+        Ok(settings)
+    }
+
     /// Creates or reopens the non-secret first-run desktop state.
     ///
     /// # Errors
@@ -391,15 +405,12 @@ impl DesktopConnection {
     /// # Errors
     ///
     /// Returns an error for transport, negotiation, or response-type failure.
-    #[cfg(unix)]
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, DesktopError> {
-        let stream = UnixStream::connect(&self.socket)
+        let stream = connect_local(&self.socket)
             .map_err(|error| DesktopError::AgentConnection(error.to_string()))?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+        set_local_read_timeout(&stream, Some(Duration::from_secs(2)))
             .map_err(|error| DesktopError::AgentConnection(error.to_string()))?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(2)))
+        set_local_write_timeout(&stream, Some(Duration::from_secs(2)))
             .map_err(|error| DesktopError::AgentConnection(error.to_string()))?;
         let mut transport = FramedTransport::new(stream, WireFormat::Json);
         let client_id = ClientId::new();
@@ -452,13 +463,6 @@ impl DesktopConnection {
             ));
         };
         Ok(sessions)
-    }
-
-    #[cfg(not(unix))]
-    pub fn list_sessions(&self) -> Result<Vec<()>, DesktopError> {
-        Err(DesktopError::AgentConnection(
-            "local transport backend unavailable".into(),
-        ))
     }
 
     fn probe(socket: &Path) -> Result<(), DesktopError> {
@@ -903,7 +907,7 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<(), DesktopError> 
         .open(&temporary)?;
     file.write_all(&keith_agent_types::canonical_json_bytes(value)?)?;
     file.sync_all()?;
-    fs::rename(&temporary, path)?;
+    keith_platform::replace_file(&temporary, path)?;
     File::open(parent)?.sync_all()?;
     Ok(())
 }
@@ -917,6 +921,12 @@ fn reject_symlink(path: &Path) -> Result<(), DesktopError> {
 }
 
 fn remove_stale_socket(path: &Path) -> Result<(), DesktopError> {
+    #[cfg(windows)]
+    {
+        let _ = path;
+        return Ok(());
+    }
+    #[cfg(unix)]
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_dir() => {
             Err(DesktopError::UnsafePath)

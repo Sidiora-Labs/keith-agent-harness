@@ -771,7 +771,9 @@ impl RestrictedProcessRunner {
         program: &Path,
         request: &RunRequest,
     ) -> Result<(PathBuf, Vec<OsString>), RunError> {
+        #[allow(unused_mut)]
         let mut executable = program.to_path_buf();
+        #[allow(unused_mut)]
         let mut arguments = request
             .arguments
             .iter()
@@ -1188,10 +1190,12 @@ fn find_executable(candidates: &[&str]) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use std::sync::{Arc, Mutex};
 
     use super::*;
 
+    #[cfg(target_os = "linux")]
     fn empty_sink(_chunk: &OutputChunk) {}
 
     #[test]

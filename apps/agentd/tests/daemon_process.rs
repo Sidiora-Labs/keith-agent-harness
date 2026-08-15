@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -10,14 +9,19 @@ use keith_agent_types::{
     CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, ClientId, CommandId, ProfileId, RootTreeId,
     SessionId, UtcTimestamp,
 };
-use keith_connection::{AgentTransport, FramedTransport};
+use keith_connection::{
+    AgentTransport, FramedTransport, LocalStream, connect_local, set_local_read_timeout,
+    set_local_write_timeout,
+};
 use keith_daemon_core::RootManifest;
 use keith_protocol::{
     AttachSession, ClientCommand, ClientHello, CommandEnvelope, CommandResult, ResponsePayload,
     SessionFilter, SessionState, WireFormat, WireMessage,
 };
 use keith_worker_runtime::{WorkerRunState, read_registration, registration_path};
+#[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
+#[cfg(unix)]
 use nix::unistd::Pid;
 
 fn write_manifest(data_root: &Path, root: &RootTreeId, session: &SessionId) {
@@ -61,16 +65,12 @@ fn start_daemon(data_root: &Path, socket: &Path) -> Child {
         .unwrap()
 }
 
-fn connect_when_ready(socket: &Path) -> UnixStream {
+fn connect_when_ready(socket: &Path) -> LocalStream {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Ok(stream) = UnixStream::connect(socket) {
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
+        if let Ok(stream) = connect_local(socket) {
+            set_local_read_timeout(&stream, Some(Duration::from_secs(2))).unwrap();
+            set_local_write_timeout(&stream, Some(Duration::from_secs(2))).unwrap();
             return stream;
         }
         assert!(
@@ -81,7 +81,7 @@ fn connect_when_ready(socket: &Path) -> UnixStream {
     }
 }
 
-fn open_connection(socket: &Path) -> (FramedTransport<UnixStream>, ClientId) {
+fn open_connection(socket: &Path) -> (FramedTransport<LocalStream>, ClientId) {
     let mut transport = FramedTransport::new(connect_when_ready(socket), WireFormat::Json);
     let client_id = ClientId::new();
     transport
@@ -133,15 +133,51 @@ fn wait_for_worker(data_root: &Path, root: &RootTreeId) -> u32 {
     }
 }
 
-fn send_signal(process: &Child, signal: Signal) {
+#[cfg(unix)]
+fn send_signal(process: &mut Child, signal: Signal) {
     kill(Pid::from_raw(i32::try_from(process.id()).unwrap()), signal).unwrap();
 }
 
+#[cfg(windows)]
+fn send_signal(process: &mut Child, _force: bool) {
+    process.kill().unwrap();
+}
+
+#[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
     let Ok(pid) = i32::try_from(pid) else {
         return false;
     };
     kill(Pid::from_raw(pid), None).is_ok()
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    let output = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        line.split(',')
+            .nth(1)
+            .is_some_and(|value| value.trim_matches('"') == pid.to_string())
+    })
+}
+
+#[cfg(unix)]
+fn terminate_pid(pid: u32) {
+    kill(Pid::from_raw(i32::try_from(pid).unwrap()), Signal::SIGKILL).unwrap();
+}
+
+#[cfg(windows)]
+fn terminate_pid(pid: u32) {
+    assert!(
+        Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 #[test]
@@ -186,11 +222,7 @@ fn daemon_process_is_lazy_contains_crashes_and_adopts_after_restart() {
     let first_pid = wait_for_worker(&data_root, &first_root);
     let second_pid = wait_for_worker(&data_root, &second_root);
 
-    kill(
-        Pid::from_raw(i32::try_from(first_pid).unwrap()),
-        Signal::SIGKILL,
-    )
-    .unwrap();
+    terminate_pid(first_pid);
     thread::sleep(Duration::from_millis(150));
     assert!(matches!(
         execute(
@@ -202,7 +234,10 @@ fn daemon_process_is_lazy_contains_crashes_and_adopts_after_restart() {
     assert!(daemon.try_wait().unwrap().is_none());
     assert!(process_is_alive(second_pid));
 
-    send_signal(&daemon, Signal::SIGKILL);
+    #[cfg(unix)]
+    send_signal(&mut daemon, Signal::SIGKILL);
+    #[cfg(windows)]
+    send_signal(&mut daemon, true);
     assert!(!daemon.wait().unwrap().success());
     assert!(process_is_alive(second_pid));
 
@@ -216,8 +251,17 @@ fn daemon_process_is_lazy_contains_crashes_and_adopts_after_restart() {
     ));
     assert!(process_is_alive(second_pid));
 
-    send_signal(&restarted, Signal::SIGTERM);
-    assert!(restarted.wait().unwrap().success());
+    #[cfg(unix)]
+    {
+        send_signal(&mut restarted, Signal::SIGTERM);
+        assert!(restarted.wait().unwrap().success());
+    }
+    #[cfg(windows)]
+    {
+        send_signal(&mut restarted, true);
+        let _ = restarted.wait().unwrap();
+        terminate_pid(second_pid);
+    }
     let deadline = Instant::now() + Duration::from_secs(2);
     while process_is_alive(second_pid) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));

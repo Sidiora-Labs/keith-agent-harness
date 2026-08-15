@@ -542,11 +542,10 @@ impl<T: AgentTransport> AgentConnection<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::net::UnixStream;
     use std::thread;
 
     use keith_agent_types::{EntityId, ProtocolVersion};
-    use keith_connection::FramedTransport;
+    use keith_connection::{FramedTransport, local_stream_pair};
     use keith_protocol::{CommandResultEnvelope, ResumeMode, ServerHello, WireFormat};
 
     use super::*;
@@ -643,7 +642,7 @@ mod tests {
 
     #[test]
     fn agent_connection_submits_over_real_framed_socket() {
-        let (client, server) = UnixStream::pair().expect("local socket pair");
+        let (client, server) = local_stream_pair().expect("local socket pair");
         let server_thread = thread::spawn(move || {
             let mut transport = FramedTransport::new(server, WireFormat::Json);
             let WireMessage::ClientHello(hello) = transport.receive().expect("client hello") else {

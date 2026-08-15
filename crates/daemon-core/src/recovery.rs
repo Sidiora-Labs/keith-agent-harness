@@ -624,8 +624,10 @@ pub enum RecoveryError {
 #[cfg(test)]
 mod tests {
     use std::fs::{self, OpenOptions};
+    #[cfg(unix)]
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(unix)]
     use std::thread;
 
     use keith_agent_types::{DeliveryId, JobId, ProfileId, WorkspaceId};

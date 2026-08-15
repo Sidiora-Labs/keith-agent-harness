@@ -5,7 +5,10 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -16,7 +19,9 @@ use keith_agent_types::{ProfileId, SessionId, UtcTimestamp};
 use keith_credentials::{
     CredentialError, CredentialOwner, CredentialRef, EncryptedCredentialStore,
 };
+#[cfg(unix)]
 use nix::sys::signal::{Signal, killpg};
+#[cfg(unix)]
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -541,7 +546,7 @@ impl<'a> McpManager<'a> {
     fn persist(&self) -> Result<(), McpError> {
         let temporary = self.root.join(format!(".{STATE_FILE}.tmp"));
         fs::write(&temporary, serde_json::to_vec_pretty(&self.state)?)?;
-        fs::rename(temporary, self.root.join(STATE_FILE))?;
+        keith_platform::replace_file(&temporary, &self.root.join(STATE_FILE))?;
         Ok(())
     }
 }
@@ -639,7 +644,7 @@ fn stdio_request(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    command.process_group(0);
+    configure_process_group(&mut command);
     if let Some(directory) = working_directory {
         command.current_dir(directory);
     }
@@ -691,12 +696,42 @@ fn stdio_request(
     Ok(response)
 }
 
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn configure_process_group(command: &mut Command) {
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
 fn terminate_process_group(child: &mut std::process::Child) {
     if let Ok(pid) = i32::try_from(child.id()) {
         let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
     } else {
         let _ = child.kill();
     }
+}
+
+#[cfg(windows)]
+fn terminate_process_group(child: &mut std::process::Child) {
+    let status = Command::new("taskkill")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .status();
+    if !status.is_ok_and(|status| status.success()) {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process_group(child: &mut std::process::Child) {
+    let _ = child.kill();
 }
 
 #[allow(clippy::too_many_arguments)]

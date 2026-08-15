@@ -13,6 +13,7 @@ chrono-tz.workspace = true
 keith-action-store = { path = "../action-store" }
 keith-agent-types = { path = "../agent-types" }
 keith-initiative = { path = "../initiative" }
+keith-platform = { path = "../platform" }
 keith-state-store-core = { path = "../state-store-core" }
 serde.workspace = true
 serde_json.workspace = true

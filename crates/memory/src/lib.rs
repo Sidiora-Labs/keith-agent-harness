@@ -687,7 +687,7 @@ fn persist_ledger(root: &Path, ledger: &MemoryLedger) -> Result<(), MemoryError>
         .open(&temporary)?;
     file.write_all(&canonical_json_bytes(ledger)?)?;
     file.sync_all()?;
-    fs::rename(&temporary, &path)?;
+    keith_platform::replace_file(&temporary, &path)?;
     File::open(path.parent().ok_or(MemoryError::IncompatibleLedger)?)?.sync_all()?;
     Ok(())
 }

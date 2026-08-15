@@ -570,11 +570,11 @@ fn repository_error(error: impl Display) -> DeliveryError {
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader};
-    use std::os::unix::net::UnixStream;
     use std::thread;
 
     use keith_channel_adapters::JsonLineAdapter;
     use keith_channel_core::{AdapterCapability, AdapterFeatures, ChannelAdapter};
+    use keith_connection::{LocalStream, local_stream_pair};
     use keith_state_store::EmbeddedStore;
     use tempfile::TempDir;
 
@@ -600,7 +600,7 @@ mod tests {
         }
     }
 
-    fn adapter(stream: UnixStream) -> JsonLineAdapter<UnixStream> {
+    fn adapter(stream: LocalStream) -> JsonLineAdapter<LocalStream> {
         JsonLineAdapter::new(
             stream,
             AdapterFeatures {
@@ -697,7 +697,7 @@ mod tests {
             .claim_next(UtcTimestamp::UNIX_EPOCH)
             .expect("claim")
             .expect("item");
-        let (platform, gateway) = UnixStream::pair().expect("socket pair");
+        let (platform, gateway) = local_stream_pair().expect("socket pair");
         drop(platform);
         let failure = adapter(gateway)
             .send(&outbox.outbound(&claim))
@@ -727,7 +727,7 @@ mod tests {
             .claim_next(UtcTimestamp::UNIX_EPOCH)
             .expect("claim")
             .expect("item");
-        let (platform, gateway) = UnixStream::pair().expect("socket pair");
+        let (platform, gateway) = local_stream_pair().expect("socket pair");
         let platform_thread = thread::spawn(move || {
             let mut line = String::new();
             BufReader::new(platform)

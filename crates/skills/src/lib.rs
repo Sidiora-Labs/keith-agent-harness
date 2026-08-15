@@ -995,7 +995,7 @@ fn persist_ledger(root: &Path, ledger: &SkillLedger) -> Result<(), SkillError> {
         .open(&temporary)?;
     file.write_all(&keith_agent_types::canonical_json_bytes(ledger)?)?;
     file.sync_all()?;
-    fs::rename(&temporary, &path)?;
+    keith_platform::replace_file(&temporary, &path)?;
     File::open(path.parent().ok_or(SkillError::InvalidPackage)?)?.sync_all()?;
     Ok(())
 }

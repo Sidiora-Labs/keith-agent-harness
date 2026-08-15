@@ -1,9 +1,13 @@
 use std::time::Duration;
 
 use keith_agent_types::{Generation, RootTreeId};
-use keith_supervisor::{SupervisorOptions, WorkerEvent, WorkerHealth, WorkerSupervisor};
+#[cfg(unix)]
+use keith_supervisor::WorkerHealth;
+use keith_supervisor::{SupervisorOptions, WorkerEvent, WorkerSupervisor};
 use keith_worker_runtime::LeaseManager;
+#[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
+#[cfg(unix)]
 use nix::unistd::Pid;
 
 fn options() -> SupervisorOptions {
@@ -17,6 +21,7 @@ fn options() -> SupervisorOptions {
 }
 
 #[test]
+#[cfg(unix)]
 fn real_workers_are_adopted_isolated_restarted_and_evicted() {
     let directory = tempfile::tempdir().unwrap();
     let executable = env!("CARGO_BIN_EXE_keith-worker-process-host");

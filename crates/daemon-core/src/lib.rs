@@ -9,8 +9,6 @@ pub use recovery::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,8 +19,10 @@ use keith_agent_types::{
     CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, CommonError, EntityId, ErrorCode, ProfileId,
     Revision, RootTreeId, SchemaVersion, Sequence, SessionId, UtcTimestamp,
 };
-#[cfg(unix)]
-use keith_connection::{AgentTransport, FramedTransport, bind_permissioned_local};
+use keith_connection::{
+    AgentTransport, FramedTransport, LocalStream, accept_local, bind_permissioned_local,
+    set_local_listener_nonblocking, set_local_read_timeout,
+};
 use keith_protocol::{
     ClientCommand, CommandError, CommandResult, CommandResultEnvelope, Feature, ResponsePayload,
     SessionFilter, SessionSnapshot, SessionState, SessionSummary, WireFormat, WireMessage,
@@ -423,7 +423,6 @@ impl DaemonCore {
         self.supervisor.drain_all().map_err(DaemonError::from)
     }
 
-    #[cfg(unix)]
     /// Serves the permission-restricted local `AgentConnection` endpoint until shutdown is signaled.
     ///
     /// # Errors
@@ -443,13 +442,13 @@ impl DaemonCore {
             Err(error) => return Err(error.into()),
         }
         let listener = bind_permissioned_local(socket_path)?;
-        listener.set_nonblocking(true)?;
+        set_local_listener_nonblocking(&listener, true)?;
         {
             let shared = Mutex::new(&mut *self);
             thread::scope(|scope| -> Result<(), DaemonError> {
                 while !shutdown.load(Ordering::Acquire) {
-                    match listener.accept() {
-                        Ok((stream, _)) => {
+                    match accept_local(&listener) {
+                        Ok(stream) => {
                             let shared = &shared;
                             scope.spawn(move || {
                                 let _ = Self::serve_shared_connection(shared, stream, shutdown);
@@ -480,10 +479,9 @@ impl DaemonCore {
         result
     }
 
-    #[cfg(unix)]
     fn serve_shared_connection(
         shared: &Mutex<&mut Self>,
-        stream: UnixStream,
+        stream: LocalStream,
         shutdown: &AtomicBool,
     ) -> Result<(), DaemonError> {
         let maintenance_interval = shared
@@ -491,7 +489,7 @@ impl DaemonCore {
             .map_err(|_| DaemonError::LockPoisoned)?
             .options
             .maintenance_interval;
-        stream.set_read_timeout(Some(maintenance_interval))?;
+        set_local_read_timeout(&stream, Some(maintenance_interval))?;
         let mut transport = FramedTransport::new(stream, WireFormat::Json);
         let WireMessage::ClientHello(client) = transport.receive()? else {
             return Ok(());

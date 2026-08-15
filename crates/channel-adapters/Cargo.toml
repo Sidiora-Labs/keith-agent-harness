@@ -17,5 +17,8 @@ serde_json.workspace = true
 tungstenite.workspace = true
 ureq.workspace = true
 
+[dev-dependencies]
+keith-connection = { path = "../connection" }
+
 [lints]
 workspace = true

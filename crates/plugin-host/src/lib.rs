@@ -397,7 +397,7 @@ impl PluginHost {
     fn persist(&self) -> Result<(), PluginHostError> {
         let temporary = self.root.join(format!(".{LEDGER_FILE}.tmp"));
         fs::write(&temporary, serde_json::to_vec_pretty(&self.ledger)?)?;
-        fs::rename(temporary, self.root.join(LEDGER_FILE))?;
+        keith_platform::replace_file(&temporary, &self.root.join(LEDGER_FILE))?;
         Ok(())
     }
 }

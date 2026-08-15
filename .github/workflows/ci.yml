@@ -20,6 +20,20 @@ jobs:
       - run: cargo ci
       - run: cargo clean-checkout
 
+  platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo platform-gate
+
   supply-chain:
     runs-on: ubuntu-latest
     steps:
@@ -32,4 +46,3 @@ jobs:
           tool: cargo-deny,cargo-audit
       - run: cargo deny check
       - run: cargo audit
-

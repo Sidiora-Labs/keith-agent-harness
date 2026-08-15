@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use keith_agent_types::{CURRENT_PROTOCOL_VERSION, ClientId, ProtocolVersion};
 use keith_connection::{AgentTransport, FramedTransport, WebSocketTransport};
+use keith_platform::PlatformPaths;
 use keith_protocol::{
     ClientHello, CommandEnvelope, CommandResultEnvelope, Feature, ResumeCursor, ServerHello,
     WireFormat, WireMessage,
@@ -184,17 +185,15 @@ fn open_transport(
                 .map_err(|error| TuiConnectionError::DaemonStart(error.to_string()))?;
             let deadline = Instant::now() + startup_timeout;
             loop {
-                if config.socket_path.exists() {
-                    match open_local(&config.socket_path) {
-                        Ok(transport) => return Ok((transport, Some(child))),
-                        Err(error) if Instant::now() < deadline => {
-                            let _ = error;
-                        }
-                        Err(error) => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return Err(error);
-                        }
+                match open_local(&config.socket_path) {
+                    Ok(transport) => return Ok((transport, Some(child))),
+                    Err(error) if Instant::now() < deadline => {
+                        let _ = error;
+                    }
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(error);
                     }
                 }
                 if let Some(status) = child
@@ -244,17 +243,9 @@ fn open_transport(
     }
 }
 
-#[cfg(unix)]
 fn open_local(path: &Path) -> Result<BoxedTransport, TuiConnectionError> {
     let stream = keith_connection::connect_local(path)?;
     Ok(Box::new(FramedTransport::new(stream, WireFormat::Json)))
-}
-
-#[cfg(not(unix))]
-fn open_local(_path: &Path) -> Result<BoxedTransport, TuiConnectionError> {
-    Err(TuiConnectionError::Invalid(
-        "this build has no platform local transport".into(),
-    ))
 }
 
 fn client_hello(client_id: ClientId, resume: Option<ResumeCursor>) -> ClientHello {
@@ -402,12 +393,18 @@ impl TuiArguments {
                 socket_path,
                 idle_seconds: 15 * 60,
             })
+        } else if let Some(socket_path) = socket {
+            ConnectionMode::Attach { socket_path }
         } else {
-            ConnectionMode::Attach {
-                socket_path: socket.ok_or_else(|| {
-                    "--socket, --data-root, or --remote must select a connection mode".to_owned()
-                })?,
-            }
+            let paths = PlatformPaths::discover().map_err(|error| error.to_string())?;
+            ConnectionMode::SupervisedLocal(SupervisedLocalConfig {
+                daemon_executable: daemon.unwrap_or_else(|| sibling_binary(&program, "agentd")),
+                worker_executable: worker
+                    .unwrap_or_else(|| sibling_binary(&program, "agent-worker")),
+                data_root: paths.data_root,
+                socket_path: paths.daemon_endpoint,
+                idle_seconds: 15 * 60,
+            })
         };
         Ok(Some(Self {
             mode,
@@ -492,14 +489,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn local_attach_and_reconnect_run_the_real_protocol_twice() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("agent.sock");
         let listener = keith_connection::bind_permissioned_local(&path).unwrap();
         let server = thread::spawn(move || {
             for _ in 0..2 {
-                let (stream, _) = listener.accept().unwrap();
+                let stream = keith_connection::accept_local(&listener).unwrap();
                 server_journey(&mut FramedTransport::new(stream, WireFormat::Json));
             }
         });
@@ -623,6 +619,12 @@ mod tests {
             supervised.mode,
             ConnectionMode::SupervisedLocal(_)
         ));
+        let native = TuiArguments::parse(["agent-tui"]).unwrap().unwrap();
+        let ConnectionMode::SupervisedLocal(native) = native.mode else {
+            panic!("native defaults must supervise a local daemon");
+        };
+        assert!(native.data_root.is_absolute());
+        assert!(native.socket_path.is_absolute());
         assert!(TuiArguments::parse(["agent-tui", "--remote", "ws://localhost"]).is_err());
     }
 }

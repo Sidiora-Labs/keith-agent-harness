@@ -150,6 +150,86 @@ impl Drop for MasterKey {
     }
 }
 
+pub struct NativeMasterKeyStore {
+    service: String,
+    account: String,
+}
+
+impl Debug for NativeMasterKeyStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeMasterKeyStore")
+            .field("backend", &Self::backend_name())
+            .finish_non_exhaustive()
+    }
+}
+
+impl NativeMasterKeyStore {
+    /// # Errors
+    ///
+    /// Returns an error when the native service or account identifier is unsafe.
+    pub fn new(
+        service: impl Into<String>,
+        account: impl Into<String>,
+    ) -> Result<Self, CredentialError> {
+        let store = Self {
+            service: service.into(),
+            account: account.into(),
+        };
+        if !valid_identifier(&store.service) || !valid_identifier(&store.account) {
+            return Err(CredentialError::InvalidReference);
+        }
+        Ok(store)
+    }
+
+    pub const fn backend_name() -> &'static str {
+        if cfg!(target_os = "linux") {
+            "secret_service"
+        } else if cfg!(target_os = "macos") {
+            "apple_keychain"
+        } else if cfg!(target_os = "windows") {
+            "windows_credential_manager"
+        } else {
+            "unsupported"
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the native store is unavailable, corrupt, or cannot persist a key.
+    pub fn load_or_create(&self) -> Result<MasterKey, CredentialError> {
+        let entry = keyring::v1::Entry::new(&self.service, &self.account)
+            .map_err(|error| CredentialError::NativeStore(error.to_string()))?;
+        match entry.get_secret() {
+            Ok(secret) => {
+                let bytes: [u8; KEY_BYTES] =
+                    secret.try_into().map_err(|_| CredentialError::Corrupt)?;
+                Ok(MasterKey::from_bytes(bytes))
+            }
+            Err(keyring::v1::Error::NoEntry) => {
+                let key = MasterKey::generate()?;
+                entry
+                    .set_secret(&key.bytes)
+                    .map_err(|error| CredentialError::NativeStore(error.to_string()))?;
+                Ok(key)
+            }
+            Err(error) => Err(CredentialError::NativeStore(error.to_string())),
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the native credential cannot be removed.
+    pub fn delete(&self) -> Result<(), CredentialError> {
+        let entry = keyring::v1::Entry::new(&self.service, &self.account)
+            .map_err(|error| CredentialError::NativeStore(error.to_string()))?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::v1::Error::NoEntry) => Ok(()),
+            Err(error) => Err(CredentialError::NativeStore(error.to_string())),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialMetadata {
@@ -209,6 +289,8 @@ pub enum CredentialError {
     Crypto,
     #[error("credential persistence failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("native credential store failed: {0}")]
+    NativeStore(String),
     #[error("credential record serialization failed: {0}")]
     Serialize(serde_json::Error),
     #[error("credential record is corrupt")]
@@ -414,8 +496,10 @@ impl EncryptedCredentialStore {
             let mut file = self.directory.open_with(&temporary, &options)?;
             file.write_all(bytes)?;
             file.sync_all()?;
-            self.directory
-                .rename(&temporary, &self.directory, filename)?;
+            keith_platform::replace_file(
+                &self.ambient_root.join(&temporary),
+                &self.ambient_root.join(filename),
+            )?;
             std::fs::File::open(&self.ambient_root)?.sync_all()?;
             Ok(())
         })();
@@ -681,8 +765,10 @@ fn configure_file_mode(_options: &mut OpenOptions) {}
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use std::collections::{BTreeMap, BTreeSet};
 
+    #[cfg(target_os = "linux")]
     use keith_tool_runner_core::{
         IsolationRequest, OutputChunk, ProcessLimits, RestrictedProcessRunner, RunRequest,
     };
@@ -699,6 +785,14 @@ mod tests {
         )
         .unwrap();
         (directory, store)
+    }
+
+    #[test]
+    fn native_master_key_store_identifies_the_host_backend_without_exposing_a_key() {
+        let store = NativeMasterKeyStore::new("keith-agent", "test-master-key").unwrap();
+        assert!(!format!("{store:?}").contains("master-key"));
+        assert_ne!(NativeMasterKeyStore::backend_name(), "unsupported");
+        assert!(NativeMasterKeyStore::new("bad service", "account").is_err());
     }
 
     #[test]

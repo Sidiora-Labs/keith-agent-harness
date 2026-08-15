@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+keith-platform = { path = "../platform" }
 keith-plugin-sdk = { path = "../plugin-sdk" }
 serde.workspace = true
 serde_json.workspace = true

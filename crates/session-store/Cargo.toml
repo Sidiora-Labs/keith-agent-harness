@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 fs2.workspace = true
 keith-agent-types = { path = "../agent-types" }
+keith-platform = { path = "../platform" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

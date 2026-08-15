@@ -8,7 +8,7 @@ mod security;
 mod server;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use server::{ServerArguments, ServerError, WebServer, WebServerConfig};
+pub use server::{CredentialKeySource, ServerArguments, ServerError, WebServer, WebServerConfig};
 
 use std::fmt::Write as _;
 

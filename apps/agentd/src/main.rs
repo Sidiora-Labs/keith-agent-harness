@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use keith_daemon_core::{DaemonCore, DaemonOptions};
+use keith_platform::PlatformPaths;
 use signal_hook::consts::{SIGINT, SIGTERM};
 
 struct Arguments {
@@ -53,8 +54,20 @@ impl Arguments {
                 _ => return Err(format!("unknown argument {argument}")),
             }
         }
-        let data_root = data_root.ok_or_else(|| "--data-root is required".to_owned())?;
-        let socket = socket.unwrap_or_else(|| data_root.join("agentd.sock"));
+        let platform_paths = if data_root.is_none() {
+            Some(PlatformPaths::discover().map_err(|error| error.to_string())?)
+        } else {
+            None
+        };
+        let data_root = data_root
+            .or_else(|| platform_paths.as_ref().map(|paths| paths.data_root.clone()))
+            .ok_or_else(|| "native data root is unavailable".to_owned())?;
+        let socket = socket.unwrap_or_else(|| {
+            platform_paths.as_ref().map_or_else(
+                || data_root.join("agentd.sock"),
+                |paths| paths.daemon_endpoint.clone(),
+            )
+        });
         let worker_executable = worker_executable.unwrap_or_else(|| {
             let mut sibling = PathBuf::from(program);
             sibling.set_file_name("agent-worker");

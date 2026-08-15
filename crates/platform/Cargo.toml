@@ -1,5 +1,5 @@
 [package]
-name = "keith-xtask"
+name = "keith-platform"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,11 +8,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-keith-agent-types = { path = "../../crates/agent-types" }
-keith-platform = { path = "../../crates/platform" }
-keith-protocol = { path = "../../crates/protocol" }
 serde.workspace = true
-serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

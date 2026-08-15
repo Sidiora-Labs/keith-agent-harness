@@ -2,7 +2,6 @@
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -12,7 +11,7 @@ use keith_channel_core::{
     AgentConnection, EnqueueOutcome, GatewayLimits, GatewayQueue, ReconnectPolicy, RoutedInbound,
     SessionAction,
 };
-use keith_connection::{FramedTransport, connect_local};
+use keith_connection::{FramedTransport, LocalStream, connect_local};
 use keith_protocol::{CommandResult, WireFormat};
 use serde::Serialize;
 
@@ -69,7 +68,7 @@ struct GatewayReport {
     safe_error: Option<String>,
 }
 
-type LocalAgentConnection = AgentConnection<FramedTransport<UnixStream>>;
+type LocalAgentConnection = AgentConnection<FramedTransport<LocalStream>>;
 
 fn connect(socket: &Path) -> Result<LocalAgentConnection, String> {
     let stream = connect_local(socket).map_err(|error| error.to_string())?;

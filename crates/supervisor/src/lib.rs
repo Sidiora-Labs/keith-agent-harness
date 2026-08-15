@@ -2,19 +2,24 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use keith_agent_types::{Generation, RootTreeId, UtcTimestamp, WorkerId};
+use keith_connection::{
+    LocalStream, connect_local, set_local_read_timeout, set_local_write_timeout,
+};
 use keith_worker_runtime::{
     LeaseError, LeaseGrant, LeaseManager, PrivateMessage, PrivateProtocolError, PrivateTransport,
     WorkerRegistration, WorkerRunState, read_registration, registration_path,
 };
+#[cfg(unix)]
 use nix::errno::Errno;
+#[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
+#[cfg(unix)]
 use nix::unistd::Pid;
 use thiserror::Error;
 
@@ -83,7 +88,7 @@ impl Default for SupervisorOptions {
 struct ManagedWorker {
     registration: WorkerRegistration,
     grant: LeaseGrant,
-    control: Option<PrivateTransport<UnixStream>>,
+    control: Option<PrivateTransport<LocalStream>>,
     child: Option<Child>,
     last_activity: Instant,
     draining: bool,
@@ -119,8 +124,8 @@ pub enum SupervisorError {
         root_tree_id: RootTreeId,
         status: std::process::ExitStatus,
     },
-    #[error("worker signal failed: {0}")]
-    Signal(Errno),
+    #[error("worker process control failed: {0}")]
+    ProcessControl(String),
     #[error("route for root {root_tree_id} generation {generation:?} is stale")]
     StaleRoute {
         root_tree_id: RootTreeId,
@@ -457,7 +462,7 @@ impl WorkerSupervisor {
                 .is_ok()
         });
         if !requested {
-            signal(worker.registration.pid, Signal::SIGTERM)?;
+            signal(worker.registration.pid, ProcessSignal::Graceful)?;
         }
         let pid = worker.registration.pid;
         let deadline = Instant::now() + self.options.drain_timeout;
@@ -465,7 +470,7 @@ impl WorkerSupervisor {
             thread::sleep(Duration::from_millis(10));
         }
         if process_is_alive(pid) {
-            signal(pid, Signal::SIGKILL)?;
+            signal(pid, ProcessSignal::Force)?;
         }
         if let Some(child) = worker.child.as_mut() {
             let _ = child.wait();
@@ -497,7 +502,7 @@ impl WorkerSupervisor {
             .workers
             .remove(root_tree_id)
             .ok_or_else(|| SupervisorError::NotActive(root_tree_id.clone()))?;
-        signal(worker.registration.pid, Signal::SIGKILL)?;
+        signal(worker.registration.pid, ProcessSignal::Force)?;
         if let Some(child) = worker.child.as_mut() {
             let _ = child.wait();
         } else {
@@ -562,13 +567,13 @@ fn connect_control(
     registration: &WorkerRegistration,
     grant: &LeaseGrant,
     timeout: Duration,
-) -> Result<PrivateTransport<UnixStream>, SupervisorError> {
+) -> Result<PrivateTransport<LocalStream>, SupervisorError> {
     let deadline = Instant::now() + timeout;
     'connect: loop {
-        match UnixStream::connect(&registration.control_socket) {
+        match connect_local(&registration.control_socket) {
             Ok(stream) => {
-                stream.set_read_timeout(Some(Duration::from_millis(20)))?;
-                stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+                set_local_read_timeout(&stream, Some(Duration::from_millis(20)))?;
+                set_local_write_timeout(&stream, Some(Duration::from_secs(1)))?;
                 let mut control = PrivateTransport::new(stream, grant.clone())?;
                 if let Err(error) = control.send(PrivateMessage::SupervisorHello) {
                     if error.is_connection_loss() && Instant::now() < deadline {
@@ -598,7 +603,7 @@ fn connect_control(
                     }
                 }
             }
-            Err(error)
+            Err(keith_connection::ConnectionError::Io(error))
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
@@ -606,16 +611,60 @@ fn connect_control(
             {
                 thread::sleep(Duration::from_millis(10));
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(SupervisorError::ProcessControl(format!(
+                    "local worker connection failed: {error}"
+                )));
+            }
         }
     }
 }
 
-fn signal(pid: u32, signal: Signal) -> Result<(), SupervisorError> {
-    let raw_pid = i32::try_from(pid).map_err(|_| SupervisorError::Signal(Errno::EINVAL))?;
-    kill(Pid::from_raw(raw_pid), signal).map_err(SupervisorError::Signal)
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ProcessSignal {
+    Graceful,
+    Force,
 }
 
+#[cfg(unix)]
+fn signal(pid: u32, signal: ProcessSignal) -> Result<(), SupervisorError> {
+    let raw_pid = i32::try_from(pid)
+        .map_err(|_| SupervisorError::ProcessControl("process ID is out of range".into()))?;
+    let signal = match signal {
+        ProcessSignal::Graceful => Signal::SIGTERM,
+        ProcessSignal::Force => Signal::SIGKILL,
+    };
+    kill(Pid::from_raw(raw_pid), signal)
+        .map_err(|error| SupervisorError::ProcessControl(error.to_string()))
+}
+
+#[cfg(windows)]
+fn signal(pid: u32, signal: ProcessSignal) -> Result<(), SupervisorError> {
+    let mut command = Command::new("taskkill");
+    command.args(["/PID", &pid.to_string(), "/T"]);
+    if signal == ProcessSignal::Force {
+        command.arg("/F");
+    }
+    let status = command
+        .status()
+        .map_err(|error| SupervisorError::ProcessControl(error.to_string()))?;
+    if status.success() || !process_is_alive(pid) {
+        Ok(())
+    } else {
+        Err(SupervisorError::ProcessControl(format!(
+            "taskkill exited with {status}"
+        )))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn signal(_pid: u32, _signal: ProcessSignal) -> Result<(), SupervisorError> {
+    Err(SupervisorError::ProcessControl(
+        "this platform has no process-control backend".into(),
+    ))
+}
+
+#[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
     let Ok(raw_pid) = i32::try_from(pid) else {
         return false;
@@ -629,6 +678,27 @@ fn process_is_alive(pid: u32) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    let Ok(output) = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        line.split(',')
+            .nth(1)
+            .is_some_and(|value| value.trim_matches('"') == pid.to_string())
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_is_alive(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
 fn process_is_zombie(pid: u32) -> bool {
     fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("stat"))
         .ok()
@@ -637,6 +707,11 @@ fn process_is_zombie(pid: u32) -> bool {
                 .map(|(_, fields)| fields.starts_with('Z'))
         })
         .unwrap_or(false)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_is_zombie(_pid: u32) -> bool {
+    false
 }
 
 fn status_for(worker: &ManagedWorker, stale_heartbeat: Duration) -> WorkerStatus {
@@ -671,6 +746,7 @@ fn status_for(worker: &ManagedWorker, stale_heartbeat: Duration) -> WorkerStatus
     }
 }
 
+#[cfg(target_os = "linux")]
 fn read_resources(pid: u32) -> WorkerResourceState {
     let Ok(status) = fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("status"))
     else {
@@ -688,6 +764,55 @@ fn read_resources(pid: u32) -> WorkerResourceState {
         resident_bytes: kibibytes("VmRSS:"),
         virtual_bytes: kibibytes("VmSize:"),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn read_resources(pid: u32) -> WorkerResourceState {
+    let Ok(output) = Command::new("ps")
+        .args(["-o", "rss=", "-o", "vsz=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return WorkerResourceState::default();
+    };
+    let mut values = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .filter_map(|value| value.parse::<u64>().ok())
+        .map(|value| value.saturating_mul(1024));
+    WorkerResourceState {
+        resident_bytes: values.next(),
+        virtual_bytes: values.next(),
+    }
+}
+
+#[cfg(windows)]
+fn read_resources(pid: u32) -> WorkerResourceState {
+    let Ok(output) = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return WorkerResourceState::default();
+    };
+    let resident_bytes = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .and_then(|line| line.rsplit_once(',').map(|(_, memory)| memory))
+        .map(|memory| {
+            memory
+                .chars()
+                .filter(char::is_ascii_digit)
+                .collect::<String>()
+        })
+        .and_then(|memory| memory.parse::<u64>().ok())
+        .map(|value| value.saturating_mul(1024));
+    WorkerResourceState {
+        resident_bytes,
+        virtual_bytes: None,
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn read_resources(_pid: u32) -> WorkerResourceState {
+    WorkerResourceState::default()
 }
 
 fn add_duration(timestamp: UtcTimestamp, duration: Duration) -> Option<UtcTimestamp> {

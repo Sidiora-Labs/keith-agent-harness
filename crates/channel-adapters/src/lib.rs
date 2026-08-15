@@ -731,14 +731,14 @@ fn io_failure(error: &std::io::Error) -> AdapterFailure {
 #[cfg(test)]
 mod tests {
     use std::io::BufReader;
-    use std::net::{Shutdown, TcpListener};
-    use std::os::unix::net::UnixStream;
+    use std::net::TcpListener;
     use std::thread;
 
     use keith_agent_types::ArtifactId;
     use keith_channel_core::{
         AdapterCapability, GatewayLimits, GatewayQueue, InboundIntent, RoutedInbound,
     };
+    use keith_connection::local_stream_pair;
 
     use super::*;
 
@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn conformance_covers_malformed_reordered_duplicate_oversized_rate_limit_and_disconnect() {
-        let (platform, gateway) = UnixStream::pair().expect("real local platform stream");
+        let (platform, gateway) = local_stream_pair().expect("real local platform stream");
         let platform_thread = thread::spawn(move || {
             let mut platform = platform;
             for event in [
@@ -984,20 +984,20 @@ mod tests {
     #[test]
     fn conformance_bounds_input_sends_receipts_and_classifies_reconnect() {
         let (mut oversized_platform, oversized_gateway) =
-            UnixStream::pair().expect("oversized stream");
-        oversized_platform
-            .write_all(&[b'x'; 33])
-            .expect("oversized bytes");
-        oversized_platform
-            .shutdown(Shutdown::Write)
-            .expect("finish oversized input");
+            local_stream_pair().expect("oversized stream");
+        let oversized_thread = thread::spawn(move || {
+            oversized_platform
+                .write_all(&[b'x'; 33])
+                .expect("oversized bytes");
+        });
         let mut bounded = JsonLineAdapter::new(oversized_gateway, features(), 32);
         assert_eq!(
             bounded.receive().expect_err("oversized denied").class,
             RetryClass::Permanent
         );
+        oversized_thread.join().expect("oversized writer");
 
-        let (platform, gateway) = UnixStream::pair().expect("outbound stream");
+        let (platform, gateway) = local_stream_pair().expect("outbound stream");
         let platform_thread = thread::spawn(move || {
             let mut platform = BufReader::new(platform);
             let mut outbound = String::new();

@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 keith-daemon-core = { path = "../../crates/daemon-core" }
+keith-platform = { path = "../../crates/platform" }
 keith-worker-runtime = { path = "../../crates/worker-runtime" }
 signal-hook.workspace = true
 

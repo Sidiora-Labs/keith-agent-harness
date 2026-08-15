@@ -24,6 +24,14 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     match command.to_str() {
+        Some("setup-default") => {
+            let origin = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .unwrap_or_else(|| "http://127.0.0.1:7341".into());
+            DesktopBootstrap::initialize_default(&origin).map_err(|error| error.to_string())?;
+            Ok(())
+        }
         Some("setup") => {
             let state_root = arguments
                 .next()

@@ -442,7 +442,7 @@
     - Implement index rebuild and invalid configuration fallback
     - Run every supported upgrade, failure, compatibility, and rollback policy path
     - _Requirements: 43.1-43.6_
-  - [ ] 13.2 Linux, macOS, and Windows platform backends
+  - [x] 13.2 Linux, macOS, and Windows platform backends
     - Complete paths, locking, local transports, process control, signals/cancellation, credentials, sandbox, TUI, web, and desktop behavior per platform
     - Keep session, workspace, protocol, and export formats portable
     - Implement fail-closed or explicit reduced-isolation behavior

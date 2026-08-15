@@ -1259,7 +1259,7 @@ fn write_snapshot(path: &Path, bytes: &[u8]) -> Result<(), KernelError> {
         restrict_file(&file)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::rename(&temporary, path)?;
+        keith_platform::replace_file(&temporary, path)?;
         fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();

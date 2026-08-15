@@ -618,7 +618,7 @@ impl RepositoryPort for JsonSessionWriter {
         File::open(&temporary)
             .and_then(|file| file.sync_all())
             .map_err(|error| ServiceError::Persistence(error.to_string()))?;
-        fs::rename(&temporary, path)
+        keith_platform::replace_file(&temporary, &path)
             .map_err(|error| ServiceError::Persistence(error.to_string()))?;
         File::open(&self.directory)
             .and_then(|file| file.sync_all())

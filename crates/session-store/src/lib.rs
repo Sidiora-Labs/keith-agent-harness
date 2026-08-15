@@ -1603,7 +1603,7 @@ fn atomic_write_json(
         .open(&temporary)?;
     file.write_all(&canonical_json_bytes(value)?)?;
     file.sync_all()?;
-    fs::rename(&temporary, &path)?;
+    keith_platform::replace_file(&temporary, &path)?;
     sync_directory(directory)
 }
 
