@@ -116,7 +116,7 @@
     - Keep partial provider output incomplete and out of final history until commit
     - Run scripted edge-stream and real adapter tests
     - _Requirements: 10.1-10.7_
-  - [ ] 4.3 Direct-versus-planned router and durable plan service
+  - [x] 4.3 Direct-versus-planned router and durable plan service
     - Implement task classification with a direct path for simple work
     - Implement versioned Plan, PlanStep, dependencies, assignees, result checks, state, and revision history
     - Integrate plans into goals, context, session history, clients, and child dispatch

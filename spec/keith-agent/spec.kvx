@@ -727,7 +727,7 @@ requires = ["3.2", "3.4", "4.1"]
 
 [task.4.3]
 title  = "Direct-versus-planned router and durable plan service"
-status = "pending"
+status = "done"
 wave   = 9
 do_1   = "Implement task classification with a direct path for simple work"
 do_2   = "Implement versioned Plan, PlanStep, dependencies, assignees, result checks, state, and revision history"
