@@ -11,12 +11,21 @@ publish = false
 keith-agent-types = { path = "../agent-types" }
 keith-connection = { path = "../connection" }
 keith-protocol = { path = "../protocol" }
+keith-scheduler = { path = "../scheduler" }
+keith-session-store = { path = "../session-store" }
+keith-state-store = { path = "../state-store" }
+keith-state-store-core = { path = "../state-store-core" }
 keith-supervisor = { path = "../supervisor" }
+keith-tool-core = { path = "../tool-core" }
+keith-waiting = { path = "../waiting" }
+keith-delivery = { path = "../delivery" }
+keith-worker-runtime = { path = "../worker-runtime" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+keith-channel-core = { path = "../channel-core" }
 tempfile.workspace = true
 
 [lints]

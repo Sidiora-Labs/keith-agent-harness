@@ -1207,7 +1207,7 @@ requires = ["6.3", "9.1", "11.1"]
 
 [task.12.2]
 title  = "Daemon, worker, provider, tool, kernel, channel, and refinement recovery"
-status = "pending"
+status = "done"
 wave   = 21
 do_1   = "Implement ordered daemon startup recovery and stale-claim expiration"
 do_2   = "Implement worker reconstruction and active provider/tool/process reconciliation"

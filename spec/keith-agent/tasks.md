@@ -403,7 +403,7 @@
     - Implement cooperative cancellation and forced executor termination after grace
     - Run saturation, starvation, slow client, output flood, cancellation race, and recovery tests
     - _Requirements: 41.1-41.6_
-  - [ ] 12.2 Daemon, worker, provider, tool, kernel, channel, and refinement recovery
+  - [x] 12.2 Daemon, worker, provider, tool, kernel, channel, and refinement recovery
     - Implement ordered daemon startup recovery and stale-claim expiration
     - Implement worker reconstruction and active provider/tool/process reconciliation
     - Implement repeatable, check-state-first, never-automatic, and ambiguous external outcomes

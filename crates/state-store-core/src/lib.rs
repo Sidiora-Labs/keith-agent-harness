@@ -29,6 +29,8 @@ pub enum Collection {
     InitiativeHistory,
     EvolutionTransactions,
     ToolExperience,
+    KernelMetadata,
+    ActiveOperations,
     SchemaMigrations,
 }
 
@@ -56,6 +58,8 @@ impl Collection {
             Self::InitiativeHistory => "initiative_history",
             Self::EvolutionTransactions => "evolution_transactions",
             Self::ToolExperience => "tool_experience",
+            Self::KernelMetadata => "kernel_metadata",
+            Self::ActiveOperations => "active_operations",
             Self::SchemaMigrations => "schema_migrations",
         }
     }

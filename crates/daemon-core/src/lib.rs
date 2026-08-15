@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
 mod events;
+mod recovery;
 
 pub use events::*;
+pub use recovery::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -231,6 +233,7 @@ pub struct DaemonCore {
     event_hubs: BTreeMap<RootTreeId, EventHub>,
     command_ledger: CommandLedger,
     shutting_down: bool,
+    startup_recovery: StartupRecoveryReport,
 }
 
 #[derive(Debug, Error)]
@@ -251,6 +254,8 @@ pub enum DaemonError {
     UnknownRoot(RootTreeId),
     #[error(transparent)]
     EventStream(#[from] EventStreamError),
+    #[error(transparent)]
+    Recovery(#[from] RecoveryError),
 }
 
 impl DaemonCore {
@@ -266,7 +271,7 @@ impl DaemonCore {
     ) -> Result<Self, DaemonError> {
         let data_root = data_root.into();
         fs::create_dir_all(&data_root)?;
-        let catalog = RootCatalog::discover(&data_root)?;
+        let (catalog, startup_recovery) = recover_daemon_startup(&data_root)?;
         let mut supervisor = WorkerSupervisor::open(
             data_root.join("runtime"),
             worker_executable,
@@ -283,11 +288,16 @@ impl DaemonCore {
             event_hubs: BTreeMap::new(),
             command_ledger,
             shutting_down: false,
+            startup_recovery,
         })
     }
 
     pub fn catalog(&self) -> &RootCatalog {
         &self.catalog
+    }
+
+    pub fn startup_recovery(&self) -> &StartupRecoveryReport {
+        &self.startup_recovery
     }
 
     pub fn health(&self) -> DaemonHealth {
