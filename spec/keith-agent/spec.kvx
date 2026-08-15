@@ -1038,7 +1038,7 @@ requires = ["2.1", "7.1"]
 
 [task.9.2]
 title  = "Transactional delivery outbox and retry workers"
-status = "pending"
+status = "done"
 wave   = 16
 do_1   = "Implement delivery model, stable keys, content/artifacts, claims, attempts, safe errors, receipts, and states"
 do_2   = "Implement retry classification/backoff, cancellation, permanent failure, and claim recovery"

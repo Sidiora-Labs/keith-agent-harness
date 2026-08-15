@@ -302,7 +302,7 @@
     - Keep agent loop, tools, and arbitrary memory reads out of the gateway
     - Run adapter conformance with malformed, duplicate, reordered, oversized, and reconnect events
     - _Requirements: 34.1-34.5_
-  - [ ] 9.2 Transactional delivery outbox and retry workers
+  - [x] 9.2 Transactional delivery outbox and retry workers
     - Implement delivery model, stable keys, content/artifacts, claims, attempts, safe errors, receipts, and states
     - Implement retry classification/backoff, cancellation, permanent failure, and claim recovery
     - Integrate interactive, scheduled, child, commitment, attention, and refinement responses
