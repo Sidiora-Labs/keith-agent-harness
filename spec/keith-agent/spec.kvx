@@ -768,7 +768,7 @@ status  = "pending"
 
 [task.5.1]
 title  = "Typed tool registry and manager lifecycle"
-status = "pending"
+status = "done"
 wave   = 8
 do_1   = "Implement ToolDefinition, behavior, repeatability, confirmation, readiness, invocation, outcome, and progress"
 do_2   = "Implement discovery, readiness cache/recovery, schema validation, allow/confirm/deny, and timeout"

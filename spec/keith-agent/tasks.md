@@ -141,7 +141,7 @@
 ## Phase 5 — Tools, Isolation, Artifacts, and Persistent Compute
 
 - [ ] 5. Tool Manager, Restricted Executors, Browser/Web, Secrets, Artifacts, and Kernel Broker
-  - [ ] 5.1 Typed tool registry and manager lifecycle
+  - [x] 5.1 Typed tool registry and manager lifecycle
     - Implement ToolDefinition, behavior, repeatability, confirmation, readiness, invocation, outcome, and progress
     - Implement discovery, readiness cache/recovery, schema validation, allow/confirm/deny, and timeout
     - Implement bounded lifecycle events, safe parallel grouping, cancellation, output limits, and retries

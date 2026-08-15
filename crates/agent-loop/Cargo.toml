@@ -15,6 +15,7 @@ keith-agent-types = { path = "../agent-types" }
 keith-model-registry = { path = "../model-registry" }
 keith-provider-core = { path = "../provider-core" }
 keith-session-store = { path = "../session-store" }
+keith-tool-core = { path = "../tool-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -12,6 +12,7 @@ use keith_session_store::{
     ContentBlock as StoredContentBlock, MessageRole as StoredMessageRole, SessionEntryPayload,
     SessionStoreError, SessionWriter, StoredMessage,
 };
+use keith_tool_core::{ToolExecutionError, ToolExecutor, ToolInvocation};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -89,38 +90,6 @@ pub enum AgentOutcome {
     Completed,
     Cancelled,
     Exhausted,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ToolInvocation {
-    pub call_id: ToolCallId,
-    pub name: String,
-    pub arguments: serde_json::Value,
-}
-
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-#[error("{message}")]
-pub struct ToolExecutionError {
-    pub message: String,
-}
-
-impl ToolExecutionError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-pub trait ToolExecutor: Send + Sync {
-    /// # Errors
-    ///
-    /// Returns a typed tool error when execution cannot produce output.
-    fn execute(
-        &self,
-        invocation: &ToolInvocation,
-        cancellation: &CancellationToken,
-    ) -> Result<Vec<u8>, ToolExecutionError>;
 }
 
 pub trait SteeringSource: Send + Sync {
