@@ -990,6 +990,36 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "result"
       ]
     },
+    "CommitmentProjection": {
+      "type": "object",
+      "properties": {
+        "commitment_id": {
+          "type": "string"
+        },
+        "due_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "state": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "terminal": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "commitment_id",
+        "summary",
+        "state",
+        "terminal"
+      ]
+    },
     "CommonError": {
       "type": "object",
       "properties": {
@@ -1341,10 +1371,58 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
           "properties": {
             "event": {
               "type": "string",
+              "const": "plan_changed"
+            },
+            "payload": {
+              "$ref": "#/$defs/PlanProjection"
+            }
+          },
+          "required": [
+            "event",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
               "const": "child_changed"
             },
             "payload": {
               "$ref": "#/$defs/ChildProjection"
+            }
+          },
+          "required": [
+            "event",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "kernel_changed"
+            },
+            "payload": {
+              "$ref": "#/$defs/KernelProjection"
+            }
+          },
+          "required": [
+            "event",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "commitment_changed"
+            },
+            "payload": {
+              "$ref": "#/$defs/CommitmentProjection"
             }
           },
           "required": [
@@ -1409,6 +1487,54 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
             },
             "payload": {
               "$ref": "#/$defs/DeliveryProjection"
+            }
+          },
+          "required": [
+            "event",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "memory_changed"
+            },
+            "payload": {
+              "$ref": "#/$defs/MemoryChangeProjection"
+            }
+          },
+          "required": [
+            "event",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "usage_changed"
+            },
+            "payload": {
+              "$ref": "#/$defs/UsageProjection"
+            }
+          },
+          "required": [
+            "event",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "presence_changed"
+            },
+            "payload": {
+              "$ref": "#/$defs/PresenceProjection"
             }
           },
           "required": [
@@ -1575,6 +1701,11 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "event": {
           "$ref": "#/$defs/DaemonEvent"
         },
+        "first_sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "generation": {
           "type": "integer",
           "format": "uint64",
@@ -1600,6 +1731,7 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "protocol",
         "root_tree_id",
         "generation",
+        "first_sequence",
         "sequence",
         "occurred_at",
         "event"
@@ -1736,6 +1868,62 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "cancelled"
       ]
     },
+    "KernelProjection": {
+      "type": "object",
+      "properties": {
+        "kernel_id": {
+          "type": "string"
+        },
+        "runtime": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "terminal": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kernel_id",
+        "runtime",
+        "state",
+        "terminal"
+      ]
+    },
+    "MemoryChangeKind": {
+      "type": "string",
+      "enum": [
+        "created",
+        "updated",
+        "deleted",
+        "consolidated"
+      ]
+    },
+    "MemoryChangeProjection": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/MemoryChangeKind"
+        },
+        "entry_id": {
+          "type": "string"
+        },
+        "occurred_at": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entry_id",
+        "source",
+        "change",
+        "occurred_at"
+      ]
+    },
     "MemoryQuery": {
       "type": "object",
       "properties": {
@@ -1827,6 +2015,88 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "session_id",
         "provider",
         "model"
+      ]
+    },
+    "PlanProjection": {
+      "type": "object",
+      "properties": {
+        "plan_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "state": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "terminal": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "plan_id",
+        "summary",
+        "state",
+        "revision",
+        "terminal"
+      ]
+    },
+    "PresenceProjection": {
+      "type": "object",
+      "properties": {
+        "goal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "next_wake": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "safe_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/PresenceState"
+        },
+        "updated_at": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "session_id",
+        "state",
+        "updated_at"
+      ]
+    },
+    "PresenceState": {
+      "type": "string",
+      "enum": [
+        "available",
+        "thinking",
+        "using_tools",
+        "waiting_child",
+        "waiting_external",
+        "paused_for_user",
+        "scheduled",
+        "completed",
+        "failed"
       ]
     },
     "ProfileSummary": {
@@ -2253,6 +2523,12 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
     "SessionSnapshot": {
       "type": "object",
       "properties": {
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ActionProjection"
+          }
+        },
         "active_action": {
           "anyOf": [
             {
@@ -2267,6 +2543,12 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
           "type": "array",
           "items": {
             "$ref": "#/$defs/ChildProjection"
+          }
+        },
+        "commitments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CommitmentProjection"
           }
         },
         "confirmations": {
@@ -2292,11 +2574,32 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
             "$ref": "#/$defs/GoalProjection"
           }
         },
+        "kernels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KernelProjection"
+          }
+        },
+        "memory_changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MemoryChangeProjection"
+          }
+        },
         "messages": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/MessageProjection"
           }
+        },
+        "plans": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanProjection"
+          }
+        },
+        "presence": {
+          "$ref": "#/$defs/PresenceProjection"
         },
         "revision": {
           "type": "integer",
@@ -2323,6 +2626,9 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
             "$ref": "#/$defs/ToolProjection"
           }
         },
+        "usage": {
+          "$ref": "#/$defs/UsageProjection"
+        },
         "waits": {
           "type": "array",
           "items": {
@@ -2334,14 +2640,21 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "session",
         "generation",
         "through_sequence",
+        "actions",
         "messages",
         "goals",
+        "plans",
         "children",
+        "kernels",
+        "commitments",
         "schedules",
         "tools",
         "confirmations",
         "waits",
         "deliveries",
+        "memory_changes",
+        "usage",
+        "presence",
         "revision"
       ]
     },
@@ -2529,6 +2842,37 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
       },
       "required": [
         "job_id"
+      ]
+    },
+    "UsageProjection": {
+      "type": "object",
+      "properties": {
+        "cached_input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "estimated_cost_microunits": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "estimated_cost_microunits"
       ]
     },
     "WaitProjection": {

@@ -359,7 +359,7 @@
 ## Phase 11 — TUI, Web, Desktop, and Shared Operator State
 
 - [ ] 11. First-Class Rust Clients with Protocol Parity and Accessible Truthful Presence
-  - [ ] 11.1 Shared UI projection model and reducers
+  - [x] 11.1 Shared UI projection model and reducers
     - Implement SessionSnapshot, session/action/goal/plan/child/kernel/wait/commitment/schedule/delivery/memory/usage/confirmation projections
     - Implement generation-aware snapshot and event reducers
     - Implement presence projection from authoritative runtime state

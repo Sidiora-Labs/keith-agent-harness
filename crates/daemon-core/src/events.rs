@@ -123,6 +123,7 @@ impl EventHub {
             protocol: CURRENT_PROTOCOL_VERSION,
             root_tree_id: self.root_tree_id.clone(),
             generation: self.generation,
+            first_sequence: sequence,
             sequence,
             occurred_at,
             event,
@@ -312,6 +313,7 @@ fn coalesce_delta(queue: &mut VecDeque<EventEnvelope>, incoming: &EventEnvelope)
     true
 }
 
+#[allow(clippy::too_many_lines)]
 fn apply_event(
     snapshot: &mut SessionSnapshot,
     event: &DaemonEvent,
@@ -320,9 +322,15 @@ fn apply_event(
         DaemonEvent::Snapshot(replacement) => *snapshot = *replacement.clone(),
         DaemonEvent::SessionChanged(session) => snapshot.session = session.clone(),
         DaemonEvent::ActionQueued(action) | DaemonEvent::ActionStarted(action) => {
+            upsert(&mut snapshot.actions, action.clone(), |item| {
+                item.action_id.clone()
+            });
             snapshot.active_action = Some(action.clone());
         }
         DaemonEvent::ActionFinished(action) => {
+            upsert(&mut snapshot.actions, action.clone(), |item| {
+                item.action_id.clone()
+            });
             if snapshot
                 .active_action
                 .as_ref()
@@ -357,9 +365,24 @@ fn apply_event(
                 item.goal_id.clone()
             });
         }
+        DaemonEvent::PlanChanged(plan) => {
+            upsert(&mut snapshot.plans, plan.clone(), |item| {
+                item.plan_id.clone()
+            });
+        }
         DaemonEvent::ChildChanged(child) => {
             upsert(&mut snapshot.children, child.clone(), |item| {
                 item.child_id.clone()
+            });
+        }
+        DaemonEvent::KernelChanged(kernel) => {
+            upsert(&mut snapshot.kernels, kernel.clone(), |item| {
+                item.kernel_id.clone()
+            });
+        }
+        DaemonEvent::CommitmentChanged(commitment) => {
+            upsert(&mut snapshot.commitments, commitment.clone(), |item| {
+                item.commitment_id.clone()
             });
         }
         DaemonEvent::ScheduleChanged(schedule) => {
@@ -382,6 +405,13 @@ fn apply_event(
                 item.delivery_id.clone()
             });
         }
+        DaemonEvent::MemoryChanged(change) => {
+            upsert(&mut snapshot.memory_changes, change.clone(), |item| {
+                item.entry_id.clone()
+            });
+        }
+        DaemonEvent::UsageChanged(usage) => snapshot.usage = *usage,
+        DaemonEvent::PresenceChanged(presence) => snapshot.presence = presence.clone(),
         DaemonEvent::ConfirmationRequested {
             confirmation_id,
             summary,
@@ -491,9 +521,10 @@ mod tests {
     use super::*;
 
     fn snapshot(root: RootTreeId, generation: Generation) -> SessionSnapshot {
+        let session_id = SessionId::new();
         SessionSnapshot {
             session: SessionSummary {
-                session_id: SessionId::new(),
+                session_id: session_id.clone(),
                 root_tree_id: root,
                 profile_id: ProfileId::new(),
                 title: None,
@@ -503,14 +534,28 @@ mod tests {
             generation,
             through_sequence: Sequence::ZERO,
             active_action: None,
+            actions: Vec::new(),
             messages: Vec::new(),
             goals: Vec::new(),
+            plans: Vec::new(),
             children: Vec::new(),
+            kernels: Vec::new(),
+            commitments: Vec::new(),
             schedules: Vec::new(),
             tools: Vec::new(),
             confirmations: Vec::new(),
             waits: Vec::new(),
             deliveries: Vec::new(),
+            memory_changes: Vec::new(),
+            usage: keith_protocol::UsageProjection::default(),
+            presence: keith_protocol::PresenceProjection {
+                session_id,
+                goal_id: None,
+                state: keith_protocol::PresenceState::Available,
+                updated_at: UtcTimestamp::UNIX_EPOCH,
+                next_wake: None,
+                safe_error: None,
+            },
             revision: Revision::ZERO,
         }
     }
@@ -619,6 +664,8 @@ mod tests {
         }
         let pending = hub.poll(&delta_client, 8).unwrap();
         assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].first_sequence, Sequence::new(4));
+        assert_eq!(pending[0].sequence, Sequence::new(5));
         assert!(matches!(
             &pending[0].event,
             DaemonEvent::AssistantDelta { text, .. } if text == "hello"

@@ -1132,7 +1132,7 @@ status  = "pending"
 
 [task.11.1]
 title  = "Shared UI projection model and reducers"
-status = "pending"
+status = "done"
 wave   = 17
 do_1   = "Implement SessionSnapshot, session/action/goal/plan/child/kernel/wait/commitment/schedule/delivery/memory/usage/confirmation projections"
 do_2   = "Implement generation-aware snapshot and event reducers"

@@ -3,9 +3,10 @@
 use std::collections::BTreeSet;
 
 use keith_agent_types::{
-    ActionId, ArtifactId, CURRENT_PROTOCOL_VERSION, ChildId, ClientId, CommandId, CommonError,
-    DeliveryId, EntityId, Generation, GoalId, JobId, MessageId, ProfileId, ProtocolVersion,
-    Revision, RootTreeId, Sequence, SessionId, ToolCallId, UtcTimestamp, WorkspaceId,
+    ActionId, ArtifactId, CURRENT_PROTOCOL_VERSION, ChildId, ClientId, CommandId, CommitmentId,
+    CommonError, DeliveryId, EntityId, EntryId, Generation, GoalId, JobId, KernelId, MessageId,
+    ProfileId, ProtocolVersion, Revision, RootTreeId, Sequence, SessionId, ToolCallId,
+    UtcTimestamp, WorkspaceId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -394,14 +395,21 @@ pub struct SessionSnapshot {
     pub generation: Generation,
     pub through_sequence: Sequence,
     pub active_action: Option<ActionProjection>,
+    pub actions: Vec<ActionProjection>,
     pub messages: Vec<MessageProjection>,
     pub goals: Vec<GoalProjection>,
+    pub plans: Vec<PlanProjection>,
     pub children: Vec<ChildProjection>,
+    pub kernels: Vec<KernelProjection>,
+    pub commitments: Vec<CommitmentProjection>,
     pub schedules: Vec<ScheduleProjection>,
     pub tools: Vec<ToolProjection>,
     pub confirmations: Vec<ConfirmationProjection>,
     pub waits: Vec<WaitProjection>,
     pub deliveries: Vec<DeliveryProjection>,
+    pub memory_changes: Vec<MemoryChangeProjection>,
+    pub usage: UsageProjection,
+    pub presence: PresenceProjection,
     pub revision: Revision,
 }
 
@@ -453,11 +461,37 @@ pub struct GoalProjection {
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct PlanProjection {
+    pub plan_id: EntityId,
+    pub summary: String,
+    pub state: String,
+    pub revision: Revision,
+    pub terminal: bool,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
 pub struct ChildProjection {
     pub child_id: ChildId,
     pub session_id: SessionId,
     pub objective: String,
     pub state: String,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct KernelProjection {
+    pub kernel_id: KernelId,
+    pub runtime: String,
+    pub state: String,
+    pub terminal: bool,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct CommitmentProjection {
+    pub commitment_id: CommitmentId,
+    pub summary: String,
+    pub state: String,
+    pub due_at: Option<UtcTimestamp>,
+    pub terminal: bool,
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -495,6 +529,55 @@ pub struct DeliveryProjection {
     pub terminal: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryChangeKind {
+    Created,
+    Updated,
+    Deleted,
+    Consolidated,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct MemoryChangeProjection {
+    pub entry_id: EntryId,
+    pub source: String,
+    pub change: MemoryChangeKind,
+    pub occurred_at: UtcTimestamp,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct UsageProjection {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub estimated_cost_microunits: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceState {
+    Available,
+    Thinking,
+    UsingTools,
+    WaitingChild,
+    WaitingExternal,
+    PausedForUser,
+    Scheduled,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct PresenceProjection {
+    pub session_id: SessionId,
+    pub goal_id: Option<GoalId>,
+    pub state: PresenceState,
+    pub updated_at: UtcTimestamp,
+    pub next_wake: Option<UtcTimestamp>,
+    pub safe_error: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
 pub struct MemoryResult {
     pub source: String,
@@ -521,6 +604,7 @@ pub struct EventEnvelope {
     pub protocol: ProtocolVersion,
     pub root_tree_id: RootTreeId,
     pub generation: Generation,
+    pub first_sequence: Sequence,
     pub sequence: Sequence,
     pub occurred_at: UtcTimestamp,
     pub event: DaemonEvent,
@@ -544,11 +628,17 @@ pub enum DaemonEvent {
     },
     MessageCommitted(MessageProjection),
     GoalChanged(GoalProjection),
+    PlanChanged(PlanProjection),
     ChildChanged(ChildProjection),
+    KernelChanged(KernelProjection),
+    CommitmentChanged(CommitmentProjection),
     ScheduleChanged(ScheduleProjection),
     ToolChanged(ToolProjection),
     WaitChanged(WaitProjection),
     DeliveryChanged(DeliveryProjection),
+    MemoryChanged(MemoryChangeProjection),
+    UsageChanged(UsageProjection),
+    PresenceChanged(PresenceProjection),
     ConfirmationRequested {
         confirmation_id: EntityId,
         summary: String,
