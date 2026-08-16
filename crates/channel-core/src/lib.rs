@@ -538,7 +538,7 @@ impl<T: AgentTransport> AgentConnection<T> {
         now: UtcTimestamp,
     ) -> Result<CommandResult, AgentConnectionError> {
         self.execute_with_id(
-            action.command_id.clone(),
+            &action.command_id,
             action.command.clone(),
             Some(action.session_id.clone()),
             now,
@@ -556,7 +556,7 @@ impl<T: AgentTransport> AgentConnection<T> {
         session_id: Option<SessionId>,
         now: UtcTimestamp,
     ) -> Result<CommandResult, AgentConnectionError> {
-        self.execute_with_id(CommandId::new(), command, session_id, now)
+        self.execute_with_id(&CommandId::new(), command, session_id, now)
     }
 
     /// Executes a control command with a caller-stable ID so reconnect retries remain idempotent.
@@ -566,7 +566,7 @@ impl<T: AgentTransport> AgentConnection<T> {
     /// Returns an error for transport or command-correlation failure.
     pub fn execute_idempotent(
         &mut self,
-        command_id: CommandId,
+        command_id: &CommandId,
         command: ClientCommand,
         session_id: Option<SessionId>,
         now: UtcTimestamp,
@@ -576,7 +576,7 @@ impl<T: AgentTransport> AgentConnection<T> {
 
     fn execute_with_id(
         &mut self,
-        command_id: CommandId,
+        command_id: &CommandId,
         command: ClientCommand,
         session_id: Option<SessionId>,
         now: UtcTimestamp,
@@ -591,7 +591,7 @@ impl<T: AgentTransport> AgentConnection<T> {
         }))?;
         loop {
             match self.transport.receive()? {
-                WireMessage::CommandResult(result) if result.command_id == command_id => {
+                WireMessage::CommandResult(result) if &result.command_id == command_id => {
                     return Ok(result.result);
                 }
                 WireMessage::CommandResult(_) => {

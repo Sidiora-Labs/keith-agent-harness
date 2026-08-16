@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -803,6 +804,7 @@ impl LocalRuntime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn run_prompt(
         &self,
         session_id: &SessionId,
@@ -2360,7 +2362,6 @@ impl LocalRuntime {
                     .create_new(true)
                     .write(true)
                     .open(path)?;
-                use std::io::Write as _;
                 file.write_all(&exported.content)?;
                 file.sync_all()?;
                 staged.push(keith_protocol::StagedDeliveryArtifact {
@@ -2801,6 +2802,7 @@ impl LocalRuntime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn maintain_runtime(&self) -> Result<(), LocalRuntimeError> {
         let now = UtcTimestamp::now()?;
         if self.system_modules.data_control.root() != self.data_root {
@@ -3186,6 +3188,7 @@ impl LocalRuntime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn bootstrap_default_profile(&self, workspace_root: &Path) -> Result<(), LocalRuntimeError> {
         if !self.profiles.list()?.is_empty() {
             return Ok(());
@@ -3540,6 +3543,7 @@ impl LocalRuntime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn model_request(
         &self,
         profile: &RegisteredProfile,
@@ -3658,6 +3662,7 @@ impl LocalRuntime {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn tool_manager(
         &self,
         profile: &RegisteredProfile,
@@ -3701,7 +3706,7 @@ impl LocalRuntime {
                 .lock()
                 .map_err(|_| LocalRuntimeError::LockPoisoned)?;
             for server_id in &profile.profile.enabled_mcp_servers {
-                mcp.open_session(session_id.clone(), profile.profile.id.clone(), server_id)
+                mcp.open_session(session_id, profile.profile.id.clone(), server_id)
                     .map_err(module_error)?;
             }
             mcp.relevant_tools(&profile.profile.id, task, &[], 128 * 1_024)
@@ -4311,7 +4316,6 @@ fn estimated_context_tokens(ancestry: &[SessionEntry]) -> u64 {
             SessionEntryPayload::ToolResult { content, .. } => {
                 estimated_text_tokens(&stored_text(content))
             }
-            SessionEntryPayload::Usage { .. } => 0,
             _ => 0,
         };
         estimated = estimated.saturating_add(tokens);
@@ -4572,8 +4576,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 const fn attention_autonomy(mode: AutonomyMode) -> AttentionAutonomyMode {
     match mode {
         AutonomyMode::Off => AttentionAutonomyMode::Disabled,
-        AutonomyMode::Suggest => AttentionAutonomyMode::Suggest,
-        AutonomyMode::ConfirmSelected => AttentionAutonomyMode::Suggest,
+        AutonomyMode::Suggest | AutonomyMode::ConfirmSelected => AttentionAutonomyMode::Suggest,
         AutonomyMode::Bounded => AttentionAutonomyMode::Bounded,
     }
 }
@@ -4584,18 +4587,18 @@ fn runtime_resource_policy() -> Result<ResourcePolicy, LocalRuntimeError> {
         .copied()
         .map(|kind| {
             let maximum = match kind {
-                ResourceKind::Workers => 64,
                 ResourceKind::ActiveSessions => 256,
-                ResourceKind::ProviderRequests => 64,
-                ResourceKind::SafeParallelTools => 128,
-                ResourceKind::Children => 128,
+                ResourceKind::SafeParallelTools
+                | ResourceKind::Children
+                | ResourceKind::Processes => 128,
                 ResourceKind::RecursiveDepth => 16,
                 ResourceKind::Kernels | ResourceKind::Browsers => 32,
-                ResourceKind::Processes => 128,
-                ResourceKind::Channels => 64,
                 ResourceKind::Schedules => 4_096,
-                ResourceKind::BackgroundInitiatives => 64,
-                ResourceKind::McpSessions => 64,
+                ResourceKind::Workers
+                | ResourceKind::ProviderRequests
+                | ResourceKind::Channels
+                | ResourceKind::BackgroundInitiatives
+                | ResourceKind::McpSessions => 64,
                 _ => unreachable!("concurrency kind list contains only concurrency resources"),
             };
             (

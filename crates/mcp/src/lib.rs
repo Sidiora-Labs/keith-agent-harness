@@ -238,7 +238,7 @@ impl McpManager {
     /// Returns an error for unknown, disabled, or saturated servers.
     pub fn open_session(
         &mut self,
-        session_id: SessionId,
+        session_id: &SessionId,
         profile_id: ProfileId,
         server_id: &str,
     ) -> Result<(), McpError> {
@@ -956,10 +956,10 @@ esac
         );
         let session = SessionId::new();
         manager
-            .open_session(session.clone(), profile.clone(), "stdio")
+            .open_session(&session, profile.clone(), "stdio")
             .expect("session");
         assert!(matches!(
-            manager.open_session(SessionId::new(), profile, "stdio"),
+            manager.open_session(&SessionId::new(), profile, "stdio"),
             Err(McpError::SessionLimit)
         ));
         assert_eq!(
@@ -981,6 +981,7 @@ esac
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn http_auth_reconnect_malicious_output_and_profile_bounds_are_enforced() {
         let root = TempDir::new().expect("manager root");
         let credentials_root = TempDir::new().expect("credential root");

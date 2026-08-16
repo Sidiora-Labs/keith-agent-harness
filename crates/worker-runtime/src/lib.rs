@@ -774,8 +774,9 @@ fn run_worker_inner(
     let (result_sender, result_receiver) = mpsc::sync_channel(1);
     let runtime = runtime.map(Arc::<dyn CommandRuntime>::from);
     let executor_runtime = runtime.clone();
-    let executor =
-        thread::spawn(move || runtime_executor(executor_runtime, work_receiver, result_sender));
+    let executor = thread::spawn(move || {
+        runtime_executor(executor_runtime.as_deref(), &work_receiver, &result_sender);
+    });
     while !shutdown.load(Ordering::Acquire) && !requested_shutdown {
         if let Some(deadline) = service_control(
             &listener,
@@ -860,24 +861,7 @@ fn service_control(
     };
     let mut keep = true;
     let mut shutdown_deadline = None;
-    match result_receiver.try_recv() {
-        Ok(result) => {
-            if active_request.as_ref() == Some(&result.request_id) {
-                connection.send(PrivateMessage::ExecutionResult {
-                    request_id: result.request_id,
-                    response: Box::new(result.response),
-                })?;
-                *active_request = None;
-            }
-        }
-        Err(TryRecvError::Empty) => {}
-        Err(TryRecvError::Disconnected) if active_request.is_some() => {
-            return Err(WorkerRuntimeError::Runtime(
-                "runtime executor stopped during a request".into(),
-            ));
-        }
-        Err(TryRecvError::Disconnected) => {}
-    }
+    forward_completed_work(&mut connection, result_receiver, active_request)?;
     match connection.receive() {
         Ok(PrivateMessage::SupervisorHello) => {
             if let Err(error) = connection.send(PrivateMessage::Ready {
@@ -949,6 +933,31 @@ fn service_control(
     Ok(shutdown_deadline)
 }
 
+fn forward_completed_work(
+    connection: &mut PrivateTransport<LocalStream>,
+    result_receiver: &Receiver<RuntimeWorkResult>,
+    active_request: &mut Option<EntityId>,
+) -> Result<(), WorkerRuntimeError> {
+    match result_receiver.try_recv() {
+        Ok(result) => {
+            if active_request.as_ref() == Some(&result.request_id) {
+                connection.send(PrivateMessage::ExecutionResult {
+                    request_id: result.request_id,
+                    response: Box::new(result.response),
+                })?;
+                *active_request = None;
+            }
+        }
+        Err(TryRecvError::Disconnected) if active_request.is_some() => {
+            return Err(WorkerRuntimeError::Runtime(
+                "runtime executor stopped during a request".into(),
+            ));
+        }
+        Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+    }
+    Ok(())
+}
+
 fn service_auxiliary_control(
     listener: &LocalListener,
     grant: &LeaseGrant,
@@ -987,16 +996,16 @@ struct RuntimeWorkResult {
 }
 
 fn runtime_executor(
-    runtime: Option<Arc<dyn CommandRuntime>>,
-    receiver: Receiver<RuntimeWork>,
-    sender: SyncSender<RuntimeWorkResult>,
+    runtime: Option<&dyn CommandRuntime>,
+    receiver: &Receiver<RuntimeWork>,
+    sender: &SyncSender<RuntimeWorkResult>,
 ) {
     while let Ok(work) = receiver.recv() {
-        let response = runtime.as_ref().map_or_else(
+        let response = runtime.map_or_else(
             || RuntimeResponse::Failed("worker runtime is not configured".into()),
             |runtime| {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    work.request.execute(runtime.as_ref())
+                    work.request.execute(runtime)
                 }))
                 .unwrap_or_else(|_| RuntimeResponse::Failed("worker runtime panicked".into()))
             },

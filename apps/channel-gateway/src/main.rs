@@ -242,7 +242,7 @@ fn execute_with_reconnect(
         match connection
             .as_mut()
             .expect("connection initialized")
-            .execute_idempotent(command_id.clone(), command.clone(), None, now)
+            .execute_idempotent(&command_id, command.clone(), None, now)
         {
             Ok(result) => return Ok(result),
             Err(error) => {
@@ -286,16 +286,15 @@ fn stage_inbound_attachments(
         });
         let result = execute_with_reconnect(connection, socket, reconnect, &command);
         match result {
-            Ok(CommandResult::Data(payload)) => match *payload {
-                ResponsePayload::Artifact(artifact_id) => {
+            Ok(CommandResult::Data(payload)) => {
+                if let ResponsePayload::Artifact(artifact_id) = *payload {
                     attachment.artifact_id = Some(artifact_id);
                     attachment.download_url = None;
-                }
-                _ => {
+                } else {
                     remove_inbound_staging(attachment_root, &staging_file);
                     return Err("daemon returned an unexpected attachment response".into());
                 }
-            },
+            }
             Ok(CommandResult::Rejected(rejection)) => {
                 remove_inbound_staging(attachment_root, &staging_file);
                 return Err(rejection.error.message);
@@ -567,6 +566,7 @@ fn save_cursor(path: &Path, cursor: &DiscordCursor) -> Result<(), String> {
     keith_platform::replace_file(&temporary, path).map_err(|error| error.to_string())
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_discord(
     socket: &Path,
     reconnect: ReconnectPolicy,
@@ -642,8 +642,11 @@ fn run_discord(
                     let mut settled = false;
                     while !shutdown.load(Ordering::Acquire) {
                         match submit_with_reconnect(&mut connection, socket, reconnect, &action) {
-                            Ok(CommandResult::Accepted { .. } | CommandResult::Data(_))
-                            | Ok(CommandResult::Rejected(_)) => {
+                            Ok(
+                                CommandResult::Accepted { .. }
+                                | CommandResult::Data(_)
+                                | CommandResult::Rejected(_),
+                            ) => {
                                 settled = true;
                                 break;
                             }
@@ -684,10 +687,9 @@ fn run_discord(
             Err(failure) => return Err(failure.safe_message),
         }
     }
-    let outbound_result = outbound
+    outbound
         .join()
-        .map_err(|_| "Discord delivery worker panicked".to_owned())?;
-    outbound_result
+        .map_err(|_| "Discord delivery worker panicked".to_owned())?
 }
 
 fn run_standard_input(socket: &Path, reconnect: ReconnectPolicy) -> Result<(), String> {

@@ -248,7 +248,7 @@ fn assemble_release(
     .map_err(|error| error.to_string())?;
     write_dependency_reports(root, destination)?;
 
-    let files = release_files(&destination)?;
+    let files = release_files(destination)?;
     let daemon = daemon_report();
     let worker = worker_report();
     let manifest = ReleaseManifest {

@@ -86,7 +86,7 @@ pub enum ReleaseError {
 ///
 /// Returns an error unless the value is exactly 32 bytes encoded as hexadecimal.
 pub fn decode_public_key(encoded: &str) -> Result<[u8; 32], ReleaseError> {
-    decode_hex_exact::<32>(encoded.trim()).map_err(|_| ReleaseError::InvalidPublicKey)
+    decode_hex_exact::<32>(encoded.trim()).map_err(|()| ReleaseError::InvalidPublicKey)
 }
 
 /// Verifies release identity, publisher key, signature, component compatibility, and every file.
@@ -105,12 +105,12 @@ pub fn verify_release(
     let manifest_bytes = fs::read(root.join(MANIFEST_FILE))?;
     let packaged_public_key =
         decode_hex_exact::<32>(&fs::read_to_string(root.join(PUBLIC_KEY_FILE))?)
-            .map_err(|_| ReleaseError::InvalidPublicKey)?;
+            .map_err(|()| ReleaseError::InvalidPublicKey)?;
     if &packaged_public_key != expected_public_key {
         return Err(ReleaseError::UntrustedPublicKey);
     }
     let signature = decode_hex_exact::<64>(&fs::read_to_string(root.join(SIGNATURE_FILE))?)
-        .map_err(|_| ReleaseError::InvalidSignature)?;
+        .map_err(|()| ReleaseError::InvalidSignature)?;
     UnparsedPublicKey::new(&ED25519, packaged_public_key)
         .verify(&manifest_bytes, &signature)
         .map_err(|_| ReleaseError::InvalidSignature)?;
