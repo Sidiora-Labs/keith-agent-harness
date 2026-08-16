@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "keith-desktop-daemon-host"
 path = "tests/support/daemon_host.rs"
 
+[[bin]]
+name = "keith-release-report-host"
+path = "tests/support/release_report_host.rs"
+
 [dependencies]
 getrandom.workspace = true
 keith-agent-types = { path = "../../crates/agent-types" }

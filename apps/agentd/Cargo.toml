@@ -9,7 +9,6 @@ publish = false
 
 [dependencies]
 keith-build-info = { path = "../../crates/build-info" }
-keith-credentials = { path = "../../crates/credentials" }
 keith-daemon-core = { path = "../../crates/daemon-core" }
 keith-local-runtime = { path = "../../crates/local-runtime" }
 keith-platform = { path = "../../crates/platform" }

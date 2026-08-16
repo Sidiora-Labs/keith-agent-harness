@@ -767,6 +767,7 @@ impl DaemonBridge {
                 Feature::Schedules,
                 Feature::MemoryQueries,
                 Feature::Confirmations,
+                Feature::Export,
                 Feature::BackgroundControls,
                 Feature::Replay,
                 Feature::Snapshots,
@@ -912,6 +913,7 @@ fn command_session(command: &ClientCommand) -> Option<&SessionId> {
         ClientCommand::CreateChild(request) => Some(&request.parent_session_id),
         ClientCommand::CreateSchedule(request) => request.session_id.as_ref(),
         ClientCommand::Export(request) => Some(&request.session_id),
+        ClientCommand::StageAttachment(request) => Some(&request.session_id),
         ClientCommand::Cancel(keith_protocol::CancelTarget::Session(session_id)) => {
             Some(session_id)
         }
@@ -1115,6 +1117,7 @@ mod tests {
         let command = ClientCommand::SubmitPrompt(keith_protocol::SubmitPrompt {
             session_id: session.clone(),
             text: "hello".into(),
+            artifacts: Vec::new(),
             delivery: keith_protocol::DeliveryPolicy::Immediate,
             reply_route: None,
         });

@@ -7,10 +7,11 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use keith_agent_types::{Generation, RootTreeId, UtcTimestamp, WorkerId};
+use keith_agent_types::{EntityId, Generation, RootTreeId, UtcTimestamp, WorkerId};
 use keith_connection::{
     LocalStream, connect_local, set_local_read_timeout, set_local_write_timeout,
 };
+use keith_runtime_api::{RuntimeRequest, RuntimeResponse};
 use keith_worker_runtime::{
     LeaseError, LeaseGrant, LeaseManager, PrivateMessage, PrivateProtocolError, PrivateTransport,
     WorkerRegistration, WorkerRunState, read_registration, registration_path,
@@ -100,6 +101,7 @@ pub struct WorkerSupervisor {
     next_control_id: u64,
     lease_database: PathBuf,
     executable: PathBuf,
+    runtime_config: Option<PathBuf>,
     options: SupervisorOptions,
     leases: LeaseManager,
     workers: BTreeMap<RootTreeId, ManagedWorker>,
@@ -135,6 +137,10 @@ pub enum SupervisorError {
     },
     #[error("lease duration must exceed two heartbeat intervals")]
     InvalidLeaseDuration,
+    #[error("worker runtime request failed: {0}")]
+    Runtime(String),
+    #[error("worker returned a result for a different runtime request")]
+    MismatchedRuntimeResponse,
 }
 
 impl WorkerSupervisor {
@@ -148,12 +154,39 @@ impl WorkerSupervisor {
         executable: impl Into<PathBuf>,
         options: SupervisorOptions,
     ) -> Result<Self, SupervisorError> {
+        Self::open_internal(state_dir.into(), executable.into(), options, None)
+    }
+
+    /// Opens a supervisor that passes a non-secret runtime configuration to every worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lease database cannot be opened or timing is unsafe.
+    pub fn open_with_runtime_config(
+        state_dir: impl Into<PathBuf>,
+        executable: impl Into<PathBuf>,
+        options: SupervisorOptions,
+        runtime_config: impl Into<PathBuf>,
+    ) -> Result<Self, SupervisorError> {
+        Self::open_internal(
+            state_dir.into(),
+            executable.into(),
+            options,
+            Some(runtime_config.into()),
+        )
+    }
+
+    fn open_internal(
+        state_dir: PathBuf,
+        executable: PathBuf,
+        options: SupervisorOptions,
+        runtime_config: Option<PathBuf>,
+    ) -> Result<Self, SupervisorError> {
         if options.heartbeat_interval.is_zero()
             || options.lease_duration <= options.heartbeat_interval.saturating_mul(2)
         {
             return Err(SupervisorError::InvalidLeaseDuration);
         }
-        let state_dir = state_dir.into();
         fs::create_dir_all(&state_dir)?;
         let lease_database = state_dir.join("leases.sqlite");
         let leases = LeaseManager::open(&lease_database)?;
@@ -164,7 +197,8 @@ impl WorkerSupervisor {
             control_directory,
             next_control_id: 1,
             lease_database,
-            executable: executable.into(),
+            executable,
+            runtime_config,
             options,
             leases,
             workers: BTreeMap::new(),
@@ -305,7 +339,8 @@ impl WorkerSupervisor {
     fn spawn(&self, grant: &LeaseGrant, control_socket: &Path) -> Result<Child, SupervisorError> {
         let heartbeat_ms = self.options.heartbeat_interval.as_millis().max(1);
         let lease_ms = self.options.lease_duration.as_millis().max(1);
-        Command::new(&self.executable)
+        let mut command = Command::new(&self.executable);
+        command
             .arg("--state-dir")
             .arg(&self.state_dir)
             .arg("--lease-db")
@@ -325,7 +360,11 @@ impl WorkerSupervisor {
             .arg("--heartbeat-ms")
             .arg(heartbeat_ms.to_string())
             .arg("--lease-ms")
-            .arg(lease_ms.to_string())
+            .arg(lease_ms.to_string());
+        if let Some(runtime_config) = &self.runtime_config {
+            command.arg("--runtime-config").arg(runtime_config);
+        }
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -378,6 +417,73 @@ impl WorkerSupervisor {
         Ok(())
     }
 
+    /// Executes one request inside the authenticated worker that owns `root_tree_id`.
+    /// Heartbeats continue to refresh health while a provider or tool request is running.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale ownership, private transport loss, or response mismatch.
+    pub fn execute(
+        &mut self,
+        root_tree_id: &RootTreeId,
+        generation: Generation,
+        request: RuntimeRequest,
+    ) -> Result<RuntimeResponse, SupervisorError> {
+        self.validate_route(root_tree_id, generation)?;
+        let worker = self
+            .workers
+            .get_mut(root_tree_id)
+            .ok_or_else(|| SupervisorError::NotActive(root_tree_id.clone()))?;
+        worker.last_activity = Instant::now();
+        if worker.control.is_none() {
+            worker.control = Some(connect_control(
+                &worker.registration,
+                &worker.grant,
+                self.options.startup_timeout,
+            )?);
+        }
+        let request_id = EntityId::new();
+        let control = worker
+            .control
+            .as_mut()
+            .ok_or_else(|| SupervisorError::NotActive(root_tree_id.clone()))?;
+        control.send(PrivateMessage::Execute {
+            request_id: request_id.clone(),
+            request: Box::new(request),
+        })?;
+        loop {
+            match control.receive() {
+                Ok(PrivateMessage::ExecutionResult {
+                    request_id: response_id,
+                    response,
+                }) if response_id == request_id => return Ok(*response),
+                Ok(PrivateMessage::ExecutionResult { .. }) => {
+                    return Err(SupervisorError::MismatchedRuntimeResponse);
+                }
+                Ok(PrivateMessage::Heartbeat { at }) => {
+                    worker.registration.heartbeat_at = at;
+                }
+                Ok(PrivateMessage::Idle { .. } | PrivateMessage::Ready { .. }) => {}
+                Ok(PrivateMessage::Fatal { reason }) => {
+                    return Err(SupervisorError::Runtime(reason));
+                }
+                Ok(
+                    PrivateMessage::SupervisorHello
+                    | PrivateMessage::Execute { .. }
+                    | PrivateMessage::Shutdown { .. }
+                    | PrivateMessage::ShutdownAck,
+                ) => return Err(PrivateProtocolError::StaleRoute.into()),
+                Err(error) if error.is_retryable_io() => {
+                    self.leases.validate(&worker.grant)?;
+                    if !process_is_alive(worker.registration.pid) {
+                        return Err(SupervisorError::NotActive(root_tree_id.clone()));
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
     /// Refreshes registrations and private messages and isolates worker exits.
     ///
     /// # Errors
@@ -412,6 +518,8 @@ impl WorkerSupervisor {
                             Ok(
                                 PrivateMessage::Idle { since: _ }
                                 | PrivateMessage::Ready { .. }
+                                | PrivateMessage::Execute { .. }
+                                | PrivateMessage::ExecutionResult { .. }
                                 | PrivateMessage::ShutdownAck
                                 | PrivateMessage::SupervisorHello
                                 | PrivateMessage::Shutdown { .. },

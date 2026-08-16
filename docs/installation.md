@@ -59,6 +59,16 @@ bin/agentd --data-root "$KEITH_DATA_ROOT" --socket "$KEITH_DATA_ROOT/agentd.sock
 bin/agent-tui --socket "$KEITH_DATA_ROOT/agentd.sock"
 ```
 
+For a release managed by the desktop lifecycle, activate it with `update` and run the complete daemon plus authenticated web surface through the signed active version. Both child processes receive the same credential-key reference, and the daemon receives the explicit workspace root:
+
+```sh
+export KEITH_WEB_LOGIN_SECRET='a-long-local-login-secret'
+export KEITH_CREDENTIAL_KEY='64_HEXADECIMAL_CHARACTERS'
+bin/agent-desktop serve STATE_ROOT /absolute/path/to/workspace 127.0.0.1:7341
+```
+
+Send the desktop supervisor `SIGTERM` or `SIGINT` to stop web first and drain the daemon and workers. A managed child crash produces a bounded report beneath `STATE_ROOT/crashes` and stops the supervisor instead of silently running a partial stack.
+
 The TUI attaches to the first durable session. Open the Models view to inspect the complete Prime/Cow provider catalog. Send `/model PROVIDER` to select that provider's catalog default, or `/model PROVIDER MODEL` to choose an explicit model. The web Models and Settings selectors expose the same catalog. `bin/agent-cli provider list` prints every provider ID, transport, authentication mode, and conventional environment-variable name.
 
 The same environment-only credential command works for every provider. For example:

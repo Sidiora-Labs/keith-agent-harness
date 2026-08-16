@@ -19,6 +19,8 @@ This is the operator-run acceptance matrix for task 13.3. Run it only against a 
 4. Configure one real provider through `agent-cli provider set --secret-env`; never pass the credential value as an argument.
 5. Start packaged `agentd` with the packaged worker, then attach the packaged TUI or web application.
 6. Complete a real model turn that calls a workspace write tool. Confirm the resulting file and committed assistant/tool history.
+7. Activate the same signed release with `agent-desktop update`, start it with `agent-desktop serve`, and confirm its managed daemon and web processes report the same signed build identity and share the configured credential store.
+8. Start the packaged Discord gateway with the selected profile/session route and `DATA_ROOT/channel-staging`; complete one inbound and one outbound attachment turn and confirm no platform URL or unverified file path reaches the worker.
 
 ## 3. Restart and restore
 

@@ -402,6 +402,7 @@ impl TuiApp {
         self.enqueue(ClientCommand::SubmitPrompt(SubmitPrompt {
             session_id,
             text: text.clone(),
+            artifacts: Vec::new(),
             delivery,
             reply_route: None,
         }));
@@ -743,6 +744,8 @@ fn payload_label(payload: &ResponsePayload) -> &'static str {
         ResponsePayload::Memory(_) => "memory",
         ResponsePayload::Export(_) => "export",
         ResponsePayload::Background(_) => "background",
+        ResponsePayload::Artifact(_) => "artifact",
+        ResponsePayload::DeliveryClaim(_) => "delivery",
     }
 }
 

@@ -11,7 +11,7 @@ use std::os::unix::process::CommandExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -167,15 +167,15 @@ impl From<CredentialError> for McpError {
     }
 }
 
-pub struct McpManager<'a> {
+pub struct McpManager {
     root: PathBuf,
-    credentials: &'a EncryptedCredentialStore,
+    credentials: Arc<EncryptedCredentialStore>,
     state: DurableState,
-    sessions: BTreeMap<SessionId, McpSession>,
+    sessions: BTreeMap<(SessionId, String), McpSession>,
     max_sessions: usize,
 }
 
-impl<'a> McpManager<'a> {
+impl McpManager {
     /// Opens daemon-owned MCP configuration, health, and schema state.
     ///
     /// # Errors
@@ -183,7 +183,7 @@ impl<'a> McpManager<'a> {
     /// Returns an error for invalid capacity or corrupt durable state.
     pub fn open(
         root: impl AsRef<Path>,
-        credentials: &'a EncryptedCredentialStore,
+        credentials: Arc<EncryptedCredentialStore>,
         max_sessions: usize,
     ) -> Result<Self, McpError> {
         if max_sessions == 0 {
@@ -250,11 +250,12 @@ impl<'a> McpManager<'a> {
         if !config.enabled_profiles.contains(&profile_id) {
             return Err(McpError::ProfileDenied);
         }
-        if !self.sessions.contains_key(&session_id) && self.sessions.len() >= self.max_sessions {
+        let key = (session_id.clone(), server_id.to_owned());
+        if !self.sessions.contains_key(&key) && self.sessions.len() >= self.max_sessions {
             return Err(McpError::SessionLimit);
         }
         self.sessions.insert(
-            session_id,
+            key,
             McpSession {
                 profile_id,
                 server_id: server_id.to_owned(),
@@ -264,7 +265,10 @@ impl<'a> McpManager<'a> {
     }
 
     pub fn close_session(&mut self, session_id: &SessionId) -> bool {
-        self.sessions.remove(session_id).is_some()
+        let before = self.sessions.len();
+        self.sessions
+            .retain(|(candidate, _), _| candidate != session_id);
+        self.sessions.len() != before
     }
 
     pub fn cleanup_sessions(&mut self) -> usize {
@@ -423,10 +427,14 @@ impl<'a> McpManager<'a> {
     pub fn call_tool(
         &self,
         session_id: &SessionId,
+        server_id: &str,
         tool_name: &str,
         arguments: &Value,
     ) -> Result<McpToolResult, McpError> {
-        let session = self.sessions.get(session_id).ok_or(McpError::NotFound)?;
+        let session = self
+            .sessions
+            .get(&(session_id.clone(), server_id.to_owned()))
+            .ok_or(McpError::NotFound)?;
         let config = self
             .state
             .configs
@@ -907,10 +915,11 @@ esac
         )
         .expect("server script");
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("executable");
-        let credentials = credential_store(credentials_root.path());
+        let credentials = Arc::new(credential_store(credentials_root.path()));
         let profile = ProfileId::new();
         let denied_profile = ProfileId::new();
-        let mut manager = McpManager::open(root.path(), &credentials, 1).expect("manager");
+        let mut manager =
+            McpManager::open(root.path(), Arc::clone(&credentials), 1).expect("manager");
         manager
             .configure(server_config(
                 "stdio",
@@ -955,18 +964,19 @@ esac
         ));
         assert_eq!(
             manager
-                .call_tool(&session, "calendar_lookup", &json!({}))
+                .call_tool(&session, "stdio", "calendar_lookup", &json!({}))
                 .expect("tool")
                 .content[0]["text"],
             "done"
         );
         assert_eq!(manager.cleanup_sessions(), 1);
         assert!(matches!(
-            manager.call_tool(&session, "calendar_lookup", &json!({})),
+            manager.call_tool(&session, "stdio", "calendar_lookup", &json!({})),
             Err(McpError::NotFound)
         ));
         drop(manager);
-        let reopened = McpManager::open(root.path(), &credentials, 1).expect("restart manager");
+        let reopened =
+            McpManager::open(root.path(), Arc::clone(&credentials), 1).expect("restart manager");
         assert_eq!(reopened.cache("stdio").expect("durable cache").version, 2);
     }
 
@@ -974,7 +984,7 @@ esac
     fn http_auth_reconnect_malicious_output_and_profile_bounds_are_enforced() {
         let root = TempDir::new().expect("manager root");
         let credentials_root = TempDir::new().expect("credential root");
-        let credentials = credential_store(credentials_root.path());
+        let credentials = Arc::new(credential_store(credentials_root.path()));
         let profile = ProfileId::new();
         let listener = TcpListener::bind("127.0.0.1:0").expect("HTTP listener");
         let address = listener.local_addr().expect("address");
@@ -1041,7 +1051,8 @@ esac
                 UtcTimestamp::UNIX_EPOCH,
             )
             .expect("store wrong credential");
-        let mut manager = McpManager::open(root.path(), &credentials, 2).expect("manager");
+        let mut manager =
+            McpManager::open(root.path(), Arc::clone(&credentials), 2).expect("manager");
         manager.configure(config).expect("configure");
         let authentication = manager.refresh_schema("http", UtcTimestamp::UNIX_EPOCH);
         assert!(
@@ -1106,7 +1117,8 @@ esac
             );
             config.timeout_ms = 30;
             config.max_response_bytes = 128;
-            let mut manager = McpManager::open(root.path(), &credentials, 2).expect("manager");
+            let mut manager =
+                McpManager::open(root.path(), Arc::clone(&credentials), 2).expect("manager");
             manager.configure(config).expect("configure");
             let error = manager
                 .refresh_schema(id, UtcTimestamp::UNIX_EPOCH)

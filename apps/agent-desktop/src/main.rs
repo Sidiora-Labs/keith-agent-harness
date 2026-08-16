@@ -1,11 +1,16 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use keith_agent_desktop::{
-    BrowserHandoff, DesktopBootstrap, DesktopUpdateManager, UninstallChoice, backup_state,
-    execute_uninstall, plan_uninstall, restore_state,
+    BrowserHandoff, DesktopBootstrap, DesktopLifecycle, DesktopProcessConfig, DesktopUpdateManager,
+    UninstallChoice, backup_state, execute_uninstall, plan_uninstall, restore_state,
 };
 use keith_agent_types::UtcTimestamp;
+use signal_hook::consts::{SIGINT, SIGTERM};
 
 fn main() -> ExitCode {
     match run() {
@@ -109,6 +114,13 @@ fn run() -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
             let verified = keith_release::verify_release(&release, &public_key)
                 .map_err(|error| error.to_string())?;
+            if verified.manifest.target
+                != format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+            {
+                return Err("release target does not match this host".into());
+            }
+            keith_release::verify_packaged_build_reports(&release, &verified.manifest)
+                .map_err(|error| error.to_string())?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&verified).map_err(|error| error.to_string())?
@@ -149,6 +161,26 @@ fn run() -> Result<(), String> {
                 serde_json::to_string_pretty(&active).map_err(|error| error.to_string())?
             );
             Ok(())
+        }
+        Some("serve") => {
+            let state_root = required_path(&mut arguments, "serve requires STATE_ROOT")?;
+            let workspace_root = required_path(&mut arguments, "serve requires WORKSPACE_ROOT")?;
+            let web_bind = required_string(&mut arguments, "serve requires WEB_BIND")?;
+            let login_secret_env = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .unwrap_or_else(|| "KEITH_WEB_LOGIN_SECRET".into());
+            let credential_key_env = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .unwrap_or_else(|| "KEITH_CREDENTIAL_KEY".into());
+            serve_active_release(
+                &state_root,
+                workspace_root,
+                web_bind,
+                login_secret_env,
+                credential_key_env,
+            )
         }
         Some("uninstall-plan") => {
             let state_root = required_path(&mut arguments, "uninstall-plan requires STATE_ROOT")?;
@@ -210,6 +242,64 @@ fn uninstall_choice(value: &str) -> Result<UninstallChoice, String> {
     }
 }
 
+fn serve_active_release(
+    state_root: &std::path::Path,
+    workspace_root: PathBuf,
+    web_bind: String,
+    login_secret_env: String,
+    credential_key_env: String,
+) -> Result<(), String> {
+    if std::env::var_os(&login_secret_env).is_none()
+        || std::env::var_os(&credential_key_env).is_none()
+    {
+        return Err("the configured login and credential-key environments must both be set".into());
+    }
+    let settings = DesktopBootstrap::load(state_root).map_err(|error| error.to_string())?;
+    let release = DesktopUpdateManager::open(state_root)
+        .and_then(|manager| manager.active_release_root())
+        .map_err(|error| error.to_string())?;
+    let executable = |name: &str| {
+        release
+            .join("bin")
+            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+    };
+    let mut lifecycle = DesktopLifecycle::new(DesktopProcessConfig {
+        workspace_root,
+        daemon_executable: executable("agentd"),
+        worker_executable: executable("agent-worker"),
+        web_executable: executable("agent-web"),
+        web_bind,
+        asset_root: release.join("web"),
+        credential_root: settings.data_root.join("credentials"),
+        login_secret_env,
+        credential_key_env,
+        reuse_existing_processes: false,
+        startup_timeout: Duration::from_secs(30),
+        shutdown_grace: Duration::from_secs(30),
+        settings,
+    })
+    .map_err(|error| error.to_string())?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))
+        .map_err(|error| error.to_string())?;
+    signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))
+        .map_err(|error| error.to_string())?;
+    lifecycle
+        .ensure_daemon()
+        .map_err(|error| error.to_string())?;
+    lifecycle.ensure_web().map_err(|error| error.to_string())?;
+    while !shutdown.load(Ordering::Acquire) {
+        let crashes = lifecycle
+            .poll_crashes()
+            .map_err(|error| error.to_string())?;
+        if !crashes.is_empty() {
+            return Err("a managed Keith process stopped; inspect the bounded crash report".into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    lifecycle.stop_owned().map_err(|error| error.to_string())
+}
+
 fn usage() -> &'static str {
-    "usage: agent-desktop <setup-default [ORIGIN]|setup STATE_ROOT DATA_ROOT [ORIGIN]|settings STATE_ROOT|backup STATE_ROOT|restore BACKUP TARGET_DATA_ROOT|digest-release RELEASE_DIRECTORY|verify-release RELEASE_DIRECTORY EXPECTED_PUBLIC_KEY_HEX|update STATE_ROOT RELEASE_DIRECTORY EXPECTED_PUBLIC_KEY_HEX|rollback STATE_ROOT|uninstall-plan STATE_ROOT DATA_CHOICE|uninstall STATE_ROOT DATA_CHOICE CONFIRMATION|open ORIGIN [PATH]>"
+    "usage: agent-desktop <setup-default [ORIGIN]|setup STATE_ROOT DATA_ROOT [ORIGIN]|settings STATE_ROOT|backup STATE_ROOT|restore BACKUP TARGET_DATA_ROOT|digest-release RELEASE_DIRECTORY|verify-release RELEASE_DIRECTORY EXPECTED_PUBLIC_KEY_HEX|update STATE_ROOT RELEASE_DIRECTORY EXPECTED_PUBLIC_KEY_HEX|rollback STATE_ROOT|serve STATE_ROOT WORKSPACE_ROOT WEB_BIND [LOGIN_SECRET_ENV] [CREDENTIAL_KEY_ENV]|uninstall-plan STATE_ROOT DATA_CHOICE|uninstall STATE_ROOT DATA_CHOICE CONFIRMATION|open ORIGIN [PATH]>"
 }

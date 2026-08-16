@@ -37,7 +37,13 @@ fn path_string(path: &Path) -> String {
 
 fn signed_release(root: &Path, version: &str, payload: &[u8], seed: [u8; 32]) -> String {
     fs::create_dir(root).unwrap();
-    fs::write(root.join("agentd"), payload).unwrap();
+    fs::create_dir(root.join("bin")).unwrap();
+    let executable = Path::new(env!("CARGO_BIN_EXE_keith-release-report-host"));
+    let daemon_name = format!("agentd{}", std::env::consts::EXE_SUFFIX);
+    let worker_name = format!("agent-worker{}", std::env::consts::EXE_SUFFIX);
+    fs::copy(executable, root.join("bin").join(&daemon_name)).unwrap();
+    fs::copy(executable, root.join("bin").join(&worker_name)).unwrap();
+    fs::write(root.join("payload.bin"), payload).unwrap();
     let build_id = "desktop-command-release-test";
     let protocol_version = CURRENT_PROTOCOL_VERSION.to_string();
     let storage_schema = CURRENT_SCHEMA_VERSION.to_string();
@@ -49,6 +55,37 @@ fn signed_release(root: &Path, version: &str, payload: &[u8], seed: [u8; 32]) ->
         storage_schema: storage_schema.clone(),
         enabled_features: BTreeSet::from(["release-test".into()]),
     };
+    let daemon_report = report("daemon");
+    let worker_report = report("worker");
+    fs::write(
+        root.join("bin").join(format!("{daemon_name}.report.json")),
+        serde_json::to_vec(&daemon_report).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        root.join("bin").join(format!("{worker_name}.report.json")),
+        serde_json::to_vec(&worker_report).unwrap(),
+    )
+    .unwrap();
+    let mut paths = vec![
+        format!("bin/{daemon_name}"),
+        format!("bin/{daemon_name}.report.json"),
+        format!("bin/{worker_name}"),
+        format!("bin/{worker_name}.report.json"),
+        "payload.bin".to_owned(),
+    ];
+    paths.sort();
+    let files = paths
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(root.join(&path)).unwrap();
+            ReleaseFile {
+                path,
+                bytes: u64::try_from(bytes.len()).unwrap(),
+                sha256: keith_release::hex_encode(&Sha256::digest(bytes)),
+            }
+        })
+        .collect();
     let manifest = ReleaseManifest {
         format: MANIFEST_FORMAT.into(),
         package: PACKAGE_NAME.into(),
@@ -58,14 +95,10 @@ fn signed_release(root: &Path, version: &str, payload: &[u8], seed: [u8; 32]) ->
         protocol_version,
         storage_schema,
         components: BTreeMap::from([
-            ("daemon".into(), report("daemon")),
-            ("worker".into(), report("worker")),
+            ("daemon".into(), daemon_report),
+            ("worker".into(), worker_report),
         ]),
-        files: vec![ReleaseFile {
-            path: "agentd".into(),
-            bytes: u64::try_from(payload.len()).unwrap(),
-            sha256: keith_release::hex_encode(&Sha256::digest(payload)),
-        }],
+        files,
     };
     let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
     let key = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();

@@ -22,6 +22,12 @@ pub struct Attachment {
     pub media_type: String,
     pub byte_length: u64,
     pub artifact_id: Option<ArtifactId>,
+    #[serde(default)]
+    pub download_url: Option<String>,
+    #[serde(default)]
+    pub staging_file: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -427,11 +433,19 @@ impl From<RoutedInbound> for SessionAction {
             InboundIntent::Prompt => ClientCommand::SubmitPrompt(SubmitPrompt {
                 session_id: routed.session_id.clone(),
                 text: routed.message.text,
+                artifacts: routed
+                    .message
+                    .attachments
+                    .into_iter()
+                    .filter_map(|attachment| attachment.artifact_id)
+                    .collect(),
                 delivery: DeliveryPolicy::Immediate,
                 reply_route: Some(ProtocolReplyRoute {
                     channel: route.channel,
+                    external_account: Some(route.external_account),
                     conversation: route.conversation,
                     thread: route.thread,
+                    reply_to_message: route.reply_to_message,
                 }),
             }),
             InboundIntent::Steer => ClientCommand::Steer(SteerAction {
@@ -483,13 +497,26 @@ impl<T: AgentTransport> AgentConnection<T> {
             client_id: client_id.clone(),
             client_name: "channel-gateway".to_owned(),
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
-            supported_features: BTreeSet::from([Feature::SessionLifecycle, Feature::Steering]),
+            supported_features: BTreeSet::from([
+                Feature::SessionLifecycle,
+                Feature::Steering,
+                Feature::DeliveryDispatch,
+                Feature::AttachmentStaging,
+            ]),
             resume: None,
         }))?;
         let WireMessage::ServerHello(server) = transport.receive()? else {
             return Err(AgentConnectionError::Handshake);
         };
-        if server.protocol.major != CURRENT_PROTOCOL_VERSION.major {
+        if server.protocol.major != CURRENT_PROTOCOL_VERSION.major
+            || ![
+                Feature::SessionLifecycle,
+                Feature::DeliveryDispatch,
+                Feature::AttachmentStaging,
+            ]
+            .iter()
+            .all(|feature| server.supported_features.contains(feature))
+        {
             return Err(AgentConnectionError::Handshake);
         }
         Ok(Self {
@@ -510,14 +537,57 @@ impl<T: AgentTransport> AgentConnection<T> {
         action: &SessionAction,
         now: UtcTimestamp,
     ) -> Result<CommandResult, AgentConnectionError> {
-        let command_id = action.command_id.clone();
+        self.execute_with_id(
+            action.command_id.clone(),
+            action.command.clone(),
+            Some(action.session_id.clone()),
+            now,
+        )
+    }
+
+    /// Executes one gateway control command, including transactional delivery dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for transport or command-correlation failure.
+    pub fn execute(
+        &mut self,
+        command: ClientCommand,
+        session_id: Option<SessionId>,
+        now: UtcTimestamp,
+    ) -> Result<CommandResult, AgentConnectionError> {
+        self.execute_with_id(CommandId::new(), command, session_id, now)
+    }
+
+    /// Executes a control command with a caller-stable ID so reconnect retries remain idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for transport or command-correlation failure.
+    pub fn execute_idempotent(
+        &mut self,
+        command_id: CommandId,
+        command: ClientCommand,
+        session_id: Option<SessionId>,
+        now: UtcTimestamp,
+    ) -> Result<CommandResult, AgentConnectionError> {
+        self.execute_with_id(command_id, command, session_id, now)
+    }
+
+    fn execute_with_id(
+        &mut self,
+        command_id: CommandId,
+        command: ClientCommand,
+        session_id: Option<SessionId>,
+        now: UtcTimestamp,
+    ) -> Result<CommandResult, AgentConnectionError> {
         self.transport.send(&WireMessage::Command(CommandEnvelope {
             protocol: self.protocol,
             command_id: command_id.clone(),
             client_id: self.client_id.clone(),
             sent_at: now,
-            session_id: Some(action.session_id.clone()),
-            command: action.command.clone(),
+            session_id,
+            command,
         }))?;
         loop {
             match self.transport.receive()? {
@@ -621,6 +691,9 @@ mod tests {
             media_type: "application/octet-stream".to_owned(),
             byte_length: 5,
             artifact_id: None,
+            download_url: None,
+            staging_file: None,
+            sha256: None,
         });
         assert_eq!(queue.enqueue(oversized), Err(GatewayError::AttachmentLimit));
     }

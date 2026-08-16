@@ -11,6 +11,11 @@ publish = false
 name = "browser-runner"
 path = "src/main.rs"
 
+[dependencies]
+keith-agent-types = { path = "../../crates/agent-types" }
+keith-provider-core = { path = "../../crates/provider-core" }
+keith-web = { path = "../../crates/web" }
+serde_json.workspace = true
+
 [lints]
 workspace = true
-

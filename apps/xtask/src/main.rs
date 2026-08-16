@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use keith_agent_types::EntityId;
-use keith_build_info::{BUILD_ID, BuildReport, daemon_report, worker_report};
+use keith_build_info::{BUILD_ID, daemon_report, worker_report};
 use keith_release::{
     MANIFEST_FILE, PUBLIC_KEY_FILE, ReleaseFile, ReleaseManifest, SIGNATURE_FILE,
-    decode_public_key, hex_encode, verify_release as verify_signed_release,
+    decode_public_key, hex_encode, verify_packaged_build_reports,
+    verify_release as verify_signed_release,
 };
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde_json::{Value, json};
@@ -63,7 +64,14 @@ fn verify_release_command() -> Result<(), String> {
         .ok_or_else(|| "verify-release requires the trusted public key hex".to_owned())?;
     let key = decode_public_key(&encoded_key).map_err(|error| error.to_string())?;
     let verified = verify_signed_release(&root, &key).map_err(|error| error.to_string())?;
-    verify_packaged_build_reports(&root, &verified.manifest)?;
+    let host_target = format!("{}-{}", env::consts::ARCH, env::consts::OS);
+    if verified.manifest.target != host_target {
+        return Err(format!(
+            "release target {} does not match this host {host_target}",
+            verified.manifest.target
+        ));
+    }
+    verify_packaged_build_reports(&root, &verified.manifest).map_err(|error| error.to_string())?;
     println!(
         "verified {} signed release files for {} {} ({}) manifest_sha256={}",
         verified.manifest.files.len(),
@@ -221,6 +229,11 @@ fn assemble_release(
         destination.join("docs/release-qualification.md"),
     )
     .map_err(|error| error.to_string())?;
+    fs::copy(
+        root.join("docs/discord.md"),
+        destination.join("docs/discord.md"),
+    )
+    .map_err(|error| error.to_string())?;
     fs::copy(root.join("Cargo.lock"), provenance.join("Cargo.lock"))
         .map_err(|error| error.to_string())?;
     fs::write(
@@ -270,32 +283,8 @@ fn assemble_release(
         .map_err(|error| error.to_string())?;
     let verified =
         verify_signed_release(destination, &public_key).map_err(|error| error.to_string())?;
-    verify_packaged_build_reports(destination, &verified.manifest)?;
-    Ok(())
-}
-
-fn verify_packaged_build_reports(root: &Path, manifest: &ReleaseManifest) -> Result<(), String> {
-    for (component, binary) in [("daemon", "agentd"), ("worker", "agent-worker")] {
-        let expected = manifest
-            .components
-            .get(component)
-            .ok_or_else(|| format!("release manifest is missing {component} build information"))?;
-        let filename = format!("{binary}{}", env::consts::EXE_SUFFIX);
-        let output = Command::new(root.join("bin").join(filename))
-            .arg("--build-info")
-            .output()
-            .map_err(|error| format!("failed to execute packaged {binary}: {error}"))?;
-        if !output.status.success() {
-            return Err(format!("packaged {binary} --build-info failed"));
-        }
-        let actual: BuildReport =
-            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
-        if &actual != expected {
-            return Err(format!(
-                "packaged {binary} build information does not match the signed manifest"
-            ));
-        }
-    }
+    verify_packaged_build_reports(destination, &verified.manifest)
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 

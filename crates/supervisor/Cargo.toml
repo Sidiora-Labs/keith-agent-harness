@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 keith-agent-types = { path = "../agent-types" }
 keith-connection = { path = "../connection" }
+keith-runtime-api = { path = "../runtime-api" }
 keith-worker-runtime = { path = "../worker-runtime" }
 nix.workspace = true
 thiserror.workspace = true

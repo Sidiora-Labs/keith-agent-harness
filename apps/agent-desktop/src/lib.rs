@@ -21,7 +21,9 @@ use keith_protocol::{
     ClientCommand, ClientHello, CommandEnvelope, CommandResult, ResponsePayload, SessionFilter,
     SessionSummary, WireFormat, WireMessage,
 };
-use keith_release::{ReleaseError, decode_public_key, verify_release};
+use keith_release::{
+    ReleaseError, decode_public_key, verify_packaged_build_reports, verify_release,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -44,6 +46,8 @@ pub enum DesktopError {
     StartupTimeout,
     #[error("desktop process is not owned by this shell")]
     NotOwned,
+    #[error("desktop endpoint is already served by an unverified process")]
+    ExistingProcess,
     #[error("agent connection failed: {0}")]
     AgentConnection(String),
     #[error("signed release verification failed: {0}")]
@@ -162,6 +166,7 @@ impl DesktopBootstrap {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DesktopProcessConfig {
     pub settings: DesktopSettings,
+    pub workspace_root: PathBuf,
     pub daemon_executable: PathBuf,
     pub worker_executable: PathBuf,
     pub web_executable: PathBuf,
@@ -170,6 +175,7 @@ pub struct DesktopProcessConfig {
     pub credential_root: PathBuf,
     pub login_secret_env: String,
     pub credential_key_env: String,
+    pub reuse_existing_processes: bool,
     pub startup_timeout: Duration,
     pub shutdown_grace: Duration,
 }
@@ -223,12 +229,22 @@ impl DesktopLifecycle {
             || !config.web_executable.is_file()
             || !config.asset_root.join("agent_web.js").is_file()
             || !config.asset_root.join("agent_web_bg.wasm").is_file()
+            || !config.workspace_root.is_dir()
             || config.login_secret_env.is_empty()
             || config.credential_key_env.is_empty()
         {
             return Err(DesktopError::InvalidConfiguration);
         }
         validate_loopback_origin(&config.settings.web_origin)?;
+        let bind = config
+            .web_bind
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| DesktopError::InvalidConfiguration)?;
+        let origin = Url::parse(&config.settings.web_origin)
+            .map_err(|_| DesktopError::InvalidConfiguration)?;
+        if !bind.ip().is_loopback() || origin.port_or_known_default() != Some(bind.port()) {
+            return Err(DesktopError::InvalidConfiguration);
+        }
         Ok(Self {
             config,
             daemon: None,
@@ -243,7 +259,11 @@ impl DesktopLifecycle {
     /// Returns an error for unsafe stale endpoints, spawn failure, or readiness timeout.
     pub fn ensure_daemon(&mut self) -> Result<ProcessOwnership, DesktopError> {
         if DesktopConnection::probe(&self.config.settings.daemon_socket).is_ok() {
-            return Ok(ProcessOwnership::Existing);
+            return if self.config.reuse_existing_processes {
+                Ok(ProcessOwnership::Existing)
+            } else {
+                Err(DesktopError::ExistingProcess)
+            };
         }
         remove_stale_socket(&self.config.settings.daemon_socket)?;
         let stderr_path = self.process_log_path(ManagedProcessKind::Daemon);
@@ -258,6 +278,12 @@ impl DesktopLifecycle {
             .arg(&self.config.settings.daemon_socket)
             .arg("--worker-executable")
             .arg(&self.config.worker_executable)
+            .arg("--credential-root")
+            .arg(&self.config.credential_root)
+            .arg("--credential-key-env")
+            .arg(&self.config.credential_key_env)
+            .arg("--workspace-root")
+            .arg(&self.config.workspace_root)
             .arg("--idle-seconds")
             .arg("900")
             .stdin(Stdio::null())
@@ -276,7 +302,11 @@ impl DesktopLifecycle {
     /// Returns an error for missing narrow secret references, spawn failure, or timeout.
     pub fn ensure_web(&mut self) -> Result<ProcessOwnership, DesktopError> {
         if web_listener_ready(&self.config.web_bind) {
-            return Ok(ProcessOwnership::Existing);
+            return if self.config.reuse_existing_processes {
+                Ok(ProcessOwnership::Existing)
+            } else {
+                Err(DesktopError::ExistingProcess)
+            };
         }
         let login_secret = std::env::var_os(&self.config.login_secret_env)
             .ok_or(DesktopError::MissingSecretEnvironment)?;
@@ -685,6 +715,8 @@ impl DesktopUpdateManager {
     ///
     /// Returns an error for an unsafe update root.
     pub fn open(state_root: &Path) -> Result<Self, DesktopError> {
+        validate_absolute_root(state_root)?;
+        reject_symlink(state_root)?;
         let root = state_root.join("updates");
         fs::create_dir_all(root.join("versions"))?;
         reject_symlink(&root)?;
@@ -728,12 +760,12 @@ impl DesktopUpdateManager {
         {
             return Err(DesktopError::InvalidConfiguration);
         }
+        verify_packaged_build_reports(source, &verified.manifest)?;
         let version = verified.manifest.version;
         if !valid_version(&version) {
             return Err(DesktopError::InvalidConfiguration);
         }
         self.ensure_trusted_public_key(&public_key)?;
-        let digest = Self::digest_release(source)?;
         let target = self.root.join("versions").join(&version);
         if target.exists() {
             return Err(DesktopError::VersionExists);
@@ -748,16 +780,21 @@ impl DesktopUpdateManager {
             if copied.manifest.version != version {
                 return Err(DesktopError::InvalidConfiguration);
             }
+            verify_packaged_build_reports(&temporary, &copied.manifest)?;
+            let digest = Self::digest_release(&temporary)?;
             self.pin_trusted_public_key(&public_key)?;
             fs::rename(&temporary, &target)?;
-            Ok(())
+            Ok(digest)
         })();
-        if let Err(error) = staged {
-            if temporary.exists() {
-                fs::remove_dir_all(&temporary)?;
+        let digest = match staged {
+            Ok(digest) => digest,
+            Err(error) => {
+                if temporary.exists() {
+                    fs::remove_dir_all(&temporary)?;
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
         File::open(target.parent().ok_or(DesktopError::UnsafePath)?)?.sync_all()?;
         let previous = self.active().ok().map(|active| active.current);
         let active = ActiveRelease {
@@ -788,6 +825,7 @@ impl DesktopUpdateManager {
         if verified.manifest.version != previous {
             return Err(DesktopError::InvalidConfiguration);
         }
+        verify_packaged_build_reports(&target, &verified.manifest)?;
         let digest = Self::digest_release(&target)?;
         let rolled = ActiveRelease {
             version: CURRENT_SCHEMA_VERSION,
@@ -806,9 +844,42 @@ impl DesktopUpdateManager {
     ///
     /// Returns an error for missing or malformed active state.
     pub fn active(&self) -> Result<ActiveRelease, DesktopError> {
-        Ok(serde_json::from_slice(&fs::read(
-            self.root.join("active.json"),
-        )?)?)
+        let active =
+            serde_json::from_slice::<ActiveRelease>(&fs::read(self.root.join("active.json"))?)?;
+        if active.version.major != CURRENT_SCHEMA_VERSION.major
+            || !valid_version(&active.current)
+            || active
+                .previous
+                .as_deref()
+                .is_some_and(|version| !valid_version(version))
+            || active.digest.len() != 64
+            || !active.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(DesktopError::InvalidConfiguration);
+        }
+        Ok(active)
+    }
+
+    /// Resolves and re-verifies the complete active version before it is executed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the active pointer, pinned publisher key, signed payload, target, or
+    /// recorded directory digest is invalid.
+    pub fn active_release_root(&self) -> Result<PathBuf, DesktopError> {
+        let active = self.active()?;
+        let root = self.root.join("versions").join(&active.current);
+        let public_key = self.trusted_public_key()?;
+        let verified = verify_release(&root, &public_key)?;
+        if verified.manifest.version != active.current
+            || verified.manifest.target
+                != format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+            || Self::digest_release(&root)? != active.digest
+        {
+            return Err(DesktopError::InvalidConfiguration);
+        }
+        verify_packaged_build_reports(&root, &verified.manifest)?;
+        Ok(root)
     }
 
     fn pin_trusted_public_key(&self, public_key: &[u8; 32]) -> Result<(), DesktopError> {
@@ -999,6 +1070,9 @@ pub fn restore_state(backup: &Path, target_data_root: &Path) -> Result<(), Deskt
     let temporary = parent.join(format!(".{name}-{}.tmp", EntityId::new()));
     let result = (|| {
         copy_tree(&backup.join("data"), &temporary)?;
+        if DesktopUpdateManager::digest_release(&temporary)? != manifest.data_digest {
+            return Err(DesktopError::InvalidConfiguration);
+        }
         if target_data_root.exists() {
             reject_symlink(target_data_root)?;
             fs::remove_dir(target_data_root)?;
@@ -1229,6 +1303,7 @@ fn collect_files(
 fn copy_tree(source: &Path, target: &Path) -> Result<(), DesktopError> {
     reject_symlink(source)?;
     fs::create_dir_all(target)?;
+    restrict_copied_directory(target)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
@@ -1246,11 +1321,42 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), DesktopError> {
                 .open(destination)?;
             std::io::copy(&mut input, &mut output)?;
             output.sync_all()?;
+            restrict_copied_file(&entry.path(), &destination)?;
         } else {
             return Err(DesktopError::UnsafePath);
         }
     }
     File::open(target)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_copied_directory(path: &Path) -> Result<(), DesktopError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_copied_directory(_path: &Path) -> Result<(), DesktopError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_copied_file(source: &Path, target: &Path) -> Result<(), DesktopError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let source_mode = fs::metadata(source)?.permissions().mode();
+    let target_mode = if source_mode & 0o111 == 0 {
+        0o600
+    } else {
+        0o700
+    };
+    fs::set_permissions(target, fs::Permissions::from_mode(target_mode))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_copied_file(_source: &Path, _target: &Path) -> Result<(), DesktopError> {
     Ok(())
 }
 
@@ -1286,17 +1392,29 @@ pub fn random_hex(bytes: usize) -> Result<String, DesktopError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::collections::BTreeMap;
 
+    #[cfg(unix)]
     use keith_release::{
         BuildReport, MANIFEST_FILE, MANIFEST_FORMAT, PACKAGE_NAME, PUBLIC_KEY_FILE, ReleaseFile,
         ReleaseManifest, SIGNATURE_FILE,
     };
+    #[cfg(unix)]
     use ring::signature::{Ed25519KeyPair, KeyPair};
 
+    #[cfg(unix)]
     fn signed_release(root: &Path, version: &str, payload: &[u8], seed: [u8; 32]) -> String {
+        use std::os::unix::fs::PermissionsExt as _;
+
         fs::create_dir(root).unwrap();
-        fs::write(root.join("agentd"), payload).unwrap();
+        fs::create_dir(root.join("bin")).unwrap();
+        for binary in ["agentd", "agent-worker"] {
+            let path = root.join("bin").join(binary);
+            fs::write(&path, b"#!/bin/sh\ncat \"$0.report.json\"\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(root.join("payload.bin"), payload).unwrap();
         let build_id = "desktop-release-test";
         let protocol_version = CURRENT_PROTOCOL_VERSION.to_string();
         let storage_schema = CURRENT_SCHEMA_VERSION.to_string();
@@ -1308,6 +1426,37 @@ mod tests {
             storage_schema: storage_schema.clone(),
             enabled_features: BTreeSet::from(["release-test".into()]),
         };
+        let daemon_report = report("daemon");
+        let worker_report = report("worker");
+        fs::write(
+            root.join("bin/agentd.report.json"),
+            serde_json::to_vec(&daemon_report).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("bin/agent-worker.report.json"),
+            serde_json::to_vec(&worker_report).unwrap(),
+        )
+        .unwrap();
+        let mut paths = vec![
+            "bin/agent-worker".to_owned(),
+            "bin/agent-worker.report.json".to_owned(),
+            "bin/agentd".to_owned(),
+            "bin/agentd.report.json".to_owned(),
+            "payload.bin".to_owned(),
+        ];
+        paths.sort();
+        let files = paths
+            .into_iter()
+            .map(|path| {
+                let bytes = fs::read(root.join(&path)).unwrap();
+                ReleaseFile {
+                    path,
+                    bytes: u64::try_from(bytes.len()).unwrap(),
+                    sha256: keith_release::hex_encode(&Sha256::digest(bytes)),
+                }
+            })
+            .collect();
         let manifest = ReleaseManifest {
             format: MANIFEST_FORMAT.into(),
             package: PACKAGE_NAME.into(),
@@ -1317,14 +1466,10 @@ mod tests {
             protocol_version,
             storage_schema,
             components: BTreeMap::from([
-                ("daemon".into(), report("daemon")),
-                ("worker".into(), report("worker")),
+                ("daemon".into(), daemon_report),
+                ("worker".into(), worker_report),
             ]),
-            files: vec![ReleaseFile {
-                path: "agentd".into(),
-                bytes: u64::try_from(payload.len()).unwrap(),
-                sha256: keith_release::hex_encode(&Sha256::digest(payload)),
-            }],
+            files,
         };
         let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
         let key = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
@@ -1417,6 +1562,7 @@ mod tests {
         assert!(!data.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn update_activation_digest_and_rollback_use_complete_version_directories() {
         let directory = tempfile::tempdir().unwrap();

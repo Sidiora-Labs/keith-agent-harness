@@ -390,6 +390,12 @@ impl DiscordAdapter {
                                 .to_owned(),
                             byte_length,
                             artifact_id: None,
+                            download_url: item
+                                .get("url")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            staging_file: None,
+                            sha256: None,
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()
@@ -437,6 +443,13 @@ impl DiscordAdapter {
     }
 
     fn send_message(&mut self, message: &OutboundMessage) -> Result<SendReceipt, AdapterFailure> {
+        if message.route.channel != "discord"
+            || message.route.external_account != self.config.bot_user_id
+        {
+            return Err(permanent(
+                "Discord delivery route does not belong to this adapter account",
+            ));
+        }
         if message.text.len() > 2_000 {
             return Err(permanent("Discord message exceeds 2000 characters"));
         }

@@ -96,8 +96,10 @@ pub enum ReplyRoute {
     },
     Channel {
         channel: String,
+        external_account: Option<String>,
         conversation_id: String,
         thread_id: Option<String>,
+        reply_to_message: Option<String>,
     },
     Session {
         session_id: SessionId,

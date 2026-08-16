@@ -259,6 +259,30 @@ where
     ///
     /// Returns an error for persistence or revision failure.
     pub fn claim_next(&self, now: UtcTimestamp) -> Result<Option<DeliveryClaim>, DeliveryError> {
+        self.claim_next_matching(now, |_| true)
+    }
+
+    /// Transactionally claims the oldest due item for one channel adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty channel, persistence, or revision failure.
+    pub fn claim_next_for_channel(
+        &self,
+        channel: &str,
+        now: UtcTimestamp,
+    ) -> Result<Option<DeliveryClaim>, DeliveryError> {
+        if channel.trim().is_empty() {
+            return Err(DeliveryError::Invalid);
+        }
+        self.claim_next_matching(now, |item| item.route.channel == channel)
+    }
+
+    fn claim_next_matching(
+        &self,
+        now: UtcTimestamp,
+        matches_route: impl Fn(&DeliveryItem) -> bool,
+    ) -> Result<Option<DeliveryClaim>, DeliveryError> {
         let _guard = self.lock()?;
         let mut records = self.load_all()?;
         records.sort_by_key(|stored| (stored.item.not_before, stored.item.created_at));
@@ -267,6 +291,7 @@ where
                 stored.item.state,
                 DeliveryState::Pending | DeliveryState::RetryScheduled
             ) && stored.item.not_before <= now
+                && matches_route(&stored.item)
         }) else {
             return Ok(None);
         };

@@ -6,6 +6,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ use keith_connection::{
     set_local_listener_nonblocking, set_local_read_timeout, set_local_write_timeout,
 };
 use keith_framing::{FrameError, LengthDelimitedCodec};
+use keith_runtime_api::{CommandRuntime, RuntimeRequest, RuntimeResponse};
 use keith_state_store::{EmbeddedStore, FileBackupHook, StoreError};
 use keith_state_store_core::{
     AtomicStateRepository, Collection, RecordMutation, VersionedRecord, WritePrecondition,
@@ -27,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use thiserror::Error;
 
-pub const PRIVATE_MAX_FRAME_BYTES: usize = 64 * 1024;
+pub const PRIVATE_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,11 +69,29 @@ pub struct LeaseGrant {
 #[serde(rename_all = "snake_case", tag = "message", content = "payload")]
 pub enum PrivateMessage {
     SupervisorHello,
-    Ready { pid: u32 },
-    Heartbeat { at: UtcTimestamp },
-    Idle { since: UtcTimestamp },
-    Fatal { reason: String },
-    Shutdown { deadline: UtcTimestamp },
+    Ready {
+        pid: u32,
+    },
+    Heartbeat {
+        at: UtcTimestamp,
+    },
+    Idle {
+        since: UtcTimestamp,
+    },
+    Execute {
+        request_id: EntityId,
+        request: Box<RuntimeRequest>,
+    },
+    ExecutionResult {
+        request_id: EntityId,
+        response: Box<RuntimeResponse>,
+    },
+    Fatal {
+        reason: String,
+    },
+    Shutdown {
+        deadline: UtcTimestamp,
+    },
     ShutdownAck,
 }
 
@@ -520,6 +540,7 @@ pub struct WorkerArguments {
     pub grant: LeaseGrant,
     pub heartbeat_interval: Duration,
     pub lease_duration: Duration,
+    pub runtime_config: Option<PathBuf>,
 }
 
 impl WorkerArguments {
@@ -556,6 +577,7 @@ impl WorkerArguments {
                     | "--expires-at"
                     | "--heartbeat-ms"
                     | "--lease-ms"
+                    | "--runtime-config"
             ) {
                 return Err(WorkerRuntimeError::InvalidArgument(format!(
                     "unknown argument {argument}"
@@ -608,6 +630,7 @@ impl WorkerArguments {
             },
             heartbeat_interval: Duration::from_millis(heartbeat_ms),
             lease_duration: Duration::from_millis(lease_ms),
+            runtime_config: values.get("--runtime-config").map(PathBuf::from),
         })
     }
 }
@@ -634,6 +657,8 @@ pub enum WorkerRuntimeError {
     LeaseLost,
     #[error("worker control endpoint failed: {0}")]
     Connection(#[from] keith_connection::ConnectionError),
+    #[error("worker runtime failed: {0}")]
+    Runtime(String),
 }
 
 pub fn registration_path(state_dir: &Path, root_tree_id: &RootTreeId) -> PathBuf {
@@ -655,12 +680,52 @@ pub fn run_from_environment() -> Result<(), WorkerRuntimeError> {
     run_worker(&arguments, &shutdown)
 }
 
+/// Starts a worker whose authenticated control loop dispatches runtime requests to `factory`.
+///
+/// # Errors
+///
+/// Returns an error when arguments, runtime construction, signals, leases, or control fail.
+pub fn run_from_environment_with_runtime<F>(factory: F) -> Result<(), WorkerRuntimeError>
+where
+    F: FnOnce(&WorkerArguments) -> Result<Box<dyn CommandRuntime>, String>,
+{
+    let arguments = WorkerArguments::parse(std::env::args_os())?;
+    let runtime = factory(&arguments).map_err(WorkerRuntimeError::Runtime)?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))
+        .map_err(WorkerRuntimeError::Signal)?;
+    signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))
+        .map_err(WorkerRuntimeError::Signal)?;
+    run_worker_with_runtime(&arguments, &shutdown, runtime)
+}
+
 /// # Errors
 ///
 /// Returns an error when ownership is lost or worker state cannot be durably published.
 pub fn run_worker(
     arguments: &WorkerArguments,
     shutdown: &AtomicBool,
+) -> Result<(), WorkerRuntimeError> {
+    run_worker_inner(arguments, shutdown, None)
+}
+
+/// Runs a leased worker with an isolated runtime executor behind private authenticated framing.
+///
+/// # Errors
+///
+/// Returns an error when ownership is lost or worker state cannot be durably published.
+pub fn run_worker_with_runtime(
+    arguments: &WorkerArguments,
+    shutdown: &AtomicBool,
+    runtime: Box<dyn CommandRuntime>,
+) -> Result<(), WorkerRuntimeError> {
+    run_worker_inner(arguments, shutdown, Some(runtime))
+}
+
+fn run_worker_inner(
+    arguments: &WorkerArguments,
+    shutdown: &AtomicBool,
+    runtime: Option<Box<dyn CommandRuntime>>,
 ) -> Result<(), WorkerRuntimeError> {
     let manager = LeaseManager::open(&arguments.lease_database)?;
     manager.validate(&arguments.grant)?;
@@ -695,8 +760,22 @@ pub fn run_worker(
     let mut next_heartbeat = Instant::now();
     let mut heartbeat_count = 0_u64;
     let mut requested_shutdown = false;
+    let mut shutdown_deadline = None;
+    let mut active_request = None;
+    let (work_sender, work_receiver) = mpsc::sync_channel(1);
+    let (result_sender, result_receiver) = mpsc::sync_channel(1);
+    let executor = thread::spawn(move || runtime_executor(runtime, work_receiver, result_sender));
     while !shutdown.load(Ordering::Acquire) && !requested_shutdown {
-        requested_shutdown = service_control(&listener, &mut control, &grant)?;
+        if let Some(deadline) = service_control(
+            &listener,
+            &mut control,
+            &grant,
+            &work_sender,
+            &result_receiver,
+            &mut active_request,
+        )? {
+            shutdown_deadline = Some(deadline);
+        }
         if Instant::now() >= next_heartbeat {
             renew_and_publish(
                 &manager,
@@ -709,8 +788,26 @@ pub fn run_worker(
             heartbeat_count = heartbeat_count.saturating_add(1);
             next_heartbeat = Instant::now() + arguments.heartbeat_interval;
         }
+        if let Some(deadline) = shutdown_deadline
+            && (active_request.is_none() || UtcTimestamp::now()? >= deadline)
+        {
+            if let Some(connection) = control.as_mut() {
+                let _ = connection.send(PrivateMessage::ShutdownAck);
+            }
+            requested_shutdown = true;
+        }
         thread::sleep(Duration::from_millis(5));
     }
+    drop(work_sender);
+    if active_request.is_some() {
+        registration.state = WorkerRunState::Failed;
+        registration.heartbeat_at = UtcTimestamp::now()?;
+        write_registration(&arguments.state_dir, &registration)?;
+        return Err(WorkerRuntimeError::Runtime(
+            "shutdown deadline interrupted an active runtime request".into(),
+        ));
+    }
+    let _ = executor.join();
     registration.state = WorkerRunState::Draining;
     registration.heartbeat_at = UtcTimestamp::now()?;
     write_registration(&arguments.state_dir, &registration)?;
@@ -727,7 +824,10 @@ fn service_control(
     listener: &LocalListener,
     control: &mut Option<PrivateTransport<LocalStream>>,
     grant: &LeaseGrant,
-) -> Result<bool, WorkerRuntimeError> {
+    work_sender: &SyncSender<RuntimeWork>,
+    result_receiver: &Receiver<RuntimeWorkResult>,
+    active_request: &mut Option<EntityId>,
+) -> Result<Option<UtcTimestamp>, WorkerRuntimeError> {
     if control.is_none() {
         match accept_local(listener) {
             Ok(stream) => {
@@ -740,10 +840,28 @@ fn service_control(
         }
     }
     let Some(mut connection) = control.take() else {
-        return Ok(false);
+        return Ok(None);
     };
     let mut keep = true;
-    let mut requested_shutdown = false;
+    let mut shutdown_deadline = None;
+    match result_receiver.try_recv() {
+        Ok(result) => {
+            if active_request.as_ref() == Some(&result.request_id) {
+                connection.send(PrivateMessage::ExecutionResult {
+                    request_id: result.request_id,
+                    response: Box::new(result.response),
+                })?;
+                *active_request = None;
+            }
+        }
+        Err(TryRecvError::Empty) => {}
+        Err(TryRecvError::Disconnected) if active_request.is_some() => {
+            return Err(WorkerRuntimeError::Runtime(
+                "runtime executor stopped during a request".into(),
+            ));
+        }
+        Err(TryRecvError::Disconnected) => {}
+    }
     match connection.receive() {
         Ok(PrivateMessage::SupervisorHello) => {
             if let Err(error) = connection.send(PrivateMessage::Ready {
@@ -756,9 +874,40 @@ fn service_control(
                 }
             }
         }
-        Ok(PrivateMessage::Shutdown { .. }) => {
-            connection.send(PrivateMessage::ShutdownAck)?;
-            requested_shutdown = true;
+        Ok(PrivateMessage::Execute {
+            request_id,
+            request,
+        }) => {
+            let response = if active_request.is_some() {
+                Some(RuntimeResponse::Failed(
+                    "worker already has an active runtime request".into(),
+                ))
+            } else {
+                match work_sender.try_send(RuntimeWork {
+                    request_id: request_id.clone(),
+                    request: *request,
+                }) {
+                    Ok(()) => {
+                        *active_request = Some(request_id.clone());
+                        None
+                    }
+                    Err(TrySendError::Full(_)) => Some(RuntimeResponse::Failed(
+                        "worker runtime queue is applying backpressure".into(),
+                    )),
+                    Err(TrySendError::Disconnected(_)) => Some(RuntimeResponse::Failed(
+                        "worker runtime executor is unavailable".into(),
+                    )),
+                }
+            };
+            if let Some(response) = response {
+                connection.send(PrivateMessage::ExecutionResult {
+                    request_id,
+                    response: Box::new(response),
+                })?;
+            }
+        }
+        Ok(PrivateMessage::Shutdown { deadline }) => {
+            shutdown_deadline = Some(deadline);
         }
         Ok(_) => {}
         Err(error) if error.is_retryable_io() => {}
@@ -771,7 +920,44 @@ fn service_control(
     if keep {
         *control = Some(connection);
     }
-    Ok(requested_shutdown)
+    Ok(shutdown_deadline)
+}
+
+struct RuntimeWork {
+    request_id: EntityId,
+    request: RuntimeRequest,
+}
+
+struct RuntimeWorkResult {
+    request_id: EntityId,
+    response: RuntimeResponse,
+}
+
+fn runtime_executor(
+    runtime: Option<Box<dyn CommandRuntime>>,
+    receiver: Receiver<RuntimeWork>,
+    sender: SyncSender<RuntimeWorkResult>,
+) {
+    while let Ok(work) = receiver.recv() {
+        let response = runtime.as_ref().map_or_else(
+            || RuntimeResponse::Failed("worker runtime is not configured".into()),
+            |runtime| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    work.request.execute(runtime.as_ref())
+                }))
+                .unwrap_or_else(|_| RuntimeResponse::Failed("worker runtime panicked".into()))
+            },
+        );
+        if sender
+            .send(RuntimeWorkResult {
+                request_id: work.request_id,
+                response,
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
 }
 
 fn renew_and_publish(

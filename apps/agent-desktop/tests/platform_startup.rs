@@ -18,6 +18,7 @@ fn platform_desktop_startup_connects_and_stops_owned_daemon() {
     fs::write(assets.join("agent_web_bg.wasm"), b"packaged wasm").unwrap();
     let config = DesktopProcessConfig {
         settings,
+        workspace_root: directory.path().to_path_buf(),
         daemon_executable: PathBuf::from(env!("CARGO_BIN_EXE_keith-desktop-daemon-host")),
         worker_executable: PathBuf::from(env!("CARGO_BIN_EXE_agent-desktop")),
         web_executable: PathBuf::from(env!("CARGO_BIN_EXE_agent-desktop")),
@@ -26,6 +27,7 @@ fn platform_desktop_startup_connects_and_stops_owned_daemon() {
         credential_root: directory.path().join("credentials"),
         login_secret_env: "KEITH_TEST_DESKTOP_LOGIN".into(),
         credential_key_env: "KEITH_TEST_DESKTOP_KEY".into(),
+        reuse_existing_processes: false,
         startup_timeout: Duration::from_secs(5),
         shutdown_grace: Duration::from_secs(2),
     };

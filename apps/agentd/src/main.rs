@@ -2,14 +2,15 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use keith_credentials::{MasterKey, NativeMasterKeyStore, RestrictedMasterKeyStore};
 use keith_daemon_core::{DaemonCore, DaemonOptions};
-use keith_local_runtime::{LocalRuntime, LocalRuntimeConfig};
+use keith_local_runtime::{LocalRuntimeLaunchConfig, RuntimeCredentialKeySource};
 use keith_platform::PlatformPaths;
 use signal_hook::consts::{SIGINT, SIGTERM};
 
@@ -166,25 +167,6 @@ impl Arguments {
             provider_base_urls,
         }))
     }
-
-    fn credential_key(&self) -> Result<MasterKey, String> {
-        match &self.credential_key_source {
-            CredentialKeySource::Environment(environment) => {
-                let encoded = std::env::var_os(environment)
-                    .ok_or_else(|| format!("{environment} is unavailable"))?
-                    .into_encoded_bytes();
-                decode_key(&encoded).map(MasterKey::from_bytes)
-            }
-            CredentialKeySource::Native(account) => {
-                NativeMasterKeyStore::new("keith-agent", account.clone())
-                    .and_then(|store| store.load_or_create())
-                    .map_err(|error| error.to_string())
-            }
-            CredentialKeySource::Restricted(root) => RestrictedMasterKeyStore::open(root)
-                .and_then(|store| store.load_or_create())
-                .map_err(|error| error.to_string()),
-        }
-    }
 }
 
 fn run() -> Result<(), String> {
@@ -200,22 +182,27 @@ fn run() -> Result<(), String> {
         idle_evict_after: Duration::from_secs(arguments.idle_seconds),
         ..DaemonOptions::default()
     };
-    let credential_key = arguments.credential_key()?;
-    let runtime = LocalRuntimeConfig {
+    let runtime = LocalRuntimeLaunchConfig {
         data_root: arguments.data_root.clone(),
         credential_root: arguments.credential_root,
-        credential_key,
+        credential_key_source: match arguments.credential_key_source {
+            CredentialKeySource::Environment(environment) => {
+                RuntimeCredentialKeySource::Environment(environment)
+            }
+            CredentialKeySource::Native(account) => RuntimeCredentialKeySource::Native(account),
+            CredentialKeySource::Restricted(root) => RuntimeCredentialKeySource::Restricted(root),
+        },
         workspace_root: arguments.workspace_root,
         openai_base_url: arguments.openai_base_url,
         anthropic_base_url: arguments.anthropic_base_url,
         provider_base_urls: arguments.provider_base_urls,
     };
-    let runtime = LocalRuntime::open(runtime).map_err(|error| error.to_string())?;
-    let mut daemon = DaemonCore::open_with_runtime(
-        arguments.data_root,
+    let runtime_config = write_runtime_config(&arguments.data_root, &runtime)?;
+    let mut daemon = DaemonCore::open_with_worker_runtime(
+        &arguments.data_root,
         arguments.worker_executable,
         options,
-        Box::new(runtime),
+        runtime_config,
     )
     .map_err(|error| error.to_string())?;
     daemon
@@ -223,24 +210,23 @@ fn run() -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn decode_key(encoded: &[u8]) -> Result<[u8; 32], String> {
-    if encoded.len() != 64 {
-        return Err("credential key must be 64 hexadecimal characters".into());
-    }
-    let mut decoded = [0_u8; 32];
-    for (target, pair) in decoded.iter_mut().zip(encoded.chunks_exact(2)) {
-        *target = (hex_digit(pair[0])? << 4) | hex_digit(pair[1])?;
-    }
-    Ok(decoded)
-}
-
-fn hex_digit(value: u8) -> Result<u8, String> {
-    match value {
-        b'0'..=b'9' => Ok(value - b'0'),
-        b'a'..=b'f' => Ok(value - b'a' + 10),
-        b'A'..=b'F' => Ok(value - b'A' + 10),
-        _ => Err("credential key must be hexadecimal".into()),
-    }
+fn write_runtime_config(
+    data_root: &std::path::Path,
+    runtime: &LocalRuntimeLaunchConfig,
+) -> Result<PathBuf, String> {
+    let directory = data_root.join("runtime");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let path = directory.join("worker-runtime.json");
+    let temporary = directory.join(format!(".worker-runtime.{}.tmp", std::process::id()));
+    let bytes = serde_json::to_vec(runtime).map_err(|error| error.to_string())?;
+    let mut file = File::create(&temporary).map_err(|error| error.to_string())?;
+    file.write_all(&bytes).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+    keith_platform::replace_file(&temporary, &path).map_err(|error| error.to_string())?;
+    File::open(&directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| error.to_string())?;
+    Ok(path)
 }
 
 fn main() {

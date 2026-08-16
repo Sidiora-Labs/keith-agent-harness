@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use keith_agent_types::{ArtifactId, ProfileId, UtcTimestamp};
+use keith_agent_types::{ArtifactId, EntityId, ProfileId, UtcTimestamp};
 use keith_workspace::{
     EditOutcome, PersonalWorkspace, PersonalWorkspaceError, PersonalWorkspaceLimits, WorkspaceActor,
 };
@@ -75,6 +75,8 @@ pub struct RawAwarenessEvent {
 #[serde(deny_unknown_fields)]
 pub struct AwarenessEvent {
     pub id: String,
+    #[serde(default)]
+    pub action_id: EntityId,
     pub profile_id: ProfileId,
     pub source: AwarenessSource,
     pub source_identity: String,
@@ -413,6 +415,7 @@ impl AwarenessService {
         } else {
             let event = AwarenessEvent {
                 id: event_identity(&raw),
+                action_id: EntityId::new(),
                 profile_id: raw.profile_id.clone(),
                 source: raw.source,
                 source_identity: raw.source_identity.clone(),
@@ -615,11 +618,11 @@ fn bound_ledger(ledger: &mut Ledger, max_events: usize) {
     let retained_ids = ledger
         .events
         .iter()
-        .map(|event| event.id.as_str())
+        .map(|event| event.id.clone())
         .collect::<std::collections::BTreeSet<_>>();
     ledger
         .seen_fingerprints
-        .retain(|seen| retained_ids.contains(seen.event_id.as_str()));
+        .retain(|seen| retained_ids.contains(&seen.event_id));
 }
 
 #[cfg(test)]

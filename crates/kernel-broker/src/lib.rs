@@ -781,6 +781,22 @@ impl KernelBroker {
         })
     }
 
+    /// Returns redacted inspections for every currently active kernel in stable identifier order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when broker or usage state cannot be read.
+    pub fn inspections(&self) -> Result<Vec<KernelInspection>, KernelError> {
+        let ids = self
+            .kernels
+            .lock()
+            .map_err(|_| KernelError::LockPoisoned)?
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        ids.iter().map(|id| self.inspect(id)).collect()
+    }
+
     /// Evicts kernels whose idle or total lifetime bound has elapsed.
     ///
     /// # Errors

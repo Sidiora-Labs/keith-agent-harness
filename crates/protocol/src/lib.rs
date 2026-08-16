@@ -33,6 +33,8 @@ pub enum Feature {
     LocalBinary,
     Stdio,
     WebSocket,
+    DeliveryDispatch,
+    AttachmentStaging,
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -110,6 +112,10 @@ pub enum ClientCommand {
     ResolveConfirmation(ConfirmationResolution),
     Export(ExportRequest),
     SetBackgroundControl(BackgroundControl),
+    StageAttachment(StagedAttachment),
+    ClaimDelivery { channel: String },
+    AcknowledgeDelivery(DeliveryAcknowledgement),
+    FailDelivery(DeliveryFailure),
 }
 
 #[derive(Clone, Debug, Default, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -155,6 +161,8 @@ pub struct SelectBranch {
 pub struct SubmitPrompt {
     pub session_id: SessionId,
     pub text: String,
+    #[serde(default)]
+    pub artifacts: Vec<ArtifactId>,
     pub delivery: DeliveryPolicy,
     pub reply_route: Option<ReplyRoute>,
 }
@@ -170,8 +178,22 @@ pub enum DeliveryPolicy {
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
 pub struct ReplyRoute {
     pub channel: String,
+    #[serde(default)]
+    pub external_account: Option<String>,
     pub conversation: String,
     pub thread: Option<String>,
+    #[serde(default)]
+    pub reply_to_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct StagedAttachment {
+    pub session_id: SessionId,
+    pub staging_file: String,
+    pub file_name: String,
+    pub media_type: String,
+    pub byte_length: u64,
+    pub sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -327,6 +349,64 @@ pub struct BackgroundControl {
     pub pause_until: Option<UtcTimestamp>,
 }
 
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct DeliveryRoute {
+    pub channel: String,
+    pub external_account: String,
+    pub conversation: String,
+    pub thread: Option<String>,
+    pub reply_to_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct DeliveryDispatch {
+    pub delivery_id: DeliveryId,
+    pub claim_token: EntityId,
+    pub idempotency_key: String,
+    pub route: DeliveryRoute,
+    pub text: String,
+    pub artifacts: Vec<ArtifactId>,
+    #[serde(default)]
+    pub staged_artifacts: Vec<StagedDeliveryArtifact>,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct StagedDeliveryArtifact {
+    pub artifact_id: ArtifactId,
+    pub staging_file: String,
+    pub file_name: String,
+    pub media_type: String,
+    pub byte_length: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct DeliveryAcknowledgement {
+    pub delivery_id: DeliveryId,
+    pub claim_token: EntityId,
+    pub platform_message_id: String,
+    pub accepted_at: UtcTimestamp,
+    pub duplicate_possible: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryFailureClass {
+    Retryable,
+    RateLimited,
+    Reconnect,
+    Permanent,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct DeliveryFailure {
+    pub delivery_id: DeliveryId,
+    pub claim_token: EntityId,
+    pub class: DeliveryFailureClass,
+    pub safe_message: String,
+    pub retry_after_ms: Option<u64>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundMode {
@@ -364,6 +444,8 @@ pub enum ResponsePayload {
     Memory(Vec<MemoryResult>),
     Export(ExportProjection),
     Background(BackgroundProjection),
+    Artifact(ArtifactId),
+    DeliveryClaim(Option<Box<DeliveryDispatch>>),
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]

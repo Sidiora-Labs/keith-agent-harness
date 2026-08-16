@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 pub use keith_build_info::BuildReport;
 use ring::signature::{ED25519, UnparsedPublicKey};
@@ -71,6 +72,12 @@ pub enum ReleaseError {
     DigestMismatch(String),
     #[error("release contains a symlink or unsupported filesystem entry: {0}")]
     UnsupportedEntry(PathBuf),
+    #[error("release entry is writable by another user: {0}")]
+    UnsafePermissions(PathBuf),
+    #[error("release executable could not be inspected: {0}")]
+    ExecutableInspection(String),
+    #[error("release executable build report does not match the signed manifest: {0}")]
+    BuildReportMismatch(String),
 }
 
 /// Decodes the trusted public key distributed through an independent channel.
@@ -116,6 +123,42 @@ pub fn verify_release(
         manifest_sha256: hex_encode(&Sha256::digest(&manifest_bytes)),
         public_key_hex: hex_encode(expected_public_key),
     })
+}
+
+/// Executes the already-authenticated daemon and worker report modes and compares their complete
+/// compatibility reports with the signed manifest.
+///
+/// Call this only after [`verify_release`] has authenticated the exact payload and after confirming
+/// that the manifest target matches the current host.
+///
+/// # Errors
+///
+/// Returns an error when either executable cannot run, emits invalid JSON, exits unsuccessfully,
+/// or disagrees with the signed report.
+pub fn verify_packaged_build_reports(
+    root: &Path,
+    manifest: &ReleaseManifest,
+) -> Result<(), ReleaseError> {
+    for (component, binary) in [("daemon", "agentd"), ("worker", "agent-worker")] {
+        let expected = manifest
+            .components
+            .get(component)
+            .ok_or_else(|| ReleaseError::InvalidComponent(component.into()))?;
+        let filename = format!("{binary}{}", std::env::consts::EXE_SUFFIX);
+        let output = Command::new(root.join("bin").join(filename))
+            .arg("--build-info")
+            .output()
+            .map_err(|_| ReleaseError::ExecutableInspection(binary.into()))?;
+        if !output.status.success() {
+            return Err(ReleaseError::ExecutableInspection(binary.into()));
+        }
+        let actual: BuildReport = serde_json::from_slice(&output.stdout)
+            .map_err(|_| ReleaseError::ExecutableInspection(binary.into()))?;
+        if &actual != expected {
+            return Err(ReleaseError::BuildReportMismatch(component.into()));
+        }
+    }
+    Ok(())
 }
 
 fn validate_manifest(manifest: &ReleaseManifest) -> Result<(), ReleaseError> {
@@ -214,9 +257,22 @@ fn reject_unsupported(path: &Path) -> Result<(), ReleaseError> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
         Err(ReleaseError::UnsupportedEntry(path.to_path_buf()))
+    } else if is_group_or_world_writable(&metadata) {
+        Err(ReleaseError::UnsafePermissions(path.to_path_buf()))
     } else {
         Ok(())
     }
+}
+
+#[cfg(unix)]
+fn is_group_or_world_writable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    metadata.permissions().mode() & 0o022 != 0
+}
+
+#[cfg(not(unix))]
+const fn is_group_or_world_writable(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn canonical_relative_path(value: &str) -> Result<PathBuf, ReleaseError> {

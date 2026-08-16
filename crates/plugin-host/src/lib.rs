@@ -217,6 +217,29 @@ impl PluginHost {
         Ok(())
     }
 
+    /// Executes an explicitly declared command or tool hook for one active plugin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plugin is disabled, quarantined, missing the hook, or fails in
+    /// its bounded isolated store.
+    pub fn invoke(&self, id: &str, hook: PluginHook) -> Result<(), PluginHostError> {
+        if !matches!(hook, PluginHook::Command | PluginHook::Tool) {
+            return Err(PluginHostError::InvalidPackage);
+        }
+        let record = self
+            .ledger
+            .plugins
+            .get(id)
+            .filter(|record| record.state == PluginState::Active)
+            .ok_or(PluginHostError::NotFound)?;
+        let (manifest, module) = self.load_version(id, &record.active_version)?;
+        if !manifest.hooks.contains(&hook) {
+            return Err(PluginHostError::NotFound);
+        }
+        self.run_hook(&manifest, &module, hook)
+    }
+
     /// Disables a plugin without deleting installed versions.
     ///
     /// # Errors

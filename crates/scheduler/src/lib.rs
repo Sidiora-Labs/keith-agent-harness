@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -323,14 +323,38 @@ where
         claimant: &EntityId,
         now: UtcTimestamp,
     ) -> Result<Vec<JobAttempt>, SchedulerError> {
+        self.tick_filtered(claimant, now, None)
+    }
+
+    /// Claims due work only for sessions retained beneath one worker-owned root tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for corrupt persisted state, time overflow, or repository failure.
+    pub fn tick_sessions(
+        &self,
+        claimant: &EntityId,
+        now: UtcTimestamp,
+        session_ids: &BTreeSet<SessionId>,
+    ) -> Result<Vec<JobAttempt>, SchedulerError> {
+        self.tick_filtered(claimant, now, Some(session_ids))
+    }
+
+    fn tick_filtered(
+        &self,
+        claimant: &EntityId,
+        now: UtcTimestamp,
+        session_ids: Option<&BTreeSet<SessionId>>,
+    ) -> Result<Vec<JobAttempt>, SchedulerError> {
         let _guard = self.lock()?;
-        let mut processed = self.retry_due(now)?;
+        let mut processed = self.retry_due(now, session_ids)?;
         let jobs = self.load_jobs()?;
         for stored in jobs
             .into_iter()
             .filter(|stored| {
                 stored.job.state == JobState::Active
                     && stored.job.next_run.is_some_and(|next| next <= now)
+                    && session_ids.is_none_or(|sessions| sessions.contains(&stored.job.session_id))
             })
             .take(
                 self.config
@@ -608,14 +632,31 @@ where
         Ok(attempts)
     }
 
-    fn retry_due(&self, now: UtcTimestamp) -> Result<Vec<JobAttempt>, SchedulerError> {
+    fn retry_due(
+        &self,
+        now: UtcTimestamp,
+        session_ids: Option<&BTreeSet<SessionId>>,
+    ) -> Result<Vec<JobAttempt>, SchedulerError> {
         let attempts = self.load_attempts()?;
+        let job_sessions = if session_ids.is_some() {
+            self.load_jobs()?
+                .into_iter()
+                .map(|stored| (stored.job.id, stored.job.session_id))
+                .collect::<BTreeMap<_, _>>()
+        } else {
+            BTreeMap::new()
+        };
         let mut processed = Vec::new();
         for mut stored in attempts.into_iter().filter(|stored| {
-            (stored.attempt.state == JobAttemptState::Claimed
+            let due = (stored.attempt.state == JobAttemptState::Claimed
                 && stored.attempt.claim_expires <= now)
                 || (stored.attempt.state == JobAttemptState::RetryScheduled
-                    && stored.attempt.retry_at.is_some_and(|retry| retry <= now))
+                    && stored.attempt.retry_at.is_some_and(|retry| retry <= now));
+            due && session_ids.is_none_or(|sessions| {
+                job_sessions
+                    .get(&stored.attempt.job_id)
+                    .is_some_and(|session_id| sessions.contains(session_id))
+            })
         }) {
             if stored.attempt.state == JobAttemptState::Claimed {
                 stored.attempt.state = JobAttemptState::RetryScheduled;

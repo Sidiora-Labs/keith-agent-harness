@@ -29,7 +29,12 @@ fn run() -> Result<(), String> {
             Some("--data-root") => data_root = Some(PathBuf::from(value)),
             Some("--socket") => socket = Some(PathBuf::from(value)),
             Some("--worker-executable") => worker = Some(PathBuf::from(value)),
-            Some("--idle-seconds") => {}
+            Some(
+                "--idle-seconds"
+                | "--credential-root"
+                | "--credential-key-env"
+                | "--workspace-root",
+            ) => {}
             _ => return Err("unknown daemon argument".into()),
         }
     }

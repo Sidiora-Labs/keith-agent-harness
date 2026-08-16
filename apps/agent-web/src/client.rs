@@ -193,6 +193,7 @@ fn bind_composer(app: &Rc<RefCell<ClientApp>>) -> Result<(), JsValue> {
         let command = ClientCommand::SubmitPrompt(SubmitPrompt {
             session_id: session_id.clone(),
             text: text.clone(),
+            artifacts: Vec::new(),
             delivery: DeliveryPolicy::Immediate,
             reply_route: None,
         });
@@ -323,6 +324,7 @@ fn dispatch_operator_command(app: &Rc<RefCell<ClientApp>>, action: &str) -> Resu
             ClientCommand::SubmitPrompt(SubmitPrompt {
                 session_id: session_id.clone(),
                 text,
+                artifacts: Vec::new(),
                 delivery: DeliveryPolicy::Immediate,
                 reply_route: None,
             })
@@ -503,11 +505,14 @@ fn domain_command(
         "channel" => ClientCommand::SubmitPrompt(SubmitPrompt {
             session_id: session_id.clone(),
             text: value,
+            artifacts: Vec::new(),
             delivery: DeliveryPolicy::Immediate,
             reply_route: Some(ReplyRoute {
                 channel: "configured-channel".into(),
+                external_account: None,
                 conversation: session_id.to_string(),
                 thread: None,
+                reply_to_message: None,
             }),
         }),
         "memory" => ClientCommand::QueryMemory(MemoryQuery {
@@ -523,6 +528,7 @@ fn domain_command(
         _ => ClientCommand::SubmitPrompt(SubmitPrompt {
             session_id: session_id.clone(),
             text: format!("Review and propose a guarded refinement for:\n{value}"),
+            artifacts: Vec::new(),
             delivery: DeliveryPolicy::WhenIdle,
             reply_route: None,
         }),

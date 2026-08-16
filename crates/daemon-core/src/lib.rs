@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use keith_agent_types::{
     CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, CommonError, EntityId, ErrorCode, Generation,
@@ -28,7 +28,7 @@ use keith_protocol::{
     ResponsePayload, SessionFilter, SessionSnapshot, SessionState, SessionSummary, WireFormat,
     WireMessage, negotiate,
 };
-use keith_runtime_api::CommandRuntime;
+use keith_runtime_api::{RuntimeRequest, RuntimeResponse, RuntimeSession};
 use keith_supervisor::{
     SupervisorError, SupervisorOptions, WorkerEvent, WorkerStatus, WorkerSupervisor,
 };
@@ -210,6 +210,7 @@ pub struct DaemonOptions {
     pub supervisor: SupervisorOptions,
     pub idle_evict_after: Duration,
     pub maintenance_interval: Duration,
+    pub runtime_maintenance_interval: Duration,
     pub replay_capacity: usize,
     pub client_queue_capacity: usize,
     pub command_dedup_capacity: usize,
@@ -221,6 +222,7 @@ impl Default for DaemonOptions {
             supervisor: SupervisorOptions::default(),
             idle_evict_after: Duration::from_secs(15 * 60),
             maintenance_interval: Duration::from_millis(100),
+            runtime_maintenance_interval: Duration::from_secs(1),
             replay_capacity: 4_096,
             client_queue_capacity: 256,
             command_dedup_capacity: 4_096,
@@ -248,7 +250,8 @@ pub struct DaemonCore {
     command_ledger: CommandLedger,
     shutting_down: bool,
     startup_recovery: StartupRecoveryReport,
-    runtime: Option<Box<dyn CommandRuntime>>,
+    worker_runtime_enabled: bool,
+    last_runtime_maintenance: Option<Instant>,
 }
 
 #[derive(Debug, Error)]
@@ -286,14 +289,55 @@ impl DaemonCore {
         worker_executable: impl Into<PathBuf>,
         options: DaemonOptions,
     ) -> Result<Self, DaemonError> {
-        let data_root = data_root.into();
+        Self::open_internal(data_root.into(), worker_executable.into(), options, None)
+    }
+
+    /// Opens the daemon with worker-owned session execution enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when daemon state, worker configuration, or first-run bootstrap fails.
+    pub fn open_with_worker_runtime(
+        data_root: impl Into<PathBuf>,
+        worker_executable: impl Into<PathBuf>,
+        options: DaemonOptions,
+        runtime_config: impl Into<PathBuf>,
+    ) -> Result<Self, DaemonError> {
+        let mut daemon = Self::open_internal(
+            data_root.into(),
+            worker_executable.into(),
+            options,
+            Some(runtime_config.into()),
+        )?;
+        if daemon.catalog.is_empty() {
+            daemon.bootstrap_default_runtime_session()?;
+        }
+        Ok(daemon)
+    }
+
+    fn open_internal(
+        data_root: PathBuf,
+        worker_executable: PathBuf,
+        options: DaemonOptions,
+        runtime_config: Option<PathBuf>,
+    ) -> Result<Self, DaemonError> {
         fs::create_dir_all(&data_root)?;
         let (catalog, startup_recovery) = recover_daemon_startup(&data_root)?;
-        let mut supervisor = WorkerSupervisor::open(
-            data_root.join("runtime"),
-            worker_executable,
-            options.supervisor.clone(),
-        )?;
+        let worker_runtime_enabled = runtime_config.is_some();
+        let mut supervisor = if let Some(runtime_config) = runtime_config {
+            WorkerSupervisor::open_with_runtime_config(
+                data_root.join("runtime"),
+                worker_executable,
+                options.supervisor.clone(),
+                runtime_config,
+            )?
+        } else {
+            WorkerSupervisor::open(
+                data_root.join("runtime"),
+                worker_executable,
+                options.supervisor.clone(),
+            )?
+        };
         supervisor.adopt_existing()?;
         let command_ledger = CommandLedger::new(options.command_dedup_capacity)?;
         Ok(Self {
@@ -307,25 +351,9 @@ impl DaemonCore {
             command_ledger,
             shutting_down: false,
             startup_recovery,
-            runtime: None,
+            worker_runtime_enabled,
+            last_runtime_maintenance: None,
         })
-    }
-
-    /// Opens the daemon with the local command runtime enabled.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when daemon state, runtime bootstrap, or worker adoption fails.
-    pub fn open_with_runtime(
-        data_root: impl Into<PathBuf>,
-        worker_executable: impl Into<PathBuf>,
-        options: DaemonOptions,
-        runtime: Box<dyn CommandRuntime>,
-    ) -> Result<Self, DaemonError> {
-        let mut daemon = Self::open(data_root, worker_executable, options)?;
-        daemon.runtime = Some(runtime);
-        daemon.bootstrap_runtime_catalog()?;
-        Ok(daemon)
     }
 
     pub fn catalog(&self) -> &RootCatalog {
@@ -387,56 +415,58 @@ impl DaemonCore {
         let manifest = self
             .catalog
             .root(root_tree_id)
+            .cloned()
             .ok_or_else(|| DaemonError::UnknownRoot(root_tree_id.clone()))?;
-        let snapshot = self
-            .runtime
-            .as_ref()
-            .map_or_else(
-                || Ok::<_, String>(None),
-                |runtime| {
-                    if runtime
-                        .sessions()?
-                        .iter()
-                        .any(|session| session.session_id == manifest.root_session_id)
-                    {
-                        runtime
-                            .snapshot(&manifest.root_session_id, generation, manifest.state)
-                            .map(Some)
-                    } else {
-                        Ok(None)
-                    }
-                },
-            )
-            .map_err(DaemonError::Runtime)?
-            .unwrap_or_else(|| SessionSnapshot {
-                session: manifest.summary(),
+        let worker_snapshot = if self.worker_runtime_enabled {
+            match self.execute_worker(
+                root_tree_id,
                 generation,
-                through_sequence: Sequence::ZERO,
-                active_action: None,
-                actions: Vec::new(),
-                messages: Vec::new(),
-                goals: Vec::new(),
-                plans: Vec::new(),
-                children: Vec::new(),
-                kernels: Vec::new(),
-                commitments: Vec::new(),
-                schedules: Vec::new(),
-                tools: Vec::new(),
-                confirmations: Vec::new(),
-                waits: Vec::new(),
-                deliveries: Vec::new(),
-                memory_changes: Vec::new(),
-                usage: keith_protocol::UsageProjection::default(),
-                presence: keith_protocol::PresenceProjection {
+                RuntimeRequest::Snapshot {
                     session_id: manifest.root_session_id.clone(),
-                    goal_id: None,
-                    state: keith_protocol::PresenceState::Available,
-                    updated_at: manifest.updated_at,
-                    next_wake: None,
-                    safe_error: None,
+                    generation,
+                    state: manifest.state,
                 },
-                revision: Revision::ZERO,
-            });
+            )? {
+                RuntimeResponse::Snapshot(snapshot) => Some(*snapshot),
+                response => {
+                    return Err(DaemonError::Runtime(format!(
+                        "worker returned {} for snapshot",
+                        runtime_response_kind(&response)
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        let snapshot = worker_snapshot.unwrap_or_else(|| SessionSnapshot {
+            session: manifest.summary(),
+            generation,
+            through_sequence: Sequence::ZERO,
+            active_action: None,
+            actions: Vec::new(),
+            messages: Vec::new(),
+            goals: Vec::new(),
+            plans: Vec::new(),
+            children: Vec::new(),
+            kernels: Vec::new(),
+            commitments: Vec::new(),
+            schedules: Vec::new(),
+            tools: Vec::new(),
+            confirmations: Vec::new(),
+            waits: Vec::new(),
+            deliveries: Vec::new(),
+            memory_changes: Vec::new(),
+            usage: keith_protocol::UsageProjection::default(),
+            presence: keith_protocol::PresenceProjection {
+                session_id: manifest.root_session_id.clone(),
+                goal_id: None,
+                state: keith_protocol::PresenceState::Available,
+                updated_at: manifest.updated_at,
+                next_wake: None,
+                safe_error: None,
+            },
+            revision: Revision::ZERO,
+        });
         match self.event_hubs.get_mut(root_tree_id) {
             Some(hub) if hub.generation() != generation => {
                 hub.replace_generation(generation, snapshot)?;
@@ -466,8 +496,28 @@ impl DaemonCore {
     pub fn maintain(&mut self) -> Result<(), DaemonError> {
         self.last_worker_events = self.supervisor.monitor()?;
         self.supervisor.evict_idle(self.options.idle_evict_after)?;
-        if let Some(runtime) = &self.runtime {
-            runtime.maintain().map_err(DaemonError::Runtime)?;
+        let runtime_maintenance_due = self.worker_runtime_enabled
+            && self
+                .last_runtime_maintenance
+                .is_none_or(|last| last.elapsed() >= self.options.runtime_maintenance_interval);
+        if runtime_maintenance_due {
+            let workers = self.supervisor.statuses();
+            for worker in workers {
+                match self.execute_worker(
+                    &worker.root_tree_id,
+                    worker.generation,
+                    RuntimeRequest::Maintain,
+                )? {
+                    RuntimeResponse::Complete => {}
+                    response => {
+                        return Err(DaemonError::Runtime(format!(
+                            "worker returned {} for maintenance",
+                            runtime_response_kind(&response)
+                        )));
+                    }
+                }
+            }
+            self.last_runtime_maintenance = Some(Instant::now());
         }
         Ok(())
     }
@@ -556,9 +606,20 @@ impl DaemonCore {
         let connected_client_id = client.client_id.clone();
         let features = BTreeSet::from([
             Feature::SessionLifecycle,
+            Feature::Branching,
+            Feature::Steering,
+            Feature::Goals,
+            Feature::Children,
+            Feature::Schedules,
+            Feature::MemoryQueries,
+            Feature::Confirmations,
+            Feature::Export,
+            Feature::BackgroundControls,
             Feature::FramedJson,
             Feature::Replay,
             Feature::Snapshots,
+            Feature::DeliveryDispatch,
+            Feature::AttachmentStaging,
         ]);
         let hello = negotiate(
             &client,
@@ -698,22 +759,21 @@ impl DaemonCore {
     ) -> (CommandResult, Vec<keith_protocol::EventEnvelope>) {
         match command {
             ClientCommand::ListProfiles => {
-                let result = self.runtime.as_ref().map_or_else(
-                    || {
-                        Ok(self
-                            .catalog
-                            .roots
-                            .values()
-                            .map(|manifest| keith_protocol::ProfileSummary {
-                                id: manifest.profile_id.clone(),
-                                workspace_id: keith_agent_types::WorkspaceId::new(),
-                                display_name: manifest.profile_id.to_string(),
-                                enabled: true,
-                            })
-                            .collect())
-                    },
-                    |runtime| runtime.profiles(),
-                );
+                let result = if self.worker_runtime_enabled {
+                    self.runtime_profiles()
+                } else {
+                    Ok(self
+                        .catalog
+                        .roots
+                        .values()
+                        .map(|manifest| keith_protocol::ProfileSummary {
+                            id: manifest.profile_id.clone(),
+                            workspace_id: keith_agent_types::WorkspaceId::new(),
+                            display_name: manifest.profile_id.to_string(),
+                            enabled: true,
+                        })
+                        .collect())
+                };
                 match result {
                     Ok(profiles) => (
                         CommandResult::Data(Box::new(ResponsePayload::Profiles(profiles))),
@@ -800,23 +860,13 @@ impl DaemonCore {
                 }
             }
             ClientCommand::SelectModel(selection) => {
-                let result = self
-                    .runtime
-                    .as_ref()
-                    .ok_or_else(runtime_unavailable)
-                    .and_then(|runtime| {
-                        runtime
-                            .select_model(&selection)
-                            .map_err(DaemonError::Runtime)
-                    });
+                let result = self.select_runtime_model(&selection);
                 match result {
                     Ok(()) => (CommandResult::Accepted { action_id: None }, Vec::new()),
                     Err(error) => rejected_daemon(error),
                 }
             }
-            ClientCommand::SubmitPrompt(prompt) => match self
-                .run_prompt(&prompt.session_id, &prompt.text)
-            {
+            ClientCommand::SubmitPrompt(prompt) => match self.run_prompt(&prompt) {
                 Ok(snapshot) => (
                     CommandResult::Data(Box::new(ResponsePayload::Snapshot(Box::new(snapshot)))),
                     Vec::new(),
@@ -848,15 +898,12 @@ impl DaemonCore {
                     },
                     None => Generation::ZERO,
                 };
-                let result = self
-                    .runtime
-                    .as_ref()
-                    .ok_or_else(runtime_unavailable)
-                    .and_then(|runtime| {
-                        runtime
-                            .execute_feature(client_id, effective_session_id, &feature, generation)
-                            .map_err(DaemonError::Runtime)
-                    });
+                let result = self.execute_runtime_feature(
+                    client_id,
+                    effective_session_id,
+                    &feature,
+                    generation,
+                );
                 match result {
                     Ok(result) => {
                         if !matches!(result, CommandResult::Rejected(_))
@@ -900,36 +947,37 @@ impl DaemonCore {
         Ok(hub.attach(client_id.clone(), attach.resume.as_ref()))
     }
 
-    fn bootstrap_runtime_catalog(&mut self) -> Result<(), DaemonError> {
-        let runtime = self.runtime.as_ref().ok_or_else(runtime_unavailable)?;
-        let mut sessions = runtime.sessions().map_err(DaemonError::Runtime)?;
-        if sessions.is_empty() && self.catalog.is_empty() {
-            sessions.push(
-                runtime
-                    .create_default_session(Some("New conversation".into()))
-                    .map_err(DaemonError::Runtime)?,
-            );
+    fn bootstrap_default_runtime_session(&mut self) -> Result<(), DaemonError> {
+        if !self.worker_runtime_enabled {
+            return Err(runtime_unavailable());
         }
-        for session in sessions {
-            if self.catalog.root_for_session(&session.session_id).is_some() {
-                continue;
+        let session_id = SessionId::new();
+        let root_tree_id = RootTreeId::new();
+        let status = self.supervisor.start(root_tree_id.clone())?;
+        let response = self.execute_worker(
+            &root_tree_id,
+            status.generation,
+            RuntimeRequest::CreateDefaultSession {
+                session_id: session_id.clone(),
+                root_tree_id: root_tree_id.clone(),
+                title: Some("New conversation".into()),
+            },
+        );
+        let session = match response {
+            Ok(RuntimeResponse::Session(session)) => session,
+            Ok(response) => {
+                let _ = self.supervisor.drain(&root_tree_id);
+                return Err(DaemonError::Runtime(format!(
+                    "worker returned {} for default session creation",
+                    runtime_response_kind(&response)
+                )));
             }
-            let manifest = RootManifest {
-                version: CURRENT_SCHEMA_VERSION,
-                root_tree_id: session.root_tree_id,
-                root_session_id: session.session_id,
-                profile_id: session.profile_id,
-                title: session.title,
-                state: if session.archived {
-                    SessionState::Archived
-                } else {
-                    SessionState::Dormant
-                },
-                updated_at: session.created_at,
-            };
-            self.persist_root_manifest(&manifest)?;
-            self.catalog.insert(manifest)?;
-        }
+            Err(error) => {
+                let _ = self.supervisor.drain(&root_tree_id);
+                return Err(error);
+            }
+        };
+        self.insert_runtime_session(session, &session_id, &root_tree_id)?;
         Ok(())
     }
 
@@ -937,33 +985,194 @@ impl DaemonCore {
         &mut self,
         request: &keith_protocol::CreateSession,
     ) -> Result<SessionSnapshot, DaemonError> {
-        let session = self
-            .runtime
-            .as_ref()
-            .ok_or_else(runtime_unavailable)?
-            .create_session(request)
-            .map_err(DaemonError::Runtime)?;
+        if !self.worker_runtime_enabled {
+            return Err(runtime_unavailable());
+        }
+        let session_id = SessionId::new();
+        let root_tree_id = RootTreeId::new();
+        let status = self.supervisor.start(root_tree_id.clone())?;
+        let response = self.execute_worker(
+            &root_tree_id,
+            status.generation,
+            RuntimeRequest::CreateSession {
+                session_id: session_id.clone(),
+                root_tree_id: root_tree_id.clone(),
+                request: request.clone(),
+            },
+        );
+        let session = match response {
+            Ok(RuntimeResponse::Session(session)) => session,
+            Ok(response) => {
+                let _ = self.supervisor.drain(&root_tree_id);
+                return Err(DaemonError::Runtime(format!(
+                    "worker returned {} for session creation",
+                    runtime_response_kind(&response)
+                )));
+            }
+            Err(error) => {
+                let _ = self.supervisor.drain(&root_tree_id);
+                return Err(error);
+            }
+        };
+        self.insert_runtime_session(session, &session_id, &root_tree_id)?;
+        self.ensure_event_hub(&root_tree_id, status.generation)?;
+        self.runtime_snapshot(&session_id)
+    }
+
+    fn insert_runtime_session(
+        &mut self,
+        session: RuntimeSession,
+        expected_session_id: &SessionId,
+        expected_root_tree_id: &RootTreeId,
+    ) -> Result<(), DaemonError> {
+        if session.session_id != *expected_session_id
+            || session.root_tree_id != *expected_root_tree_id
+        {
+            return Err(DaemonError::Runtime(
+                "worker created a session outside its assigned lease".into(),
+            ));
+        }
         let manifest = RootManifest {
             version: CURRENT_SCHEMA_VERSION,
             root_tree_id: session.root_tree_id,
-            root_session_id: session.session_id.clone(),
+            root_session_id: session.session_id,
             profile_id: session.profile_id,
             title: session.title,
-            state: SessionState::Dormant,
+            state: if session.archived {
+                SessionState::Archived
+            } else {
+                SessionState::Dormant
+            },
             updated_at: session.created_at,
         };
         self.persist_root_manifest(&manifest)?;
         self.catalog.insert(manifest)?;
-        self.runtime_snapshot(&session.session_id)
+        Ok(())
+    }
+
+    fn execute_worker(
+        &mut self,
+        root_tree_id: &RootTreeId,
+        generation: Generation,
+        request: RuntimeRequest,
+    ) -> Result<RuntimeResponse, DaemonError> {
+        if !self.worker_runtime_enabled {
+            return Err(runtime_unavailable());
+        }
+        match self.supervisor.execute(root_tree_id, generation, request)? {
+            RuntimeResponse::Failed(error) => Err(DaemonError::Runtime(error)),
+            response => Ok(response),
+        }
+    }
+
+    fn runtime_route(
+        &mut self,
+        session_id: Option<&SessionId>,
+    ) -> Result<(RootTreeId, WorkerStatus), DaemonError> {
+        let session_id = session_id.cloned().or_else(|| {
+            self.catalog
+                .roots
+                .values()
+                .find(|manifest| manifest.state != SessionState::Archived)
+                .map(|manifest| manifest.root_session_id.clone())
+        });
+        let session_id = session_id.ok_or_else(runtime_unavailable)?;
+        let status = self.activate_session(&session_id)?;
+        let root = self
+            .catalog
+            .root_for_session(&session_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::UnknownSession(session_id.clone()))?;
+        Ok((root, status))
+    }
+
+    fn runtime_profiles(&mut self) -> Result<Vec<keith_protocol::ProfileSummary>, String> {
+        let (root, status) = self
+            .runtime_route(None)
+            .map_err(|error| error.to_string())?;
+        match self
+            .execute_worker(&root, status.generation, RuntimeRequest::Profiles)
+            .map_err(|error| error.to_string())?
+        {
+            RuntimeResponse::Profiles(profiles) => Ok(profiles),
+            response => Err(format!(
+                "worker returned {} for profile listing",
+                runtime_response_kind(&response)
+            )),
+        }
+    }
+
+    fn select_runtime_model(
+        &mut self,
+        selection: &keith_protocol::ModelSelection,
+    ) -> Result<(), DaemonError> {
+        let (root, status) = self.runtime_route(Some(&selection.session_id))?;
+        match self.execute_worker(
+            &root,
+            status.generation,
+            RuntimeRequest::SelectModel(selection.clone()),
+        )? {
+            RuntimeResponse::Complete => Ok(()),
+            response => Err(DaemonError::Runtime(format!(
+                "worker returned {} for model selection",
+                runtime_response_kind(&response)
+            ))),
+        }
+    }
+
+    fn execute_runtime_feature(
+        &mut self,
+        client_id: &keith_agent_types::ClientId,
+        session_id: Option<&SessionId>,
+        command: &ClientCommand,
+        generation: Generation,
+    ) -> Result<CommandResult, DaemonError> {
+        let (root, status) = self.runtime_route(session_id)?;
+        let generation = if session_id.is_some() {
+            generation
+        } else {
+            status.generation
+        };
+        match self.execute_worker(
+            &root,
+            status.generation,
+            RuntimeRequest::ExecuteFeature {
+                client_id: client_id.clone(),
+                scope_session_id: session_id.cloned(),
+                command: command.clone(),
+                generation,
+            },
+        )? {
+            RuntimeResponse::Command(result) => Ok(*result),
+            response => Err(DaemonError::Runtime(format!(
+                "worker returned {} for feature command",
+                runtime_response_kind(&response)
+            ))),
+        }
     }
 
     fn runtime_snapshot(&mut self, session_id: &SessionId) -> Result<SessionSnapshot, DaemonError> {
         let status = self.activate_session(session_id)?;
-        self.runtime
-            .as_ref()
-            .ok_or_else(runtime_unavailable)?
-            .snapshot(session_id, status.generation, SessionState::Ready)
-            .map_err(DaemonError::Runtime)
+        let root = self
+            .catalog
+            .root_for_session(session_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::UnknownSession(session_id.clone()))?;
+        match self.execute_worker(
+            &root,
+            status.generation,
+            RuntimeRequest::Snapshot {
+                session_id: session_id.clone(),
+                generation: status.generation,
+                state: SessionState::Ready,
+            },
+        )? {
+            RuntimeResponse::Snapshot(snapshot) => Ok(*snapshot),
+            response => Err(DaemonError::Runtime(format!(
+                "worker returned {} for snapshot",
+                runtime_response_kind(&response)
+            ))),
+        }
     }
 
     fn publish_runtime_snapshot(
@@ -976,12 +1185,23 @@ impl DaemonCore {
             .root_for_session(session_id)
             .cloned()
             .ok_or_else(|| DaemonError::UnknownSession(session_id.clone()))?;
-        let snapshot = self
-            .runtime
-            .as_ref()
-            .ok_or_else(runtime_unavailable)?
-            .snapshot(session_id, generation, SessionState::Ready)
-            .map_err(DaemonError::Runtime)?;
+        let snapshot = match self.execute_worker(
+            &root,
+            generation,
+            RuntimeRequest::Snapshot {
+                session_id: session_id.clone(),
+                generation,
+                state: SessionState::Ready,
+            },
+        )? {
+            RuntimeResponse::Snapshot(snapshot) => *snapshot,
+            response => {
+                return Err(DaemonError::Runtime(format!(
+                    "worker returned {} for snapshot publication",
+                    runtime_response_kind(&response)
+                )));
+            }
+        };
         if let Some(hub) = self.event_hubs.get_mut(&root) {
             let _ = hub.publish(DaemonEvent::Snapshot(Box::new(snapshot)))?;
         }
@@ -1014,24 +1234,30 @@ impl DaemonCore {
 
     fn run_prompt(
         &mut self,
-        session_id: &SessionId,
-        text: &str,
+        prompt: &keith_protocol::SubmitPrompt,
     ) -> Result<SessionSnapshot, DaemonError> {
-        let status = self.activate_session(session_id)?;
-        let snapshot = self
-            .runtime
-            .as_ref()
-            .ok_or_else(runtime_unavailable)?
-            .run_prompt(
-                &keith_protocol::SubmitPrompt {
-                    session_id: session_id.clone(),
-                    text: text.to_owned(),
-                    delivery: keith_protocol::DeliveryPolicy::Immediate,
-                    reply_route: None,
-                },
-                status.generation,
-            )
-            .map_err(DaemonError::Runtime)?;
+        let status = self.activate_session(&prompt.session_id)?;
+        let root = self
+            .catalog
+            .root_for_session(&prompt.session_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::UnknownSession(prompt.session_id.clone()))?;
+        let snapshot = match self.execute_worker(
+            &root,
+            status.generation,
+            RuntimeRequest::RunPrompt {
+                prompt: prompt.clone(),
+                generation: status.generation,
+            },
+        )? {
+            RuntimeResponse::Snapshot(snapshot) => *snapshot,
+            response => {
+                return Err(DaemonError::Runtime(format!(
+                    "worker returned {} for prompt",
+                    runtime_response_kind(&response)
+                )));
+            }
+        };
         let root = snapshot.session.root_tree_id.clone();
         if let Some(manifest) = self.catalog.roots.get_mut(&root) {
             manifest.state = SessionState::Ready;
@@ -1064,7 +1290,19 @@ impl DaemonCore {
 }
 
 fn runtime_unavailable() -> DaemonError {
-    DaemonError::Runtime("local runtime is disabled".into())
+    DaemonError::Runtime("worker runtime is disabled".into())
+}
+
+const fn runtime_response_kind(response: &RuntimeResponse) -> &'static str {
+    match response {
+        RuntimeResponse::Profiles(_) => "profiles",
+        RuntimeResponse::Sessions(_) => "sessions",
+        RuntimeResponse::Session(_) => "session",
+        RuntimeResponse::Snapshot(_) => "snapshot",
+        RuntimeResponse::Command(_) => "command",
+        RuntimeResponse::Complete => "complete",
+        RuntimeResponse::Failed(_) => "failed",
+    }
 }
 
 fn feature_session_id(command: &ClientCommand) -> Option<&SessionId> {
@@ -1079,6 +1317,7 @@ fn feature_session_id(command: &ClientCommand) -> Option<&SessionId> {
         ClientCommand::CreateChild(request) => Some(&request.parent_session_id),
         ClientCommand::CreateSchedule(request) => request.session_id.as_ref(),
         ClientCommand::Export(request) => Some(&request.session_id),
+        ClientCommand::StageAttachment(request) => Some(&request.session_id),
         _ => None,
     }
 }

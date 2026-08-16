@@ -11,6 +11,11 @@ publish = false
 name = "kernel-runner"
 path = "src/main.rs"
 
+[dependencies]
+keith-agent-types = { path = "../../crates/agent-types" }
+keith-kernel-broker = { path = "../../crates/kernel-broker" }
+keith-provider-core = { path = "../../crates/provider-core" }
+serde_json.workspace = true
+
 [lints]
 workspace = true
-
