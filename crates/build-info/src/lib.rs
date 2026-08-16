@@ -3,14 +3,24 @@
 use std::collections::BTreeSet;
 
 use keith_agent_types::{CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const BUILD_ID: &str = match option_env!("KEITH_BUILD_ID") {
     Some(value) => value,
     None => concat!(env!("CARGO_PKG_VERSION"), "+development"),
 };
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub const DAEMON_FEATURES: &[&str] = &["framed_json", "replay", "session_lifecycle", "snapshots"];
+pub const WORKER_FEATURES: &[&str] = &[
+    "agent_loop",
+    "anthropic",
+    "memory",
+    "openai",
+    "skills",
+    "tools",
+];
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildReport {
     pub component: String,
@@ -19,6 +29,14 @@ pub struct BuildReport {
     pub protocol_version: String,
     pub storage_schema: String,
     pub enabled_features: BTreeSet<String>,
+}
+
+pub fn daemon_report() -> BuildReport {
+    BuildReport::current("daemon", DAEMON_FEATURES)
+}
+
+pub fn worker_report() -> BuildReport {
+    BuildReport::current("worker", WORKER_FEATURES)
 }
 
 impl BuildReport {

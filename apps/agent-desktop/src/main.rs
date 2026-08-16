@@ -98,19 +98,35 @@ fn run() -> Result<(), String> {
             println!("{digest}");
             Ok(())
         }
+        Some("verify-release") => {
+            let release =
+                required_path(&mut arguments, "verify-release requires RELEASE_DIRECTORY")?;
+            let encoded_key = required_string(
+                &mut arguments,
+                "verify-release requires EXPECTED_PUBLIC_KEY_HEX",
+            )?;
+            let public_key = keith_release::decode_public_key(&encoded_key)
+                .map_err(|error| error.to_string())?;
+            let verified = keith_release::verify_release(&release, &public_key)
+                .map_err(|error| error.to_string())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&verified).map_err(|error| error.to_string())?
+            );
+            Ok(())
+        }
         Some("update") => {
             let state_root = required_path(&mut arguments, "update requires STATE_ROOT")?;
-            let version = required_string(&mut arguments, "update requires VERSION")?;
             let release = required_path(&mut arguments, "update requires RELEASE_DIRECTORY")?;
-            let digest = required_string(&mut arguments, "update requires EXPECTED_DIGEST")?;
+            let public_key =
+                required_string(&mut arguments, "update requires EXPECTED_PUBLIC_KEY_HEX")?;
             DesktopBootstrap::load(&state_root).map_err(|error| error.to_string())?;
             let manager =
                 DesktopUpdateManager::open(&state_root).map_err(|error| error.to_string())?;
             let active = manager
                 .activate(
-                    &version,
                     &release,
-                    &digest,
+                    &public_key,
                     UtcTimestamp::now().map_err(|error| error.to_string())?,
                 )
                 .map_err(|error| error.to_string())?;
@@ -195,5 +211,5 @@ fn uninstall_choice(value: &str) -> Result<UninstallChoice, String> {
 }
 
 fn usage() -> &'static str {
-    "usage: agent-desktop <setup-default [ORIGIN]|setup STATE_ROOT DATA_ROOT [ORIGIN]|settings STATE_ROOT|backup STATE_ROOT|restore BACKUP TARGET_DATA_ROOT|digest-release RELEASE_DIRECTORY|update STATE_ROOT VERSION RELEASE_DIRECTORY EXPECTED_DIGEST|rollback STATE_ROOT|uninstall-plan STATE_ROOT DATA_CHOICE|uninstall STATE_ROOT DATA_CHOICE CONFIRMATION|open ORIGIN [PATH]>"
+    "usage: agent-desktop <setup-default [ORIGIN]|setup STATE_ROOT DATA_ROOT [ORIGIN]|settings STATE_ROOT|backup STATE_ROOT|restore BACKUP TARGET_DATA_ROOT|digest-release RELEASE_DIRECTORY|verify-release RELEASE_DIRECTORY EXPECTED_PUBLIC_KEY_HEX|update STATE_ROOT RELEASE_DIRECTORY EXPECTED_PUBLIC_KEY_HEX|rollback STATE_ROOT|uninstall-plan STATE_ROOT DATA_CHOICE|uninstall STATE_ROOT DATA_CHOICE CONFIRMATION|open ORIGIN [PATH]>"
 }

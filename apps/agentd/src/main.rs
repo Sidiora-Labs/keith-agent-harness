@@ -60,10 +60,7 @@ impl Arguments {
                 return Ok(None);
             }
             if argument == "--build-info" {
-                let report = keith_build_info::BuildReport::current(
-                    "daemon",
-                    &["framed_json", "replay", "session_lifecycle", "snapshots"],
-                );
+                let report = keith_build_info::daemon_report();
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?

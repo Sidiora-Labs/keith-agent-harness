@@ -4,17 +4,7 @@ fn main() {
         return;
     }
     if matches!(std::env::args().nth(1).as_deref(), Some("--build-info")) {
-        let report = keith_build_info::BuildReport::current(
-            "worker",
-            &[
-                "agent_loop",
-                "anthropic",
-                "memory",
-                "openai",
-                "skills",
-                "tools",
-            ],
-        );
+        let report = keith_build_info::worker_report();
         match serde_json::to_string_pretty(&report) {
             Ok(json) => println!("{json}"),
             Err(error) => {

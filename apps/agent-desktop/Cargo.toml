@@ -22,6 +22,7 @@ keith-connection = { path = "../../crates/connection" }
 keith-daemon-core = { path = "../../crates/daemon-core" }
 keith-platform = { path = "../../crates/platform" }
 keith-protocol = { path = "../../crates/protocol" }
+keith-release = { path = "../../crates/release" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -33,6 +34,7 @@ url.workspace = true
 nix.workspace = true
 
 [dev-dependencies]
+ring.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -21,6 +21,7 @@ use keith_protocol::{
     ClientCommand, ClientHello, CommandEnvelope, CommandResult, ResponsePayload, SessionFilter,
     SessionSummary, WireFormat, WireMessage,
 };
+use keith_release::{ReleaseError, decode_public_key, verify_release};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -45,8 +46,8 @@ pub enum DesktopError {
     NotOwned,
     #[error("agent connection failed: {0}")]
     AgentConnection(String),
-    #[error("update digest did not match")]
-    DigestMismatch,
+    #[error("signed release verification failed: {0}")]
+    Release(#[from] ReleaseError),
     #[error("update version already exists")]
     VersionExists,
     #[error("update rollback target is unavailable")]
@@ -708,26 +709,32 @@ impl DesktopUpdateManager {
         Ok(hex_digest(hash.finalize()))
     }
 
-    /// Stages, verifies, and atomically activates a complete version directory.
+    /// Verifies, stages, re-verifies, and atomically activates a signed version directory.
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid version, duplicate target, digest mismatch, or unsafe content.
+    /// Returns an error for an untrusted signature, invalid version, duplicate target, or unsafe
+    /// content.
     pub fn activate(
         &self,
-        version: &str,
         source: &Path,
-        expected_digest: &str,
+        expected_public_key: &str,
         now: UtcTimestamp,
     ) -> Result<ActiveRelease, DesktopError> {
-        if !valid_version(version) {
+        let public_key = decode_public_key(expected_public_key)?;
+        let verified = verify_release(source, &public_key)?;
+        if verified.manifest.target
+            != format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+        {
             return Err(DesktopError::InvalidConfiguration);
         }
-        let digest = Self::digest_release(source)?;
-        if digest != expected_digest {
-            return Err(DesktopError::DigestMismatch);
+        let version = verified.manifest.version;
+        if !valid_version(&version) {
+            return Err(DesktopError::InvalidConfiguration);
         }
-        let target = self.root.join("versions").join(version);
+        self.ensure_trusted_public_key(&public_key)?;
+        let digest = Self::digest_release(source)?;
+        let target = self.root.join("versions").join(&version);
         if target.exists() {
             return Err(DesktopError::VersionExists);
         }
@@ -735,13 +742,27 @@ impl DesktopUpdateManager {
             .root
             .join("versions")
             .join(format!(".{version}-{}.tmp", EntityId::new()));
-        copy_tree(source, &temporary)?;
-        fs::rename(&temporary, &target)?;
+        let staged = (|| {
+            copy_tree(source, &temporary)?;
+            let copied = verify_release(&temporary, &public_key)?;
+            if copied.manifest.version != version {
+                return Err(DesktopError::InvalidConfiguration);
+            }
+            self.pin_trusted_public_key(&public_key)?;
+            fs::rename(&temporary, &target)?;
+            Ok(())
+        })();
+        if let Err(error) = staged {
+            if temporary.exists() {
+                fs::remove_dir_all(&temporary)?;
+            }
+            return Err(error);
+        }
         File::open(target.parent().ok_or(DesktopError::UnsafePath)?)?.sync_all()?;
         let previous = self.active().ok().map(|active| active.current);
         let active = ActiveRelease {
             version: CURRENT_SCHEMA_VERSION,
-            current: version.into(),
+            current: version,
             previous,
             digest,
             activated_at: now,
@@ -761,6 +782,11 @@ impl DesktopUpdateManager {
         let target = self.root.join("versions").join(&previous);
         if !target.is_dir() {
             return Err(DesktopError::RollbackUnavailable);
+        }
+        let public_key = self.trusted_public_key()?;
+        let verified = verify_release(&target, &public_key)?;
+        if verified.manifest.version != previous {
+            return Err(DesktopError::InvalidConfiguration);
         }
         let digest = Self::digest_release(&target)?;
         let rolled = ActiveRelease {
@@ -784,6 +810,44 @@ impl DesktopUpdateManager {
             self.root.join("active.json"),
         )?)?)
     }
+
+    fn pin_trusted_public_key(&self, public_key: &[u8; 32]) -> Result<(), DesktopError> {
+        let path = self.root.join("trusted-release-key.hex");
+        let encoded = keith_release::hex_encode(public_key);
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(encoded.as_bytes())?;
+                file.sync_all()?;
+                File::open(&self.root)?.sync_all()?;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if fs::read_to_string(path)?.trim() == encoded {
+                    Ok(())
+                } else {
+                    Err(ReleaseError::UntrustedPublicKey.into())
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn ensure_trusted_public_key(&self, public_key: &[u8; 32]) -> Result<(), DesktopError> {
+        let path = self.root.join("trusted-release-key.hex");
+        match fs::read_to_string(path) {
+            Ok(encoded) if decode_public_key(&encoded)? == *public_key => Ok(()),
+            Ok(_) => Err(ReleaseError::UntrustedPublicKey.into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn trusted_public_key(&self) -> Result<[u8; 32], DesktopError> {
+        decode_public_key(&fs::read_to_string(
+            self.root.join("trusted-release-key.hex"),
+        )?)
+        .map_err(DesktopError::from)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -806,7 +870,10 @@ pub fn plan_uninstall(settings: &DesktopSettings, choice: UninstallChoice) -> Un
         UninstallChoice::KeepUserData => vec![settings.state_root.join("updates")],
         UninstallChoice::RemoveRuntime => vec![
             settings.state_root.join("updates"),
+            settings.state_root.join("crashes"),
+            settings.state_root.join("notifications"),
             settings.data_root.join("runtime"),
+            settings.daemon_socket.clone(),
         ],
         UninstallChoice::RemoveEverything => {
             vec![settings.state_root.clone(), settings.data_root.clone()]
@@ -817,6 +884,15 @@ pub fn plan_uninstall(settings: &DesktopSettings, choice: UninstallChoice) -> Un
         exact_paths,
         confirmation: format!("REMOVE {}", settings.installation_id),
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupManifest {
+    version: SchemaVersion,
+    created_at: UtcTimestamp,
+    data_digest: String,
+    notifications_digest: String,
 }
 
 /// Executes only the exact confirmed uninstall plan.
@@ -861,16 +937,36 @@ pub fn execute_uninstall(
 ///
 /// Returns an error for unsafe source content or backup persistence failure.
 pub fn backup_state(settings: &DesktopSettings) -> Result<PathBuf, DesktopError> {
-    let backup = settings
-        .state_root
-        .join("backups")
-        .join(EntityId::new().to_string());
-    fs::create_dir(&backup)?;
-    copy_tree(&settings.data_root, &backup.join("data"))?;
-    copy_tree(
-        &settings.state_root.join("notifications"),
-        &backup.join("notifications"),
-    )?;
+    let backup_root = settings.state_root.join("backups");
+    reject_symlink(&backup_root)?;
+    let id = EntityId::new();
+    let backup = backup_root.join(id.to_string());
+    let temporary = backup_root.join(format!(".{id}.tmp"));
+    fs::create_dir(&temporary)?;
+    let result = (|| {
+        let data = temporary.join("data");
+        let notifications = temporary.join("notifications");
+        copy_tree(&settings.data_root, &data)?;
+        copy_tree(&settings.state_root.join("notifications"), &notifications)?;
+        atomic_json(
+            &temporary.join("backup.json"),
+            &BackupManifest {
+                version: CURRENT_SCHEMA_VERSION,
+                created_at: UtcTimestamp::now().map_err(|_| DesktopError::InvalidConfiguration)?,
+                data_digest: DesktopUpdateManager::digest_release(&data)?,
+                notifications_digest: DesktopUpdateManager::digest_release(&notifications)?,
+            },
+        )?;
+        fs::rename(&temporary, &backup)?;
+        File::open(&backup_root)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if temporary.exists() {
+            fs::remove_dir_all(&temporary)?;
+        }
+        return Err(error);
+    }
     Ok(backup)
 }
 
@@ -880,10 +976,44 @@ pub fn backup_state(settings: &DesktopSettings) -> Result<PathBuf, DesktopError>
 ///
 /// Returns an error for non-empty targets, symlinks, or invalid backup layout.
 pub fn restore_state(backup: &Path, target_data_root: &Path) -> Result<(), DesktopError> {
+    reject_symlink(backup)?;
+    let manifest =
+        serde_json::from_slice::<BackupManifest>(&fs::read(backup.join("backup.json"))?)?;
+    if manifest.version.major != CURRENT_SCHEMA_VERSION.major
+        || DesktopUpdateManager::digest_release(&backup.join("data"))? != manifest.data_digest
+        || DesktopUpdateManager::digest_release(&backup.join("notifications"))?
+            != manifest.notifications_digest
+    {
+        return Err(DesktopError::InvalidConfiguration);
+    }
     if target_data_root.exists() && fs::read_dir(target_data_root)?.next().is_some() {
         return Err(DesktopError::InvalidConfiguration);
     }
-    copy_tree(&backup.join("data"), target_data_root)
+    let parent = target_data_root.parent().ok_or(DesktopError::UnsafePath)?;
+    fs::create_dir_all(parent)?;
+    reject_symlink(parent)?;
+    let name = target_data_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(DesktopError::UnsafePath)?;
+    let temporary = parent.join(format!(".{name}-{}.tmp", EntityId::new()));
+    let result = (|| {
+        copy_tree(&backup.join("data"), &temporary)?;
+        if target_data_root.exists() {
+            reject_symlink(target_data_root)?;
+            fs::remove_dir(target_data_root)?;
+        }
+        fs::rename(&temporary, target_data_root)?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if temporary.exists() {
+            fs::remove_dir_all(&temporary)?;
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn validate_absolute_root(path: &Path) -> Result<(), DesktopError> {
@@ -1156,6 +1286,58 @@ pub fn random_hex(bytes: usize) -> Result<String, DesktopError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use keith_release::{
+        BuildReport, MANIFEST_FILE, MANIFEST_FORMAT, PACKAGE_NAME, PUBLIC_KEY_FILE, ReleaseFile,
+        ReleaseManifest, SIGNATURE_FILE,
+    };
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    fn signed_release(root: &Path, version: &str, payload: &[u8], seed: [u8; 32]) -> String {
+        fs::create_dir(root).unwrap();
+        fs::write(root.join("agentd"), payload).unwrap();
+        let build_id = "desktop-release-test";
+        let protocol_version = CURRENT_PROTOCOL_VERSION.to_string();
+        let storage_schema = CURRENT_SCHEMA_VERSION.to_string();
+        let report = |component: &str| BuildReport {
+            component: component.into(),
+            package_version: version.into(),
+            build_id: build_id.into(),
+            protocol_version: protocol_version.clone(),
+            storage_schema: storage_schema.clone(),
+            enabled_features: BTreeSet::from(["release-test".into()]),
+        };
+        let manifest = ReleaseManifest {
+            format: MANIFEST_FORMAT.into(),
+            package: PACKAGE_NAME.into(),
+            version: version.into(),
+            target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+            build_id: build_id.into(),
+            protocol_version,
+            storage_schema,
+            components: BTreeMap::from([
+                ("daemon".into(), report("daemon")),
+                ("worker".into(), report("worker")),
+            ]),
+            files: vec![ReleaseFile {
+                path: "agentd".into(),
+                bytes: u64::try_from(payload.len()).unwrap(),
+                sha256: keith_release::hex_encode(&Sha256::digest(payload)),
+            }],
+        };
+        let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        let key = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+        fs::write(root.join(MANIFEST_FILE), &bytes).unwrap();
+        fs::write(
+            root.join(SIGNATURE_FILE),
+            keith_release::hex_encode(key.sign(&bytes).as_ref()),
+        )
+        .unwrap();
+        let public_key = keith_release::hex_encode(key.public_key().as_ref());
+        fs::write(root.join(PUBLIC_KEY_FILE), &public_key).unwrap();
+        public_key
+    }
 
     #[test]
     fn first_run_notification_file_browser_backup_and_uninstall_are_scoped() {
@@ -1219,6 +1401,11 @@ mod tests {
             fs::read(restored.join("workspace/result.txt")).unwrap(),
             b"result"
         );
+        fs::write(backup.join("data/workspace/result.txt"), b"tampered").unwrap();
+        assert!(matches!(
+            restore_state(&backup, &directory.path().join("rejected-restore")),
+            Err(DesktopError::InvalidConfiguration)
+        ));
 
         let plan = plan_uninstall(&settings, UninstallChoice::RemoveEverything);
         assert!(matches!(
@@ -1238,26 +1425,22 @@ mod tests {
         let manager = DesktopUpdateManager::open(&state).unwrap();
         let first = directory.path().join("release-1");
         let second = directory.path().join("release-2");
-        fs::create_dir(&first).unwrap();
-        fs::create_dir(&second).unwrap();
-        fs::write(first.join("agentd"), b"version one").unwrap();
-        fs::write(second.join("agentd"), b"version two").unwrap();
-        let first_digest = DesktopUpdateManager::digest_release(&first).unwrap();
+        let public_key = signed_release(&first, "1.0.0", b"version one", [7_u8; 32]);
+        let second_public_key = signed_release(&second, "2.0.0", b"version two", [7_u8; 32]);
+        assert_eq!(public_key, second_public_key);
         manager
-            .activate("1.0.0", &first, &first_digest, UtcTimestamp::UNIX_EPOCH)
+            .activate(&first, &public_key, UtcTimestamp::UNIX_EPOCH)
             .unwrap();
         assert!(matches!(
-            manager.activate("2.0.0", &second, "wrong", UtcTimestamp::UNIX_EPOCH),
-            Err(DesktopError::DigestMismatch)
-        ));
-        let second_digest = DesktopUpdateManager::digest_release(&second).unwrap();
-        manager
-            .activate(
-                "2.0.0",
+            manager.activate(
                 &second,
-                &second_digest,
-                UtcTimestamp::from_unix_millis(1),
-            )
+                &keith_release::hex_encode(&[9_u8; 32]),
+                UtcTimestamp::UNIX_EPOCH
+            ),
+            Err(DesktopError::Release(ReleaseError::UntrustedPublicKey))
+        ));
+        manager
+            .activate(&second, &public_key, UtcTimestamp::from_unix_millis(1))
             .unwrap();
         let rolled = manager.rollback(UtcTimestamp::from_unix_millis(2)).unwrap();
         assert_eq!(rolled.current, "1.0.0");

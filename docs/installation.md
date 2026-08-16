@@ -1,17 +1,44 @@
 # Install and lifecycle
 
-Keith Agent releases are versioned directories whose signed manifest covers every executable and supporting asset. Verify `release-manifest.sig` against `release-public-key.hex` before installation. Published archives also carry a Sigstore bundle tied to the release workflow identity.
+Keith Agent releases are versioned directories whose signed manifest covers every executable and supporting asset. The `release-public-key.hex` file inside the release is a copy of the publisher key, not a trust root. Obtain the expected public-key value through an independent authenticated channel and require an exact match while verifying `release-manifest.sig`.
+
+For a source-built release, the build-side verifier accepts the release directory and independently obtained key:
+
+```sh
+cargo xtask verify-release /absolute/path/to/release EXPECTED_PUBLIC_KEY_HEX
+```
+
+An already trusted Keith installation can verify a downloaded update without a source checkout:
+
+```sh
+bin/agent-desktop verify-release /absolute/path/to/release EXPECTED_PUBLIC_KEY_HEX
+```
+
+Do not execute a newly downloaded release's own verifier as the only proof of that same release. First installation must be authenticated by the operating-system package channel, an independently obtained verifier, or the build-side command above.
 
 ## Install and first run
 
 1. Extract the archive into a new version directory. Do not merge it over an older release.
-2. Verify `release-manifest.sig`, then verify every file size and SHA-256 digest listed by `release-manifest.json`.
+2. Verify the publisher key, signature, exact payload file set, file sizes, and SHA-256 digests. Verification rejects unlisted files, duplicate paths, symlinks, and unsafe paths.
 3. Run `bin/agentd --build-info` and `bin/agent-worker --build-info`; confirm the build ID, protocol version, storage schema, and enabled features match the manifest.
 4. Initialize desktop settings with `bin/agent-desktop setup STATE_ROOT DATA_ROOT http://127.0.0.1:7341`.
 5. Configure a provider with the authenticated web settings page or the environment-only CLI flow below. Credentials do not belong in shell history, the release, or the data directory.
 6. Start `agentd` first, then a TUI or `agent-web`. Keep long-running processes attached to the operating system's user-service manager so stop and restart signals are delivered cleanly.
 
-The release contains `bin/`, `web/`, `builtins/`, `providers/providers.json`, `schemas/`, a CycloneDX SBOM, and a license report. User-created sessions, memory, credentials, logs, and backups are never stored inside the release directory.
+The release contains `bin/`, `web/`, `builtins/`, `providers/providers.json`, `schemas/`, `provenance/Cargo.lock`, a CycloneDX SBOM, and a license report. The signed manifest records the shared build ID and complete daemon and worker compatibility reports. User-created sessions, memory, credentials, logs, and backups are never stored inside the release directory.
+
+## Produce a release
+
+Release construction requires an explicit non-development build ID and a 32-byte Ed25519 signing seed encoded as 64 hexadecimal characters. Both values must be present before Cargo compiles the build tool so the packaged binaries and signed manifest receive the same build identity:
+
+```sh
+export KEITH_BUILD_ID='git-COMMIT_OR_RELEASE_BUILD_ID'
+export KEITH_RELEASE_SIGNING_KEY='64_HEXADECIMAL_CHARACTERS'
+cargo xtask release /absolute/path/to/new-release
+unset KEITH_RELEASE_SIGNING_KEY
+```
+
+Construction builds locked release binaries and Rust/WASM assets, assembles everything in a private sibling staging directory, signs and verifies the result, executes packaged daemon and worker build reports, and only then atomically promotes the complete directory. A failed build never promotes a partial release.
 
 ## Connect a provider and use the TUI
 
@@ -93,15 +120,16 @@ BACKUP_PATH="$(bin/agent-desktop backup STATE_ROOT)"
 bin/agent-desktop restore "$BACKUP_PATH" /absolute/path/to/empty-restored-data
 ```
 
+Backup construction uses a sibling staging directory and atomically promotes it only after writing a versioned manifest with data and notification-tree digests. Restore revalidates that manifest and both trees, rejects symlinks or modified bytes, and atomically promotes the restored data into an empty target. Notification state remains in the backup for inspection; it is not imported into a different desktop state root.
+
 Restore only into an empty data root, point desktop settings to it, and start the same or a schema-compatible release. Provider credentials remain in the native credential store and must be restored separately by that store's supported mechanism. Move any backup that must survive `remove-everything` outside `STATE_ROOT` before uninstalling.
 
 ## Update and rollback
 
-Verify the new release signature and manifest before staging it. Stage it as a complete new version, stop the service, atomically activate it, and restart. The lifecycle executable hashes the complete release tree before copying it:
+Verify the new release signature and manifest before staging it. Stage it as a complete new version, stop the service, atomically activate it, and restart. The lifecycle executable pins the independently supplied publisher key on first use, rejects key changes, verifies before copying, re-verifies the copied tree, and re-verifies a retained version during rollback:
 
 ```sh
-RELEASE_DIGEST="$(bin/agent-desktop digest-release /absolute/path/to/new-release)"
-bin/agent-desktop update STATE_ROOT 0.2.0 /absolute/path/to/new-release "$RELEASE_DIGEST"
+bin/agent-desktop update STATE_ROOT /absolute/path/to/new-release EXPECTED_PUBLIC_KEY_HEX
 bin/agent-desktop rollback STATE_ROOT
 ```
 
@@ -116,4 +144,4 @@ bin/agent-desktop uninstall-plan STATE_ROOT keep-user-data
 bin/agent-desktop uninstall STATE_ROOT keep-user-data 'REMOVE INSTALLATION_ID'
 ```
 
-`keep-user-data` removes only installed releases. `remove-runtime` also removes runtime state while retaining personal data. `remove-everything` removes the configured state and data roots. Native credential-store entries are a separate documented data class and must be removed through the authenticated settings flow or the operating system credential manager. No files are intentionally written outside the selected release, state, data, backup, and native credential-store locations.
+`keep-user-data` removes only installed release versions. `remove-runtime` additionally removes crash reports, notification state, the daemon socket, and the transient runtime directory while retaining sessions, profiles, memory, artifacts, indexes, schedules, and credentials. `remove-everything` removes the configured state and data roots. Native credential-store entries are a separate documented data class and must be removed through the authenticated settings flow or the operating system credential manager. No files are intentionally written outside the selected release, state, data, backup, and native credential-store locations.

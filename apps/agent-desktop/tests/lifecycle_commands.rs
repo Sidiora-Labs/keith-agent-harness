@@ -1,8 +1,16 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use keith_agent_types::{CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION};
+use keith_release::{
+    BuildReport, MANIFEST_FILE, MANIFEST_FORMAT, PACKAGE_NAME, PUBLIC_KEY_FILE, ReleaseFile,
+    ReleaseManifest, SIGNATURE_FILE,
+};
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 fn desktop(arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_agent-desktop"))
@@ -25,6 +33,51 @@ fn stdout(output: Output) -> String {
 
 fn path_string(path: &Path) -> String {
     path.to_str().expect("utf8 temporary path").to_owned()
+}
+
+fn signed_release(root: &Path, version: &str, payload: &[u8], seed: [u8; 32]) -> String {
+    fs::create_dir(root).unwrap();
+    fs::write(root.join("agentd"), payload).unwrap();
+    let build_id = "desktop-command-release-test";
+    let protocol_version = CURRENT_PROTOCOL_VERSION.to_string();
+    let storage_schema = CURRENT_SCHEMA_VERSION.to_string();
+    let report = |component: &str| BuildReport {
+        component: component.into(),
+        package_version: version.into(),
+        build_id: build_id.into(),
+        protocol_version: protocol_version.clone(),
+        storage_schema: storage_schema.clone(),
+        enabled_features: BTreeSet::from(["release-test".into()]),
+    };
+    let manifest = ReleaseManifest {
+        format: MANIFEST_FORMAT.into(),
+        package: PACKAGE_NAME.into(),
+        version: version.into(),
+        target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        build_id: build_id.into(),
+        protocol_version,
+        storage_schema,
+        components: BTreeMap::from([
+            ("daemon".into(), report("daemon")),
+            ("worker".into(), report("worker")),
+        ]),
+        files: vec![ReleaseFile {
+            path: "agentd".into(),
+            bytes: u64::try_from(payload.len()).unwrap(),
+            sha256: keith_release::hex_encode(&Sha256::digest(payload)),
+        }],
+    };
+    let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+    let key = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+    fs::write(root.join(MANIFEST_FILE), &bytes).unwrap();
+    fs::write(
+        root.join(SIGNATURE_FILE),
+        keith_release::hex_encode(key.sign(&bytes).as_ref()),
+    )
+    .unwrap();
+    let public_key = keith_release::hex_encode(key.public_key().as_ref());
+    fs::write(root.join(PUBLIC_KEY_FILE), &public_key).unwrap();
+    public_key
 }
 
 #[test]
@@ -57,29 +110,35 @@ fn executable_backup_update_rollback_restore_and_uninstall_lifecycle() {
 
     let release_one = directory.path().join("release-one");
     let release_two = directory.path().join("release-two");
-    fs::create_dir(&release_one).unwrap();
-    fs::create_dir(&release_two).unwrap();
-    fs::write(release_one.join("agentd"), b"version one").unwrap();
-    fs::write(release_two.join("agentd"), b"version two").unwrap();
+    let public_key = signed_release(&release_one, "1.0.0", b"version one", [11_u8; 32]);
+    assert_eq!(
+        public_key,
+        signed_release(&release_two, "2.0.0", b"version two", [11_u8; 32])
+    );
     let release_one_string = path_string(&release_one);
     let release_two_string = path_string(&release_two);
-    let digest_one = stdout(desktop(&["digest-release", &release_one_string]));
-    let digest_two = stdout(desktop(&["digest-release", &release_two_string]));
+    let verified: Value = serde_json::from_str(&stdout(desktop(&[
+        "verify-release",
+        &release_one_string,
+        &public_key,
+    ])))
+    .unwrap();
+    assert_eq!(verified["manifest"]["version"], "1.0.0");
+    assert!(verified["manifest_sha256"].as_str().is_some());
+    assert_eq!(verified["public_key_hex"], public_key);
     let active_one: Value = serde_json::from_str(&stdout(desktop(&[
         "update",
         &state_string,
-        "1.0.0",
         &release_one_string,
-        &digest_one,
+        &public_key,
     ])))
     .unwrap();
     assert_eq!(active_one["current"], "1.0.0");
     let active_two: Value = serde_json::from_str(&stdout(desktop(&[
         "update",
         &state_string,
-        "2.0.0",
         &release_two_string,
-        &digest_two,
+        &public_key,
     ])))
     .unwrap();
     assert_eq!(active_two["previous"], "1.0.0");

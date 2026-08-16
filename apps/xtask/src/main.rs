@@ -5,8 +5,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
-use serde::{Deserialize, Serialize};
+use keith_agent_types::EntityId;
+use keith_build_info::{BUILD_ID, BuildReport, daemon_report, worker_report};
+use keith_release::{
+    MANIFEST_FILE, PUBLIC_KEY_FILE, ReleaseFile, ReleaseManifest, SIGNATURE_FILE,
+    decode_public_key, hex_encode, verify_release as verify_signed_release,
+};
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -33,12 +38,9 @@ fn main() -> ExitCode {
         Some("security-gate") => security::run(&workspace_root()),
         Some("platform-gate") => platform::run(&workspace_root()),
         Some("release") => release(&workspace_root()),
-        Some("verify-release") => env::args_os().nth(2).map_or_else(
-            || Err("verify-release requires a release directory".into()),
-            |path| verify_release(&PathBuf::from(path)),
-        ),
+        Some("verify-release") => verify_release_command(),
         _ => Err(
-            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]|protocol-doc [--write]|provider-metadata [--write]|security-gate|platform-gate|release [OUTPUT]|verify-release PATH>".into(),
+            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]|protocol-doc [--write]|provider-metadata [--write]|security-gate|platform-gate|release [OUTPUT]|verify-release PATH EXPECTED_PUBLIC_KEY_HEX>".into(),
         ),
     };
 
@@ -51,78 +53,35 @@ fn main() -> ExitCode {
     }
 }
 
-#[derive(Deserialize, Serialize)]
-struct ReleaseManifest {
-    format: String,
-    package: String,
-    version: String,
-    target: String,
-    protocol_version: String,
-    storage_schema: String,
-    files: Vec<ReleaseFile>,
-}
-
-#[derive(Deserialize, Serialize)]
-struct ReleaseFile {
-    path: String,
-    bytes: u64,
-    sha256: String,
-}
-
-fn verify_release(root: &Path) -> Result<(), String> {
-    let manifest_bytes = fs::read(root.join("release-manifest.json"))
-        .map_err(|error| format!("release manifest is unavailable: {error}"))?;
-    let public_key = decode_hex_file(&root.join("release-public-key.hex"), 32)?;
-    let signature = decode_hex_file(&root.join("release-manifest.sig"), 64)?;
-    UnparsedPublicKey::new(&ED25519, public_key)
-        .verify(&manifest_bytes, &signature)
-        .map_err(|_| "release manifest signature is invalid".to_owned())?;
-    let manifest: ReleaseManifest =
-        serde_json::from_slice(&manifest_bytes).map_err(|error| error.to_string())?;
-    if manifest.format != "keith-release-manifest-v1" || manifest.package != "keith-agent" {
-        return Err("release manifest identity is invalid".into());
-    }
-    for file in &manifest.files {
-        let relative = Path::new(&file.path);
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
-            return Err(format!("release manifest path is unsafe: {}", file.path));
-        }
-        let bytes = fs::read(root.join(relative))
-            .map_err(|error| format!("release file {} is unavailable: {error}", file.path))?;
-        if u64::try_from(bytes.len()).map_err(|error| error.to_string())? != file.bytes
-            || hex_encode(&Sha256::digest(bytes)) != file.sha256
-        {
-            return Err(format!("release file digest mismatch: {}", file.path));
-        }
-    }
+fn verify_release_command() -> Result<(), String> {
+    let root = env::args_os()
+        .nth(2)
+        .map(PathBuf::from)
+        .ok_or_else(|| "verify-release requires a release directory".to_owned())?;
+    let encoded_key = env::args()
+        .nth(3)
+        .ok_or_else(|| "verify-release requires the trusted public key hex".to_owned())?;
+    let key = decode_public_key(&encoded_key).map_err(|error| error.to_string())?;
+    let verified = verify_signed_release(&root, &key).map_err(|error| error.to_string())?;
+    verify_packaged_build_reports(&root, &verified.manifest)?;
     println!(
-        "verified {} signed release files for {} {}",
-        manifest.files.len(),
-        manifest.package,
-        manifest.version
+        "verified {} signed release files for {} {} ({}) manifest_sha256={}",
+        verified.manifest.files.len(),
+        verified.manifest.package,
+        verified.manifest.version,
+        verified.manifest.build_id,
+        verified.manifest_sha256
     );
     Ok(())
 }
 
-fn decode_hex_file(path: &Path, expected_bytes: usize) -> Result<Vec<u8>, String> {
-    let encoded = fs::read_to_string(path)
-        .map_err(|error| format!("signature material is unavailable: {error}"))?;
-    let encoded = encoded.trim().as_bytes();
-    if encoded.len() != expected_bytes.saturating_mul(2) {
-        return Err("signature material has an invalid length".into());
-    }
-    encoded
-        .chunks_exact(2)
-        .map(|pair| Ok((hex_digit(pair[0])? << 4) | hex_digit(pair[1])?))
-        .collect()
-}
-
 #[allow(clippy::too_many_lines)]
 fn release(root: &Path) -> Result<(), String> {
+    if BUILD_ID.trim().is_empty() || BUILD_ID.ends_with("+development") {
+        return Err(
+            "release requires KEITH_BUILD_ID to be set before compiling and running xtask".into(),
+        );
+    }
     let target = format!("{}-{}", env::consts::ARCH, env::consts::OS);
     let destination = env::args_os().nth(2).map_or_else(
         || {
@@ -166,12 +125,50 @@ fn release(root: &Path) -> Result<(), String> {
         ],
     )?;
 
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = destination
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| "release destination name must be UTF-8".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let staging = parent.join(format!(".{name}-{}.tmp", EntityId::new()));
+    let result = assemble_release(root, &staging, target, &signing_key);
+    if let Err(error) = result {
+        if staging.exists() {
+            fs::remove_dir_all(&staging).map_err(|cleanup| {
+                format!("{error}; failed to remove staging release: {cleanup}")
+            })?;
+        }
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&staging, &destination) {
+        fs::remove_dir_all(&staging).map_err(|cleanup| {
+            format!("failed to promote release: {error}; failed to remove staging: {cleanup}")
+        })?;
+        return Err(format!("failed to promote release: {error}"));
+    }
+    println!("release written to {}", destination.display());
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn assemble_release(
+    root: &Path,
+    destination: &Path,
+    target: String,
+    signing_key: &Ed25519KeyPair,
+) -> Result<(), String> {
     let bin = destination.join("bin");
     let web = destination.join("web");
     let schemas = destination.join("schemas");
+    let provenance = destination.join("provenance");
     fs::create_dir_all(&bin).map_err(|error| error.to_string())?;
     fs::create_dir_all(&web).map_err(|error| error.to_string())?;
     fs::create_dir_all(&schemas).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&provenance).map_err(|error| error.to_string())?;
     let release_root = target_directory(root).join("release");
     for binary in [
         "agentd",
@@ -219,6 +216,13 @@ fn release(root: &Path) -> Result<(), String> {
         destination.join("docs/installation.md"),
     )
     .map_err(|error| error.to_string())?;
+    fs::copy(
+        root.join("docs/release-qualification.md"),
+        destination.join("docs/release-qualification.md"),
+    )
+    .map_err(|error| error.to_string())?;
+    fs::copy(root.join("Cargo.lock"), provenance.join("Cargo.lock"))
+        .map_err(|error| error.to_string())?;
     fs::write(
         schemas.join("agent-connection.md"),
         keith_protocol::schema_markdown().map_err(|error| error.to_string())?,
@@ -229,33 +233,69 @@ fn release(root: &Path) -> Result<(), String> {
         keith_agent_types::schema_markdown().map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
-    write_dependency_reports(root, &destination)?;
+    write_dependency_reports(root, destination)?;
 
     let files = release_files(&destination)?;
+    let daemon = daemon_report();
+    let worker = worker_report();
     let manifest = ReleaseManifest {
-        format: "keith-release-manifest-v1".into(),
-        package: "keith-agent".into(),
+        format: keith_release::MANIFEST_FORMAT.into(),
+        package: keith_release::PACKAGE_NAME.into(),
         version: env!("CARGO_PKG_VERSION").into(),
         target,
+        build_id: BUILD_ID.into(),
         protocol_version: keith_agent_types::CURRENT_PROTOCOL_VERSION.to_string(),
         storage_schema: keith_agent_types::CURRENT_SCHEMA_VERSION.to_string(),
+        components: BTreeMap::from([
+            (daemon.component.clone(), daemon),
+            (worker.component.clone(), worker),
+        ]),
         files,
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
-    fs::write(destination.join("release-manifest.json"), &manifest_bytes)
+    fs::write(destination.join(MANIFEST_FILE), &manifest_bytes)
         .map_err(|error| error.to_string())?;
     let signature = signing_key.sign(&manifest_bytes);
     fs::write(
-        destination.join("release-manifest.sig"),
+        destination.join(SIGNATURE_FILE),
         hex_encode(signature.as_ref()),
     )
     .map_err(|error| error.to_string())?;
-    fs::write(
-        destination.join("release-public-key.hex"),
-        hex_encode(signing_key.public_key().as_ref()),
-    )
-    .map_err(|error| error.to_string())?;
-    println!("release written to {}", destination.display());
+    let public_key: [u8; 32] = signing_key
+        .public_key()
+        .as_ref()
+        .try_into()
+        .map_err(|_| "release signing public key has an invalid length".to_owned())?;
+    fs::write(destination.join(PUBLIC_KEY_FILE), hex_encode(&public_key))
+        .map_err(|error| error.to_string())?;
+    let verified =
+        verify_signed_release(destination, &public_key).map_err(|error| error.to_string())?;
+    verify_packaged_build_reports(destination, &verified.manifest)?;
+    Ok(())
+}
+
+fn verify_packaged_build_reports(root: &Path, manifest: &ReleaseManifest) -> Result<(), String> {
+    for (component, binary) in [("daemon", "agentd"), ("worker", "agent-worker")] {
+        let expected = manifest
+            .components
+            .get(component)
+            .ok_or_else(|| format!("release manifest is missing {component} build information"))?;
+        let filename = format!("{binary}{}", env::consts::EXE_SUFFIX);
+        let output = Command::new(root.join("bin").join(filename))
+            .arg("--build-info")
+            .output()
+            .map_err(|error| format!("failed to execute packaged {binary}: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("packaged {binary} --build-info failed"));
+        }
+        let actual: BuildReport =
+            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        if &actual != expected {
+            return Err(format!(
+                "packaged {binary} build information does not match the signed manifest"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -354,10 +394,9 @@ fn release_files(root: &Path) -> Result<Vec<ReleaseFile>, String> {
     paths
         .into_iter()
         .filter(|path| {
-            !matches!(
-                path.to_string_lossy().as_ref(),
-                "release-manifest.json" | "release-manifest.sig" | "release-public-key.hex"
-            )
+            path != Path::new(MANIFEST_FILE)
+                && path != Path::new(SIGNATURE_FILE)
+                && path != Path::new(PUBLIC_KEY_FILE)
         })
         .map(|relative| {
             let path = root.join(&relative);
@@ -412,15 +451,6 @@ fn hex_digit(value: u8) -> Result<u8, String> {
         b'A'..=b'F' => Ok(value - b'A' + 10),
         _ => Err("hexadecimal value is invalid".into()),
     }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    encoded
 }
 
 fn workspace_root() -> PathBuf {
