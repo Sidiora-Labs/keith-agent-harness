@@ -11,6 +11,7 @@ publish = false
 keith-agent-types = { path = "../agent-types" }
 keith-connection = { path = "../connection" }
 keith-protocol = { path = "../protocol" }
+keith-runtime-api = { path = "../runtime-api" }
 keith-scheduler = { path = "../scheduler" }
 keith-session-store = { path = "../session-store" }
 keith-state-store = { path = "../state-store" }

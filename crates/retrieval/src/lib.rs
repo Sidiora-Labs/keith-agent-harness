@@ -904,6 +904,12 @@ fn collect_workspace_sources(
         "knowledge",
         "skills",
         "summaries",
+        ".keith/MEMORY.md",
+        ".keith/memory/daily",
+        ".keith/state",
+        ".keith/knowledge",
+        ".keith/skills",
+        ".keith/summaries",
     ] {
         collect_supported_files(&root, Path::new(relative), &mut files, limits)?;
     }
@@ -975,6 +981,7 @@ fn collect_supported_files(
 }
 
 fn classify_source(path: &str) -> Result<SearchSourceKind, RetrievalError> {
+    let path = path.strip_prefix(".keith/").unwrap_or(path);
     if path == "MEMORY.md" {
         Ok(SearchSourceKind::DurableMemory)
     } else if path.starts_with("memory/daily/") {
@@ -1347,5 +1354,45 @@ mod tests {
         assert!(!recovered.health_snapshot().unwrap().degraded);
         let results = recovered.search(&profile, "derived-index loss", 5).unwrap();
         assert_eq!(results[0].source_path, "knowledge/recovery.md");
+    }
+
+    #[test]
+    fn hidden_profile_layout_is_indexed_with_truthful_source_paths() {
+        let directory = tempdir().unwrap();
+        let index_root = directory.path().join("index");
+        let workspace = directory.path().join("workspace");
+        fs::create_dir_all(workspace.join(".keith/memory/daily")).unwrap();
+        fs::create_dir_all(workspace.join(".keith/skills/release")).unwrap();
+        fs::write(
+            workspace.join(".keith/MEMORY.md"),
+            "# Preference\nUse the stable release channel.",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join(".keith/memory/daily/2026-08-16.md"),
+            "# Today\nVerified the packaged daemon.",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join(".keith/skills/release/SKILL.md"),
+            "# Release\nValidate artifacts before activation.",
+        )
+        .unwrap();
+
+        let profile = ProfileId::new();
+        let retrieval = service(&index_root, false);
+        retrieval
+            .rebuild_workspace(&profile, &workspace, UtcTimestamp::UNIX_EPOCH)
+            .unwrap();
+
+        let memory = retrieval.search(&profile, "stable release", 5).unwrap();
+        assert_eq!(memory[0].source_path, ".keith/MEMORY.md");
+        assert_eq!(memory[0].source_kind, SearchSourceKind::DurableMemory);
+        let daily = retrieval.search(&profile, "packaged daemon", 5).unwrap();
+        assert_eq!(daily[0].source_kind, SearchSourceKind::DailyMemory);
+        let skill = retrieval
+            .search(&profile, "artifacts activation", 5)
+            .unwrap();
+        assert_eq!(skill[0].source_kind, SearchSourceKind::Skill);
     }
 }

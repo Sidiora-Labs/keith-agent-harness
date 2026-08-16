@@ -8,7 +8,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+keith-build-info = { path = "../../crates/build-info" }
 keith-worker-runtime = { path = "../../crates/worker-runtime" }
+serde_json.workspace = true
 
 [[bin]]
 name = "agent-worker"

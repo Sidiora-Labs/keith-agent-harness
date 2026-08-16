@@ -10,9 +10,12 @@ publish = false
 [dependencies]
 keith-agent-types = { path = "../../crates/agent-types" }
 keith-platform = { path = "../../crates/platform" }
+keith-provider-catalog = { path = "../../crates/provider-catalog" }
 keith-protocol = { path = "../../crates/protocol" }
 serde.workspace = true
 serde_json.workspace = true
+ring.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

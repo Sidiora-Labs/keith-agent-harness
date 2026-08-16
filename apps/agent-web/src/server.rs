@@ -22,7 +22,7 @@ use keith_connection::{
 };
 use keith_credentials::{
     BrowserWritePolicy, CredentialOwner, CredentialRef, CsrfToken, EncryptedCredentialStore,
-    MasterKey, NativeMasterKeyStore, SecretValue,
+    MasterKey, NativeMasterKeyStore, RestrictedMasterKeyStore, SecretValue,
 };
 use keith_framing::FrameError;
 use keith_platform::PlatformPaths;
@@ -31,6 +31,7 @@ use keith_protocol::{
     CommandResultEnvelope, Feature, ProfileSummary, ResponsePayload, ResumeCursor, SessionFilter,
     SessionSummary, WireFormat, WireMessage,
 };
+use keith_provider_catalog::provider as provider_spec;
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -80,6 +81,7 @@ impl std::fmt::Debug for WebServerConfig {
 pub enum CredentialKeySource {
     Environment(String),
     Native { service: String, account: String },
+    Restricted(PathBuf),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -215,10 +217,7 @@ impl ServerArguments {
         let mut asset_root = PathBuf::from("apps/agent-web/static");
         let mut credential_root = None;
         let mut login_secret_env = "KEITH_WEB_LOGIN_SECRET".to_owned();
-        let mut credential_key_source = CredentialKeySource::Native {
-            service: "keith-agent".to_owned(),
-            account: "web-credential-master-key".to_owned(),
-        };
+        let mut credential_key_source = None;
         while let Some(argument) = arguments.next() {
             let argument = argument
                 .into_string()
@@ -251,19 +250,19 @@ impl ServerArguments {
                         .map_err(|_| "environment name must be UTF-8".to_owned())?;
                 }
                 "--credential-key-env" => {
-                    credential_key_source = CredentialKeySource::Environment(
+                    credential_key_source = Some(CredentialKeySource::Environment(
                         value
                             .into_string()
                             .map_err(|_| "environment name must be UTF-8".to_owned())?,
-                    );
+                    ));
                 }
                 "--credential-key-native-account" => {
-                    credential_key_source = CredentialKeySource::Native {
+                    credential_key_source = Some(CredentialKeySource::Native {
                         service: "keith-agent".to_owned(),
                         account: value
                             .into_string()
                             .map_err(|_| "native account must be UTF-8".to_owned())?,
-                    };
+                    });
                 }
                 _ => return Err(format!("unknown argument {argument}")),
             }
@@ -283,14 +282,17 @@ impl ServerArguments {
                 .as_ref()
                 .map(|paths| paths.credential_root.clone())
         });
+        let credential_root =
+            credential_root.ok_or_else(|| "native credential root is unavailable".to_owned())?;
+        let credential_key_source = credential_key_source
+            .unwrap_or_else(|| CredentialKeySource::Restricted(credential_root.clone()));
         Ok(Some(Self {
             bind,
             exact_origin,
             daemon_socket: daemon_socket
                 .ok_or_else(|| "native daemon endpoint is unavailable".to_owned())?,
             asset_root,
-            credential_root: credential_root
-                .ok_or_else(|| "native credential root is unavailable".to_owned())?,
+            credential_root,
             login_secret_env,
             credential_key_source,
         }))
@@ -319,6 +321,9 @@ impl ServerArguments {
                     .and_then(|store| store.load_or_create())
                     .map_err(|error| error.to_string())?
             }
+            CredentialKeySource::Restricted(root) => RestrictedMasterKeyStore::open(root)
+                .and_then(|store| store.load_or_create())
+                .map_err(|error| error.to_string())?,
         };
         Ok(WebServerConfig {
             bind: self.bind,
@@ -330,7 +335,7 @@ impl ServerArguments {
             login_secret,
             session_lifetime: Duration::from_secs(8 * 60 * 60),
             mutation_limit_per_second: 24,
-            daemon_timeout: Duration::from_secs(5),
+            daemon_timeout: Duration::from_secs(180),
         })
     }
 }
@@ -470,6 +475,9 @@ async fn write_credential(
     let scoped = tokio::task::spawn_blocking(move || bridge.profile_exists(&profile)).await;
     if !matches!(scoped, Ok(Ok(true))) {
         return safe_error(StatusCode::FORBIDDEN, "credential scope denied");
+    }
+    if provider_spec(&form.provider).is_none() {
+        return safe_error(StatusCode::BAD_REQUEST, "credential provider is invalid");
     }
     let origin = headers
         .get(header::ORIGIN)
@@ -625,6 +633,7 @@ impl DaemonBridge {
             .map(|id| ProfileSummary {
                 display_name: id.to_string(),
                 id,
+                workspace_id: keith_agent_types::WorkspaceId::new(),
                 enabled: true,
             })
             .collect::<Vec<_>>();
@@ -637,9 +646,9 @@ impl DaemonBridge {
     fn profile_exists(&self, profile: &ProfileId) -> Result<bool, BridgeError> {
         Ok(self
             .connect()?
-            .sessions(None)?
+            .profiles()?
             .iter()
-            .any(|candidate| &candidate.profile_id == profile))
+            .any(|candidate| &candidate.id == profile && candidate.enabled))
     }
 
     fn session_in_profile(
@@ -1094,7 +1103,7 @@ mod tests {
         assert!(defaults.credential_root.is_absolute());
         assert!(matches!(
             defaults.credential_key_source,
-            CredentialKeySource::Native { .. }
+            CredentialKeySource::Restricted(_)
         ));
     }
 

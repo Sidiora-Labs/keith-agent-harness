@@ -13,6 +13,7 @@ keith-agent-types = { path = "../../crates/agent-types" }
 keith-connection = { path = "../../crates/connection" }
 keith-platform = { path = "../../crates/platform" }
 keith-protocol = { path = "../../crates/protocol" }
+keith-provider-catalog = { path = "../../crates/provider-catalog" }
 keith-ui-model = { path = "../../crates/ui-model" }
 ratatui.workspace = true
 signal-hook.workspace = true

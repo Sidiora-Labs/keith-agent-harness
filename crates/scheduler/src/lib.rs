@@ -511,6 +511,43 @@ where
         Ok(projections)
     }
 
+    /// Lists stable projections owned by one session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persisted jobs cannot be decoded.
+    pub fn projections_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<ScheduleProjection>, SchedulerError> {
+        let mut projections = self
+            .load_jobs()?
+            .into_iter()
+            .filter(|stored| &stored.job.session_id == session_id)
+            .map(|stored| ScheduleProjection {
+                job_id: stored.job.id,
+                state: stored.job.state,
+                schedule: stored.job.schedule,
+                next_run: stored.job.next_run,
+                last_run: stored.job.last_run,
+                attempts: stored.job.attempt_count,
+                failures: stored.job.failure_count,
+                safe_error: stored.job.safe_error,
+            })
+            .collect::<Vec<_>>();
+        projections.sort_by(|left, right| left.job_id.cmp(&right.job_id));
+        Ok(projections)
+    }
+
+    /// Returns the session that owns a scheduled job.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the job is missing or corrupt.
+    pub fn session_id(&self, job_id: &JobId) -> Result<SessionId, SchedulerError> {
+        Ok(self.required_job(job_id)?.job.session_id)
+    }
+
     fn claim_job(
         &self,
         mut stored: StoredJob,

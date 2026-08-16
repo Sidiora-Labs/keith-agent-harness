@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use keith_agent_types::{
     CURRENT_PROTOCOL_VERSION, EntityId, Generation, MessageId, ProfileId, Revision, RootTreeId,
-    Sequence, SessionId, UtcTimestamp,
+    Sequence, SessionId, UtcTimestamp, WorkspaceId,
 };
 use keith_agent_web::{WebServer, WebServerConfig};
 use keith_connection::{AgentTransport, FramedTransport};
@@ -228,6 +228,7 @@ fn serve_protocol_connection(
                 command_id,
                 CommandResult::Data(Box::new(ResponsePayload::Profiles(vec![ProfileSummary {
                     id: profile.clone(),
+                    workspace_id: WorkspaceId::new(),
                     display_name: "Browser profile".into(),
                     enabled: true,
                 }]))),

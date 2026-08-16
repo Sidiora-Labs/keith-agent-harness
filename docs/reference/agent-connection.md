@@ -2110,10 +2110,14 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         },
         "id": {
           "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
         }
       },
       "required": [
         "id",
+        "workspace_id",
         "display_name",
         "enabled"
       ]

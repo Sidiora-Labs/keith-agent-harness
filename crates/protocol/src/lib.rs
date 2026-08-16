@@ -375,6 +375,7 @@ pub struct CommandError {
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
 pub struct ProfileSummary {
     pub id: ProfileId,
+    pub workspace_id: WorkspaceId,
     pub display_name: String,
     pub enabled: bool,
 }

@@ -127,10 +127,24 @@ pub enum OperatorCommand {
     ListSessions,
     SelectModel,
     ResolveConfirmation,
+    SelectBranch,
+    CreateGoal,
+    UpdateGoal,
+    ListGoals,
+    ListChildren,
+    CreateChild,
+    SendChildMessage,
+    ArchiveChild,
+    CreateSchedule,
+    UpdateSchedule,
+    DeleteSchedule,
+    QueryMemory,
+    Export,
+    SetBackgroundControl,
 }
 
 impl OperatorCommand {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 23] = [
         Self::SubmitPrompt,
         Self::Steer,
         Self::Cancel,
@@ -140,6 +154,20 @@ impl OperatorCommand {
         Self::ListSessions,
         Self::SelectModel,
         Self::ResolveConfirmation,
+        Self::SelectBranch,
+        Self::CreateGoal,
+        Self::UpdateGoal,
+        Self::ListGoals,
+        Self::ListChildren,
+        Self::CreateChild,
+        Self::SendChildMessage,
+        Self::ArchiveChild,
+        Self::CreateSchedule,
+        Self::UpdateSchedule,
+        Self::DeleteSchedule,
+        Self::QueryMemory,
+        Self::Export,
+        Self::SetBackgroundControl,
     ];
 }
 

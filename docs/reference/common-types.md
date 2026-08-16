@@ -29,6 +29,9 @@ Generated from `keith-agent-types` 0.1.0. Do not edit by hand.
     "delivery_id": {
       "type": "string"
     },
+    "entry_id": {
+      "type": "string"
+    },
     "fixture": {
       "$ref": "#/$defs/CommonCompatibilityFixture"
     },
@@ -87,6 +90,7 @@ Generated from `keith-agent-types` 0.1.0. Do not edit by hand.
     "command_id",
     "commitment_id",
     "delivery_id",
+    "entry_id",
     "goal_id",
     "job_id",
     "message_id",

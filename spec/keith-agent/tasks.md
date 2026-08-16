@@ -448,7 +448,7 @@
     - Implement fail-closed or explicit reduced-isolation behavior
     - Run the platform acceptance matrix on supported release environments
     - _Requirements: 46.1-46.5_
-  - [ ] 13.3 Reproducible release artifacts and installation lifecycle
+  - [-] 13.3 Reproducible release artifacts and installation lifecycle
     - Build daemon, worker, CLI, TUI, channel gateway, runners, web assets, desktop, built-ins, provider metadata, and schemas
     - Lock dependencies, sign artifacts, and generate software bill of materials and license report
     - Expose build/protocol/storage/feature versions

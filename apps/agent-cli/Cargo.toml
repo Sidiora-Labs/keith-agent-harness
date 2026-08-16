@@ -11,6 +11,11 @@ publish = false
 name = "agent-cli"
 path = "src/main.rs"
 
+[dependencies]
+keith-agent-types = { path = "../../crates/agent-types" }
+keith-credentials = { path = "../../crates/credentials" }
+keith-platform = { path = "../../crates/platform" }
+keith-provider-catalog = { path = "../../crates/provider-catalog" }
+
 [lints]
 workspace = true
-

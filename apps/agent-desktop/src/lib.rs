@@ -76,6 +76,29 @@ pub struct DesktopSettings {
 pub struct DesktopBootstrap;
 
 impl DesktopBootstrap {
+    /// Loads and validates existing desktop settings from an explicit state root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the settings are missing, malformed, unsafe, or belong to another
+    /// state root.
+    pub fn load(state_root: &Path) -> Result<DesktopSettings, DesktopError> {
+        validate_absolute_root(state_root)?;
+        reject_symlink(state_root)?;
+        let settings =
+            serde_json::from_slice::<DesktopSettings>(&fs::read(state_root.join("desktop.json"))?)?;
+        validate_absolute_root(&settings.state_root)?;
+        validate_absolute_root(&settings.data_root)?;
+        validate_loopback_origin(&settings.web_origin)?;
+        if settings.version.major != CURRENT_SCHEMA_VERSION.major
+            || settings.state_root != state_root
+            || !settings.daemon_socket.starts_with(&settings.data_root)
+        {
+            return Err(DesktopError::InvalidConfiguration);
+        }
+        Ok(settings)
+    }
+
     /// Creates or reopens desktop state in the native platform locations.
     ///
     /// # Errors
@@ -771,7 +794,7 @@ pub enum UninstallChoice {
     RemoveEverything,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct UninstallPlan {
     pub choice: UninstallChoice,
     pub exact_paths: Vec<PathBuf>,

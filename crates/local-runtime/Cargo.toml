@@ -1,0 +1,41 @@
+[package]
+name = "keith-local-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+keith-action-store = { path = "../action-store" }
+keith-agent-loop = { path = "../agent-loop" }
+keith-agent-types = { path = "../agent-types" }
+keith-artifacts = { path = "../artifacts" }
+keith-configuration = { path = "../configuration" }
+keith-credentials = { path = "../credentials" }
+keith-goals = { path = "../goals" }
+keith-model-registry = { path = "../model-registry" }
+keith-profile = { path = "../profile" }
+keith-provider-catalog = { path = "../provider-catalog" }
+keith-protocol = { path = "../protocol" }
+keith-provider-adapters = { path = "../provider-adapters" }
+keith-provider-core = { path = "../provider-core" }
+keith-retrieval = { path = "../retrieval" }
+keith-runtime-api = { path = "../runtime-api" }
+keith-scheduler = { path = "../scheduler" }
+keith-session = { path = "../session" }
+keith-session-store = { path = "../session-store" }
+keith-state-store = { path = "../state-store" }
+keith-state-store-core = { path = "../state-store-core" }
+keith-subagents = { path = "../subagents" }
+keith-tool-core = { path = "../tool-core" }
+keith-tool-runner-core = { path = "../tool-runner" }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

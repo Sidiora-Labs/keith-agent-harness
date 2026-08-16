@@ -168,6 +168,42 @@ impl ModelRegistry {
         Ok(models)
     }
 
+    /// Records a user-selected model for a registered provider. This supports providers
+    /// whose APIs do not expose model discovery while preserving real request validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider is unknown, the model is empty, or state is poisoned.
+    pub fn register_configured_model(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Result<(), RegistryError> {
+        if model.trim().is_empty() {
+            return Err(RegistryError::InvalidRoute(
+                "configured model must be non-empty".into(),
+            ));
+        }
+        let mut state = self.write()?;
+        if !state.providers.contains_key(provider) {
+            return Err(RegistryError::UnknownProvider(provider.into()));
+        }
+        state.models.insert(
+            (provider.into(), model.into()),
+            ModelDescriptor {
+                provider: provider.into(),
+                id: model.into(),
+                display_name: model.into(),
+                context_tokens: None,
+                output_tokens: None,
+                supports_tools: true,
+                supports_reasoning: true,
+                supports_vision: true,
+            },
+        );
+        Ok(())
+    }
+
     /// # Errors
     ///
     /// Returns an error when the route references unknown providers/models or is ambiguous.

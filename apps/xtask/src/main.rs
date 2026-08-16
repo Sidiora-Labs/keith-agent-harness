@@ -5,6 +5,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
 mod platform;
 mod security;
 
@@ -21,10 +26,19 @@ fn main() -> ExitCode {
             &workspace_root(),
             matches!(env::args().nth(2).as_deref(), Some("--write")),
         ),
+        Some("provider-metadata") => provider_metadata_document(
+            &workspace_root(),
+            matches!(env::args().nth(2).as_deref(), Some("--write")),
+        ),
         Some("security-gate") => security::run(&workspace_root()),
         Some("platform-gate") => platform::run(&workspace_root()),
+        Some("release") => release(&workspace_root()),
+        Some("verify-release") => env::args_os().nth(2).map_or_else(
+            || Err("verify-release requires a release directory".into()),
+            |path| verify_release(&PathBuf::from(path)),
+        ),
         _ => Err(
-            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]|protocol-doc [--write]|security-gate|platform-gate>".into(),
+            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]|protocol-doc [--write]|provider-metadata [--write]|security-gate|platform-gate|release [OUTPUT]|verify-release PATH>".into(),
         ),
     };
 
@@ -35,6 +49,378 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+#[derive(Deserialize, Serialize)]
+struct ReleaseManifest {
+    format: String,
+    package: String,
+    version: String,
+    target: String,
+    protocol_version: String,
+    storage_schema: String,
+    files: Vec<ReleaseFile>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ReleaseFile {
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+fn verify_release(root: &Path) -> Result<(), String> {
+    let manifest_bytes = fs::read(root.join("release-manifest.json"))
+        .map_err(|error| format!("release manifest is unavailable: {error}"))?;
+    let public_key = decode_hex_file(&root.join("release-public-key.hex"), 32)?;
+    let signature = decode_hex_file(&root.join("release-manifest.sig"), 64)?;
+    UnparsedPublicKey::new(&ED25519, public_key)
+        .verify(&manifest_bytes, &signature)
+        .map_err(|_| "release manifest signature is invalid".to_owned())?;
+    let manifest: ReleaseManifest =
+        serde_json::from_slice(&manifest_bytes).map_err(|error| error.to_string())?;
+    if manifest.format != "keith-release-manifest-v1" || manifest.package != "keith-agent" {
+        return Err("release manifest identity is invalid".into());
+    }
+    for file in &manifest.files {
+        let relative = Path::new(&file.path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(format!("release manifest path is unsafe: {}", file.path));
+        }
+        let bytes = fs::read(root.join(relative))
+            .map_err(|error| format!("release file {} is unavailable: {error}", file.path))?;
+        if u64::try_from(bytes.len()).map_err(|error| error.to_string())? != file.bytes
+            || hex_encode(&Sha256::digest(bytes)) != file.sha256
+        {
+            return Err(format!("release file digest mismatch: {}", file.path));
+        }
+    }
+    println!(
+        "verified {} signed release files for {} {}",
+        manifest.files.len(),
+        manifest.package,
+        manifest.version
+    );
+    Ok(())
+}
+
+fn decode_hex_file(path: &Path, expected_bytes: usize) -> Result<Vec<u8>, String> {
+    let encoded = fs::read_to_string(path)
+        .map_err(|error| format!("signature material is unavailable: {error}"))?;
+    let encoded = encoded.trim().as_bytes();
+    if encoded.len() != expected_bytes.saturating_mul(2) {
+        return Err("signature material has an invalid length".into());
+    }
+    encoded
+        .chunks_exact(2)
+        .map(|pair| Ok((hex_digit(pair[0])? << 4) | hex_digit(pair[1])?))
+        .collect()
+}
+
+#[allow(clippy::too_many_lines)]
+fn release(root: &Path) -> Result<(), String> {
+    let target = format!("{}-{}", env::consts::ARCH, env::consts::OS);
+    let destination = env::args_os().nth(2).map_or_else(
+        || {
+            Ok::<_, String>(target_directory(root).join("packages").join(format!(
+                "keith-agent-{}-{target}",
+                env!("CARGO_PKG_VERSION")
+            )))
+        },
+        |value| Ok(PathBuf::from(value)),
+    )?;
+    if destination.exists() {
+        return Err(format!(
+            "release destination already exists: {}",
+            destination.display()
+        ));
+    }
+    let signing_environment = "KEITH_RELEASE_SIGNING_KEY";
+    let signing_seed = env::var_os(signing_environment)
+        .ok_or_else(|| format!("{signing_environment} must contain a 64-character hex seed"))?;
+    let signing_seed = decode_signing_seed(signing_seed.as_encoded_bytes())?;
+    let signing_key = Ed25519KeyPair::from_seed_unchecked(&signing_seed)
+        .map_err(|_| "release signing key is invalid".to_owned())?;
+
+    run(
+        root,
+        "cargo",
+        &["build", "--workspace", "--bins", "--release", "--locked"],
+    )?;
+    run(
+        root,
+        "cargo",
+        &[
+            "build",
+            "-p",
+            "keith-agent-web",
+            "--lib",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--release",
+            "--locked",
+        ],
+    )?;
+
+    let bin = destination.join("bin");
+    let web = destination.join("web");
+    let schemas = destination.join("schemas");
+    fs::create_dir_all(&bin).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&web).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&schemas).map_err(|error| error.to_string())?;
+    let release_root = target_directory(root).join("release");
+    for binary in [
+        "agentd",
+        "agent-worker",
+        "agent-cli",
+        "agent-tui",
+        "channel-gateway",
+        "tool-runner",
+        "browser-runner",
+        "kernel-runner",
+        "agent-web",
+        "agent-desktop",
+    ] {
+        let filename = format!("{binary}{}", env::consts::EXE_SUFFIX);
+        let source = release_root.join(&filename);
+        if !source.is_file() {
+            return Err(format!("release binary is missing: {}", source.display()));
+        }
+        fs::copy(&source, bin.join(filename)).map_err(|error| error.to_string())?;
+    }
+    let wasm = target_directory(root).join("wasm32-unknown-unknown/release/keith_agent_web.wasm");
+    let status = Command::new("wasm-bindgen")
+        .args(["--target", "web", "--out-name", "agent_web", "--out-dir"])
+        .arg(&web)
+        .arg(&wasm)
+        .current_dir(root)
+        .status()
+        .map_err(|error| format!("failed to run wasm-bindgen: {error}"))?;
+    if !status.success() {
+        return Err(format!("wasm-bindgen failed with {status}"));
+    }
+    copy_tree(
+        &root.join("packaging/builtins"),
+        &destination.join("builtins"),
+    )?;
+    fs::create_dir_all(destination.join("providers")).map_err(|error| error.to_string())?;
+    fs::write(
+        destination.join("providers/providers.json"),
+        provider_metadata()?,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::create_dir_all(destination.join("docs")).map_err(|error| error.to_string())?;
+    fs::copy(
+        root.join("docs/installation.md"),
+        destination.join("docs/installation.md"),
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        schemas.join("agent-connection.md"),
+        keith_protocol::schema_markdown().map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        schemas.join("common-types.md"),
+        keith_agent_types::schema_markdown().map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    write_dependency_reports(root, &destination)?;
+
+    let files = release_files(&destination)?;
+    let manifest = ReleaseManifest {
+        format: "keith-release-manifest-v1".into(),
+        package: "keith-agent".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        target,
+        protocol_version: keith_agent_types::CURRENT_PROTOCOL_VERSION.to_string(),
+        storage_schema: keith_agent_types::CURRENT_SCHEMA_VERSION.to_string(),
+        files,
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+    fs::write(destination.join("release-manifest.json"), &manifest_bytes)
+        .map_err(|error| error.to_string())?;
+    let signature = signing_key.sign(&manifest_bytes);
+    fs::write(
+        destination.join("release-manifest.sig"),
+        hex_encode(signature.as_ref()),
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        destination.join("release-public-key.hex"),
+        hex_encode(signing_key.public_key().as_ref()),
+    )
+    .map_err(|error| error.to_string())?;
+    println!("release written to {}", destination.display());
+    Ok(())
+}
+
+fn provider_metadata() -> Result<Vec<u8>, String> {
+    let providers = keith_provider_catalog::BUILTIN_PROVIDERS
+        .iter()
+        .map(|provider| {
+            json!({
+                "id": provider.id,
+                "display_name": provider.display_name,
+                "transport": provider.transport.as_str(),
+                "credential_kind": provider.authentication.as_str(),
+                "credential_environment": provider.credential_environment,
+                "default_base_url": provider.default_base_url,
+                "default_model": provider.default_model,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_vec_pretty(&json!({
+        "schema_version": 1,
+        "providers": providers,
+    }))
+    .map_err(|error| error.to_string())
+}
+
+fn target_directory(root: &Path) -> PathBuf {
+    env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from)
+}
+
+fn write_dependency_reports(root: &Path, destination: &Path) -> Result<(), String> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--locked"])
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("failed to run cargo metadata: {error}"))?;
+    if !output.status.success() {
+        return Err("cargo metadata failed while generating dependency reports".into());
+    }
+    let metadata: Value =
+        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    let mut packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata omitted packages".to_owned())?
+        .iter()
+        .map(|package| {
+            let name = package["name"].as_str().unwrap_or_default();
+            let version = package["version"].as_str().unwrap_or_default();
+            let license = package["license"].as_str();
+            let mut component = serde_json::json!({
+                "type": "library",
+                "name": name,
+                "version": version,
+                "purl": format!("pkg:cargo/{name}@{version}")
+            });
+            if let Some(license) = license {
+                component["licenses"] = serde_json::json!([{"expression": license}]);
+            }
+            let report = serde_json::json!({
+                "name": name,
+                "version": version,
+                "license": license,
+                "repository": package["repository"].as_str()
+            });
+            (format!("{name}@{version}"), component, report)
+        })
+        .collect::<Vec<_>>();
+    packages.sort_by(|left, right| left.0.cmp(&right.0));
+    let sbom = serde_json::json!({
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "metadata": {"component": {"type": "application", "name": "keith-agent", "version": env!("CARGO_PKG_VERSION")}},
+        "components": packages.iter().map(|(_, component, _)| component).collect::<Vec<_>>()
+    });
+    let licenses = serde_json::json!({
+        "format": "keith-license-report-v1",
+        "packages": packages.iter().map(|(_, _, report)| report).collect::<Vec<_>>()
+    });
+    fs::write(
+        destination.join("sbom.cdx.json"),
+        serde_json::to_vec_pretty(&sbom).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        destination.join("licenses.json"),
+        serde_json::to_vec_pretty(&licenses).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn release_files(root: &Path) -> Result<Vec<ReleaseFile>, String> {
+    let mut paths = Vec::new();
+    collect_files(root, root, &mut paths)?;
+    paths.sort();
+    paths
+        .into_iter()
+        .filter(|path| {
+            !matches!(
+                path.to_string_lossy().as_ref(),
+                "release-manifest.json" | "release-manifest.sig" | "release-public-key.hex"
+            )
+        })
+        .map(|relative| {
+            let path = root.join(&relative);
+            let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+            Ok(ReleaseFile {
+                path: relative.to_string_lossy().replace('\\', "/"),
+                bytes: u64::try_from(bytes.len()).map_err(|error| error.to_string())?,
+                sha256: hex_encode(&Sha256::digest(bytes)),
+            })
+        })
+        .collect()
+}
+
+fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_dir() {
+            collect_files(root, &path, files)?;
+        } else if file_type.is_file() {
+            files.push(
+                path.strip_prefix(root)
+                    .map_err(|error| error.to_string())?
+                    .to_path_buf(),
+            );
+        } else {
+            return Err(format!(
+                "release contains unsupported entry: {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn decode_signing_seed(encoded: &[u8]) -> Result<[u8; 32], String> {
+    if encoded.len() != 64 {
+        return Err("release signing key must be 64 hexadecimal characters".into());
+    }
+    let mut decoded = [0_u8; 32];
+    for (target, pair) in decoded.iter_mut().zip(encoded.chunks_exact(2)) {
+        *target = (hex_digit(pair[0])? << 4) | hex_digit(pair[1])?;
+    }
+    Ok(decoded)
+}
+
+fn hex_digit(value: u8) -> Result<u8, String> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err("hexadecimal value is invalid".into()),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
 fn workspace_root() -> PathBuf {
@@ -51,6 +437,7 @@ fn ci() -> Result<(), String> {
     dependency_policy(&root)?;
     schema_document(&root, false)?;
     protocol_document(&root, false)?;
+    provider_metadata_document(&root, false)?;
     security::run(&root)?;
     run(
         &root,
@@ -89,6 +476,14 @@ fn protocol_document(root: &Path, write: bool) -> Result<(), String> {
 fn schema_document(root: &Path, write: bool) -> Result<(), String> {
     let path = root.join("docs/reference/common-types.md");
     let expected = keith_agent_types::schema_markdown().map_err(|error| error.to_string())?;
+    checked_generated_document(&path, expected, write)
+}
+
+fn provider_metadata_document(root: &Path, write: bool) -> Result<(), String> {
+    let path = root.join("packaging/providers.json");
+    let mut expected =
+        String::from_utf8(provider_metadata()?).map_err(|error| error.to_string())?;
+    expected.push('\n');
     checked_generated_document(&path, expected, write)
 }
 

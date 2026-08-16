@@ -130,6 +130,11 @@ impl HttpRuntime {
 #[derive(Clone)]
 pub struct OpenAiProvider {
     runtime: Arc<HttpRuntime>,
+    provider_id: String,
+    chat_path: String,
+    models_path: Option<String>,
+    catalog_model: Option<String>,
+    api_key_header: bool,
 }
 
 impl OpenAiProvider {
@@ -139,7 +144,48 @@ impl OpenAiProvider {
     pub fn new(config: ProviderHttpConfig) -> Result<Self, ProviderError> {
         Ok(Self {
             runtime: Arc::new(HttpRuntime::new(config)?),
+            provider_id: "openai".into(),
+            chat_path: "/v1/chat/completions".into(),
+            models_path: Some("/v1/models".into()),
+            catalog_model: None,
+            api_key_header: false,
         })
+    }
+
+    /// Creates an `OpenAI` chat-completions compatible provider whose base URL already
+    /// contains any provider-specific API prefix such as `/v1` or `/api/v3`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider ID, model, or HTTP configuration is invalid.
+    pub fn compatible(
+        provider_id: impl Into<String>,
+        config: ProviderHttpConfig,
+        catalog_model: impl Into<String>,
+        supports_model_discovery: bool,
+    ) -> Result<Self, ProviderError> {
+        let provider_id = provider_id.into();
+        let catalog_model = catalog_model.into();
+        if provider_id.trim().is_empty() || catalog_model.trim().is_empty() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "provider ID and catalog model must be non-empty",
+            ));
+        }
+        Ok(Self {
+            runtime: Arc::new(HttpRuntime::new(config)?),
+            provider_id,
+            chat_path: "/chat/completions".into(),
+            models_path: supports_model_discovery.then(|| "/models".into()),
+            catalog_model: Some(catalog_model),
+            api_key_header: false,
+        })
+    }
+
+    #[must_use]
+    pub fn with_api_key_header(mut self) -> Self {
+        self.api_key_header = true;
+        self
     }
 
     fn stream_inner(
@@ -150,15 +196,24 @@ impl OpenAiProvider {
         sink: &mut dyn ModelEventSink,
     ) -> Result<Usage, ProviderError> {
         let body = openai_request(request)?;
-        let authorization = format!("Bearer {}", credential.expose_utf8()?);
-        let response = self
+        let http_request = self
             .runtime
             .agent
-            .post(self.runtime.url("/v1/chat/completions"))
-            .header("authorization", &authorization)
-            .header("content-type", "application/json")
-            .send(&body)
-            .map_err(map_http_error)?;
+            .post(self.runtime.url(&self.chat_path))
+            .header("content-type", "application/json");
+        let response = if self.api_key_header {
+            http_request
+                .header("api-key", credential.expose_utf8()?)
+                .send(&body)
+        } else {
+            http_request
+                .header(
+                    "authorization",
+                    &format!("Bearer {}", credential.expose_utf8()?),
+                )
+                .send(&body)
+        }
+        .map_err(map_http_error)?;
         check_status(response.status().as_u16())?;
         emit(
             sink,
@@ -179,26 +234,259 @@ impl OpenAiProvider {
 }
 
 impl ModelProvider for OpenAiProvider {
-    fn provider_id(&self) -> &'static str {
-        "openai"
+    fn provider_id(&self) -> &str {
+        &self.provider_id
     }
 
     fn list_models(
         &self,
         credential: &ProviderCredential,
     ) -> Result<Vec<ModelDescriptor>, ProviderError> {
-        let authorization = format!("Bearer {}", credential.expose_utf8()?);
+        if let Some(path) = &self.models_path {
+            let request = self.runtime.agent.get(self.runtime.url(path));
+            let mut response = if self.api_key_header {
+                request.header("api-key", credential.expose_utf8()?).call()
+            } else {
+                request
+                    .header(
+                        "authorization",
+                        &format!("Bearer {}", credential.expose_utf8()?),
+                    )
+                    .call()
+            }
+            .map_err(map_http_error)?;
+            check_status(response.status().as_u16())?;
+            let bytes = read_bounded(&mut response, self.runtime.config.max_response_bytes)?;
+            let value: Value = serde_json::from_slice(&bytes).map_err(malformed)?;
+            model_list(&value, self.provider_id())
+        } else {
+            Ok(vec![catalog_descriptor(
+                self.provider_id(),
+                self.catalog_model.as_deref().ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::Internal,
+                        "compatible provider has no catalog model",
+                    )
+                })?,
+            )])
+        }
+    }
+
+    fn stream(
+        &self,
+        request: &ModelRequest,
+        credential: &ProviderCredential,
+        cancellation: &CancellationToken,
+        sink: &mut dyn ModelEventSink,
+    ) -> Result<Usage, ProviderError> {
+        validate_request(request)?;
+        cancellation.check()?;
+        self.runtime.register(&request.request_id, cancellation)?;
+        let result = self.stream_inner(request, credential, cancellation, sink);
+        self.runtime.unregister(&request.request_id);
+        result
+    }
+
+    fn count_tokens(
+        &self,
+        request: &ModelRequest,
+        _credential: &ProviderCredential,
+    ) -> Result<u64, ProviderError> {
+        validate_request(request)?;
+        approximate_token_count(request)
+    }
+
+    fn cancel(&self, request_id: &EntityId) -> Result<(), ProviderError> {
+        self.runtime.cancel(request_id)
+    }
+}
+
+#[derive(Clone)]
+pub struct OpenAiResponsesProvider {
+    runtime: Arc<HttpRuntime>,
+    provider_id: String,
+    responses_path: String,
+    catalog_model: String,
+    codex_account_header: bool,
+}
+
+impl OpenAiResponsesProvider {
+    /// Creates the `ChatGPT` subscription Codex Responses adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the HTTP configuration is invalid.
+    pub fn codex(
+        config: ProviderHttpConfig,
+        catalog_model: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
+        Ok(Self {
+            runtime: Arc::new(HttpRuntime::new(config)?),
+            provider_id: "openai-codex".into(),
+            responses_path: "/codex/responses".into(),
+            catalog_model: catalog_model.into(),
+            codex_account_header: true,
+        })
+    }
+
+    fn stream_inner(
+        &self,
+        request: &ModelRequest,
+        credential: &ProviderCredential,
+        cancellation: &CancellationToken,
+        sink: &mut dyn ModelEventSink,
+    ) -> Result<Usage, ProviderError> {
+        let body = openai_responses_request(request)?;
+        let secret = credential.expose_utf8()?;
+        let mut http_request = self
+            .runtime
+            .agent
+            .post(self.runtime.url(&self.responses_path))
+            .header("authorization", &format!("Bearer {secret}"))
+            .header("openai-beta", "responses=experimental")
+            .header("originator", "pi")
+            .header("user-agent", "keith-agent/0.1")
+            .header("accept", "text/event-stream")
+            .header("content-type", "application/json");
+        if self.codex_account_header {
+            http_request = http_request.header("chatgpt-account-id", &codex_account_id(secret)?);
+        }
+        let response = http_request.send(&body).map_err(map_http_error)?;
+        check_status(response.status().as_u16())?;
+        parse_openai_responses_stream(
+            response,
+            request,
+            cancellation,
+            sink,
+            self.runtime.config.max_response_bytes,
+        )
+    }
+}
+
+impl ModelProvider for OpenAiResponsesProvider {
+    fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
+    fn list_models(
+        &self,
+        _credential: &ProviderCredential,
+    ) -> Result<Vec<ModelDescriptor>, ProviderError> {
+        Ok(vec![catalog_descriptor(
+            self.provider_id(),
+            &self.catalog_model,
+        )])
+    }
+
+    fn stream(
+        &self,
+        request: &ModelRequest,
+        credential: &ProviderCredential,
+        cancellation: &CancellationToken,
+        sink: &mut dyn ModelEventSink,
+    ) -> Result<Usage, ProviderError> {
+        validate_request(request)?;
+        cancellation.check()?;
+        self.runtime.register(&request.request_id, cancellation)?;
+        let result = self.stream_inner(request, credential, cancellation, sink);
+        self.runtime.unregister(&request.request_id);
+        result
+    }
+
+    fn count_tokens(
+        &self,
+        request: &ModelRequest,
+        _credential: &ProviderCredential,
+    ) -> Result<u64, ProviderError> {
+        validate_request(request)?;
+        approximate_token_count(request)
+    }
+
+    fn cancel(&self, request_id: &EntityId) -> Result<(), ProviderError> {
+        self.runtime.cancel(request_id)
+    }
+}
+
+#[derive(Clone)]
+pub struct AmazonBedrockProvider {
+    runtime: Arc<HttpRuntime>,
+    catalog_model: String,
+}
+
+impl AmazonBedrockProvider {
+    /// Creates a Bedrock Converse adapter using the scoped
+    /// `AWS_BEARER_TOKEN_BEDROCK` credential flow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the HTTP configuration or model is invalid.
+    pub fn new(
+        config: ProviderHttpConfig,
+        catalog_model: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
+        let catalog_model = catalog_model.into();
+        if catalog_model.trim().is_empty() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "Bedrock catalog model must be non-empty",
+            ));
+        }
+        Ok(Self {
+            runtime: Arc::new(HttpRuntime::new(config)?),
+            catalog_model,
+        })
+    }
+
+    fn stream_inner(
+        &self,
+        request: &ModelRequest,
+        credential: &ProviderCredential,
+        cancellation: &CancellationToken,
+        sink: &mut dyn ModelEventSink,
+    ) -> Result<Usage, ProviderError> {
+        let model = percent_encode_path_segment(&request.model);
+        let path = format!("/model/{model}/converse");
         let mut response = self
             .runtime
             .agent
-            .get(self.runtime.url("/v1/models"))
-            .header("authorization", &authorization)
-            .call()
+            .post(self.runtime.url(&path))
+            .header(
+                "authorization",
+                &format!("Bearer {}", credential.expose_utf8()?),
+            )
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .send(&bedrock_request(request)?)
             .map_err(map_http_error)?;
         check_status(response.status().as_u16())?;
+        emit(
+            sink,
+            cancellation,
+            ModelEvent::Started {
+                provider_request_id: request_header(&response, "x-amzn-requestid"),
+                model: request.model.clone(),
+            },
+        )?;
         let bytes = read_bounded(&mut response, self.runtime.config.max_response_bytes)?;
+        cancellation.check()?;
         let value: Value = serde_json::from_slice(&bytes).map_err(malformed)?;
-        model_list(&value, self.provider_id())
+        normalize_bedrock_response(&value, cancellation, sink)
+    }
+}
+
+impl ModelProvider for AmazonBedrockProvider {
+    fn provider_id(&self) -> &'static str {
+        "amazon-bedrock"
+    }
+
+    fn list_models(
+        &self,
+        _credential: &ProviderCredential,
+    ) -> Result<Vec<ModelDescriptor>, ProviderError> {
+        Ok(vec![catalog_descriptor(
+            self.provider_id(),
+            &self.catalog_model,
+        )])
     }
 
     fn stream(
@@ -234,6 +522,13 @@ impl ModelProvider for OpenAiProvider {
 pub struct AnthropicProvider {
     runtime: Arc<HttpRuntime>,
     api_version: String,
+    provider_id: String,
+    messages_path: String,
+    models_path: Option<String>,
+    catalog_model: Option<String>,
+    credential_header: String,
+    bearer_authentication: bool,
+    default_headers: Vec<(String, String)>,
 }
 
 impl AnthropicProvider {
@@ -244,7 +539,95 @@ impl AnthropicProvider {
         Ok(Self {
             runtime: Arc::new(HttpRuntime::new(config)?),
             api_version: "2023-06-01".into(),
+            provider_id: "anthropic".into(),
+            messages_path: "/v1/messages".into(),
+            models_path: Some("/v1/models".into()),
+            catalog_model: None,
+            credential_header: "x-api-key".into(),
+            bearer_authentication: false,
+            default_headers: Vec::new(),
         })
+    }
+
+    /// Creates an Anthropic Messages compatible provider whose base URL contains
+    /// any provider-specific prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider ID, model, or HTTP configuration is invalid.
+    pub fn compatible(
+        provider_id: impl Into<String>,
+        config: ProviderHttpConfig,
+        catalog_model: impl Into<String>,
+        bearer_authentication: bool,
+    ) -> Result<Self, ProviderError> {
+        let provider_id = provider_id.into();
+        let catalog_model = catalog_model.into();
+        if provider_id.trim().is_empty() || catalog_model.trim().is_empty() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "provider ID and catalog model must be non-empty",
+            ));
+        }
+        Ok(Self {
+            runtime: Arc::new(HttpRuntime::new(config)?),
+            api_version: "2023-06-01".into(),
+            provider_id,
+            messages_path: "/v1/messages".into(),
+            models_path: None,
+            catalog_model: Some(catalog_model),
+            credential_header: if bearer_authentication {
+                "authorization".into()
+            } else {
+                "x-api-key".into()
+            },
+            bearer_authentication,
+            default_headers: Vec::new(),
+        })
+    }
+
+    /// Overrides the header used to transmit this provider's scoped credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the header name is empty.
+    pub fn with_credential_header(
+        mut self,
+        header: impl Into<String>,
+        bearer_authentication: bool,
+    ) -> Result<Self, ProviderError> {
+        let header = header.into();
+        if header.trim().is_empty() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "credential header must be non-empty",
+            ));
+        }
+        self.credential_header = header;
+        self.bearer_authentication = bearer_authentication;
+        Ok(self)
+    }
+
+    /// Adds a non-secret provider compatibility header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the name or value is empty.
+    pub fn with_default_header(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
+        let name = name.into();
+        let value = value.into();
+        if name.trim().is_empty() || value.trim().is_empty() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "provider compatibility header must be non-empty",
+            ));
+        }
+        self.default_headers.push((name, value));
+        Ok(self)
     }
 
     fn stream_inner(
@@ -255,15 +638,58 @@ impl AnthropicProvider {
         sink: &mut dyn ModelEventSink,
     ) -> Result<Usage, ProviderError> {
         let body = anthropic_request(request)?;
-        let response = self
+        let mut http_request = self
             .runtime
             .agent
-            .post(self.runtime.url("/v1/messages"))
-            .header("x-api-key", credential.expose_utf8()?)
+            .post(self.runtime.url(&self.messages_path))
             .header("anthropic-version", &self.api_version)
-            .header("content-type", "application/json")
-            .send(&body)
-            .map_err(map_http_error)?;
+            .header("content-type", "application/json");
+        for (name, value) in &self.default_headers {
+            http_request = http_request.header(name, value);
+        }
+        if self.provider_id == "github-copilot" {
+            let initiator = if request
+                .messages
+                .last()
+                .is_some_and(|message| message.role == MessageRole::User)
+            {
+                "user"
+            } else {
+                "agent"
+            };
+            http_request = http_request
+                .header("x-initiator", initiator)
+                .header("openai-intent", "conversation-edits");
+            if request.messages.iter().any(|message| {
+                message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::Image { .. }))
+            }) {
+                http_request = http_request.header("copilot-vision-request", "true");
+            }
+        }
+        let secret = credential.expose_utf8()?;
+        let oauth = secret.starts_with("sk-ant-oat");
+        if oauth {
+            http_request = http_request
+                .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20")
+                .header("x-app", "cli")
+                .header("user-agent", "keith-agent/0.1");
+        }
+        let credential_header = if oauth {
+            "authorization"
+        } else {
+            &self.credential_header
+        };
+        let response = if self.bearer_authentication || oauth {
+            http_request
+                .header(credential_header, &format!("Bearer {secret}"))
+                .send(&body)
+        } else {
+            http_request.header(credential_header, secret).send(&body)
+        }
+        .map_err(map_http_error)?;
         check_status(response.status().as_u16())?;
         emit(
             sink,
@@ -284,26 +710,52 @@ impl AnthropicProvider {
 }
 
 impl ModelProvider for AnthropicProvider {
-    fn provider_id(&self) -> &'static str {
-        "anthropic"
+    fn provider_id(&self) -> &str {
+        &self.provider_id
     }
 
     fn list_models(
         &self,
         credential: &ProviderCredential,
     ) -> Result<Vec<ModelDescriptor>, ProviderError> {
-        let mut response = self
-            .runtime
-            .agent
-            .get(self.runtime.url("/v1/models"))
-            .header("x-api-key", credential.expose_utf8()?)
-            .header("anthropic-version", &self.api_version)
-            .call()
-            .map_err(map_http_error)?;
-        check_status(response.status().as_u16())?;
-        let bytes = read_bounded(&mut response, self.runtime.config.max_response_bytes)?;
-        let value: Value = serde_json::from_slice(&bytes).map_err(malformed)?;
-        model_list(&value, self.provider_id())
+        if let Some(path) = &self.models_path {
+            let secret = credential.expose_utf8()?;
+            let oauth = secret.starts_with("sk-ant-oat");
+            let mut request = self
+                .runtime
+                .agent
+                .get(self.runtime.url(path))
+                .header("anthropic-version", &self.api_version);
+            for (name, value) in &self.default_headers {
+                request = request.header(name, value);
+            }
+            if oauth {
+                request = request
+                    .header("authorization", &format!("Bearer {secret}"))
+                    .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20")
+                    .header("x-app", "cli")
+                    .header("user-agent", "keith-agent/0.1");
+            } else if self.bearer_authentication {
+                request = request.header(&self.credential_header, &format!("Bearer {secret}"));
+            } else {
+                request = request.header(&self.credential_header, secret);
+            }
+            let mut response = request.call().map_err(map_http_error)?;
+            check_status(response.status().as_u16())?;
+            let bytes = read_bounded(&mut response, self.runtime.config.max_response_bytes)?;
+            let value: Value = serde_json::from_slice(&bytes).map_err(malformed)?;
+            model_list(&value, self.provider_id())
+        } else {
+            Ok(vec![catalog_descriptor(
+                self.provider_id(),
+                self.catalog_model.as_deref().ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::Internal,
+                        "compatible provider has no catalog model",
+                    )
+                })?,
+            )])
+        }
     }
 
     fn stream(
@@ -381,6 +833,305 @@ fn openai_request(request: &ModelRequest) -> Result<Vec<u8>, ProviderError> {
         body["reasoning_effort"] = json!(effort);
     }
     serde_json::to_vec(&body).map_err(internal)
+}
+
+fn openai_responses_request(request: &ModelRequest) -> Result<Vec<u8>, ProviderError> {
+    let instructions = request
+        .system
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let input = request
+        .messages
+        .iter()
+        .flat_map(openai_response_items)
+        .collect::<Vec<_>>();
+    let tools = request
+        .tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.input_schema,
+                "strict": false,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut body = json!({
+        "model": request.model,
+        "instructions": instructions,
+        "input": input,
+        "tools": tools,
+        "tool_choice": "auto",
+        "parallel_tool_calls": true,
+        "store": false,
+        "stream": true,
+    });
+    if let Some(max_tokens) = request.max_output_tokens {
+        body["max_output_tokens"] = json!(max_tokens);
+    }
+    if let Some(effort) = &request.reasoning_effort {
+        body["reasoning"] = json!({"effort": effort, "summary": "auto"});
+    }
+    serde_json::to_vec(&body).map_err(internal)
+}
+
+fn openai_response_items(message: &Message) -> Vec<Value> {
+    let role = match message.role {
+        MessageRole::System => "system",
+        MessageRole::User | MessageRole::Tool => "user",
+        MessageRole::Assistant => "assistant",
+    };
+    let mut content = Vec::new();
+    let mut items = Vec::new();
+    for block in &message.content {
+        match block {
+            ContentBlock::Text { text } => content.push(json!({
+                "type": if role == "assistant" {"output_text"} else {"input_text"},
+                "text": text,
+            })),
+            ContentBlock::Image { media_type, data } => content.push(json!({
+                "type": "input_image",
+                "image_url": format!("data:{media_type};base64,{data}"),
+            })),
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+            } => items.push(json!({
+                "type": "function_call",
+                "call_id": id.to_string(),
+                "name": name,
+                "arguments": arguments.to_string(),
+            })),
+            ContentBlock::ToolResult {
+                call_id,
+                content,
+                is_error,
+            } => items.push(json!({
+                "type": "function_call_output",
+                "call_id": call_id.to_string(),
+                "output": if *is_error { format!("ERROR: {content}") } else { content.clone() },
+            })),
+        }
+    }
+    if !content.is_empty() {
+        items.insert(0, json!({"role": role, "content": content}));
+    }
+    items
+}
+
+fn bedrock_request(request: &ModelRequest) -> Result<Vec<u8>, ProviderError> {
+    let system = request
+        .system
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(json!({"text": text})),
+            ContentBlock::Image { .. }
+            | ContentBlock::ToolCall { .. }
+            | ContentBlock::ToolResult { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let messages = request
+        .messages
+        .iter()
+        .map(|message| {
+            json!({
+                "role": if message.role == MessageRole::Assistant { "assistant" } else { "user" },
+                "content": message.content.iter().map(bedrock_content).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let tools = request
+        .tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "toolSpec": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": {"json": tool.input_schema},
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut body = json!({
+        "system": system,
+        "messages": messages,
+        "inferenceConfig": {
+            "maxTokens": request.max_output_tokens.unwrap_or(4096),
+        },
+    });
+    if let Some(temperature) = request.temperature {
+        body["inferenceConfig"]["temperature"] = json!(temperature);
+    }
+    if !tools.is_empty() {
+        body["toolConfig"] = json!({"tools": tools, "toolChoice": {"auto": {}}});
+    }
+    serde_json::to_vec(&body).map_err(internal)
+}
+
+fn bedrock_content(block: &ContentBlock) -> Value {
+    match block {
+        ContentBlock::Text { text } => json!({"text": text}),
+        ContentBlock::Image { media_type, data } => {
+            let format = media_type.rsplit('/').next().unwrap_or("png");
+            json!({"image": {"format": format, "source": {"bytes": data}}})
+        }
+        ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+        } => json!({
+            "toolUse": {
+                "toolUseId": id.to_string(),
+                "name": name,
+                "input": arguments,
+            }
+        }),
+        ContentBlock::ToolResult {
+            call_id,
+            content,
+            is_error,
+        } => json!({
+            "toolResult": {
+                "toolUseId": call_id.to_string(),
+                "content": [{"text": content}],
+                "status": if *is_error {"error"} else {"success"},
+            }
+        }),
+    }
+}
+
+fn normalize_bedrock_response(
+    value: &Value,
+    cancellation: &CancellationToken,
+    sink: &mut dyn ModelEventSink,
+) -> Result<Usage, ProviderError> {
+    let content = value["output"]["message"]["content"]
+        .as_array()
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::MalformedResponse,
+                "Bedrock response has no assistant content",
+            )
+        })?;
+    for block in content {
+        if let Some(text) = block["text"].as_str() {
+            emit(
+                sink,
+                cancellation,
+                ModelEvent::TextDelta { text: text.into() },
+            )?;
+        }
+        if let Some(tool) = block.get("toolUse") {
+            let id = ToolCallId::new();
+            let name = tool["name"].as_str().unwrap_or_default().to_owned();
+            let arguments = tool.get("input").cloned().unwrap_or_else(|| json!({}));
+            let delta = serde_json::to_string(&arguments).map_err(internal)?;
+            emit(
+                sink,
+                cancellation,
+                ModelEvent::ToolCallStarted {
+                    id: id.clone(),
+                    name: name.clone(),
+                },
+            )?;
+            emit(
+                sink,
+                cancellation,
+                ModelEvent::ToolCallArgumentsDelta {
+                    id: id.clone(),
+                    delta,
+                },
+            )?;
+            emit(
+                sink,
+                cancellation,
+                ModelEvent::ToolCallCompleted {
+                    id,
+                    name,
+                    arguments,
+                },
+            )?;
+        }
+    }
+    let usage = Usage {
+        input_tokens: value["usage"]["inputTokens"].as_u64().unwrap_or(0),
+        output_tokens: value["usage"]["outputTokens"].as_u64().unwrap_or(0),
+        cached_input_tokens: value["usage"]["cacheReadInputTokens"].as_u64().unwrap_or(0),
+    };
+    emit(sink, cancellation, ModelEvent::Usage { usage })?;
+    emit(
+        sink,
+        cancellation,
+        ModelEvent::Finished {
+            reason: bedrock_stop_reason(value["stopReason"].as_str().unwrap_or_default()),
+        },
+    )?;
+    Ok(usage)
+}
+
+fn codex_account_id(token: &str) -> Result<String, ProviderError> {
+    let payload = token.split('.').nth(1).ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "Codex OAuth token is not a JWT",
+        )
+    })?;
+    let decoded = decode_base64_url(payload)?;
+    let value: Value = serde_json::from_slice(&decoded).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Authentication,
+            "Codex OAuth token payload is invalid",
+        )
+    })?;
+    value["https://api.openai.com/auth"]["chatgpt_account_id"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "Codex OAuth token has no account identity",
+            )
+        })
+}
+
+fn decode_base64_url(encoded: &str) -> Result<Vec<u8>, ProviderError> {
+    let mut output = Vec::with_capacity(encoded.len().saturating_mul(3) / 4);
+    let mut buffer = 0_u32;
+    let mut bits = 0_u8;
+    for byte in encoded.bytes().filter(|byte| *byte != b'=') {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Authentication,
+                    "Codex OAuth token encoding is invalid",
+                ));
+            }
+        };
+        buffer = (buffer << 6) | u32::from(value);
+        bits = bits.saturating_add(6);
+        if bits >= 8 {
+            bits -= 8;
+            output.push(
+                u8::try_from((buffer >> bits) & 0xff).expect("base64 output is masked to one byte"),
+            );
+            buffer &= (1_u32 << bits).saturating_sub(1);
+        }
+    }
+    Ok(output)
 }
 
 fn anthropic_request(request: &ModelRequest) -> Result<Vec<u8>, ProviderError> {
@@ -520,6 +1271,156 @@ fn anthropic_content(content: &[ContentBlock]) -> Value {
             })
             .collect(),
     )
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_openai_responses_stream(
+    mut response: Response<ureq::Body>,
+    request: &ModelRequest,
+    cancellation: &CancellationToken,
+    sink: &mut dyn ModelEventSink,
+    max_bytes: u64,
+) -> Result<Usage, ProviderError> {
+    let mut usage = Usage::default();
+    let mut calls = BTreeMap::<usize, (ToolCallId, String, String)>::new();
+    let mut started = false;
+    let mut finished = false;
+    let mut saw_tool_call = false;
+    read_sse(&mut response, max_bytes, |data| {
+        cancellation.check()?;
+        if data == "[DONE]" {
+            return Ok(false);
+        }
+        let value: Value = serde_json::from_str(data).map_err(malformed)?;
+        if !started {
+            emit(
+                sink,
+                cancellation,
+                ModelEvent::Started {
+                    provider_request_id: value["response"]["id"].as_str().map(str::to_owned),
+                    model: request.model.clone(),
+                },
+            )?;
+            started = true;
+        }
+        match value["type"].as_str().unwrap_or_default() {
+            "response.output_text.delta" => {
+                if let Some(text) = value["delta"].as_str() {
+                    emit(
+                        sink,
+                        cancellation,
+                        ModelEvent::TextDelta { text: text.into() },
+                    )?;
+                }
+            }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                if let Some(text) = value["delta"].as_str() {
+                    emit(
+                        sink,
+                        cancellation,
+                        ModelEvent::ReasoningDelta { text: text.into() },
+                    )?;
+                }
+            }
+            "response.output_item.added" if value["item"]["type"] == "function_call" => {
+                saw_tool_call = true;
+                let index = response_output_index(&value);
+                let id = ToolCallId::new();
+                let name = value["item"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let arguments = value["item"]["arguments"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                calls.insert(index, (id.clone(), name.clone(), arguments));
+                emit(sink, cancellation, ModelEvent::ToolCallStarted { id, name })?;
+            }
+            "response.function_call_arguments.delta" => {
+                let index = response_output_index(&value);
+                let delta = value["delta"].as_str().unwrap_or_default();
+                if let Some((id, _, arguments)) = calls.get_mut(&index) {
+                    arguments.push_str(delta);
+                    emit(
+                        sink,
+                        cancellation,
+                        ModelEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            delta: delta.into(),
+                        },
+                    )?;
+                }
+            }
+            "response.output_item.done" if value["item"]["type"] == "function_call" => {
+                let index = response_output_index(&value);
+                if let Some((id, name, mut arguments)) = calls.remove(&index) {
+                    if arguments.is_empty() {
+                        value["item"]["arguments"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .clone_into(&mut arguments);
+                    }
+                    emit_completed_call(id, name, &arguments, cancellation, sink)?;
+                }
+            }
+            "response.completed" => {
+                usage = Usage {
+                    input_tokens: value["response"]["usage"]["input_tokens"]
+                        .as_u64()
+                        .unwrap_or(0),
+                    output_tokens: value["response"]["usage"]["output_tokens"]
+                        .as_u64()
+                        .unwrap_or(0),
+                    cached_input_tokens:
+                        value["response"]["usage"]["input_tokens_details"]["cached_tokens"]
+                            .as_u64()
+                            .unwrap_or(0),
+                };
+                emit(sink, cancellation, ModelEvent::Usage { usage })?;
+                let reason = if saw_tool_call {
+                    StopReason::ToolUse
+                } else {
+                    StopReason::EndTurn
+                };
+                finish_calls(&mut calls, cancellation, sink)?;
+                emit(sink, cancellation, ModelEvent::Finished { reason })?;
+                finished = true;
+            }
+            "response.failed" | "error" => {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Unavailable,
+                    value["response"]["error"]["message"]
+                        .as_str()
+                        .or_else(|| value["error"]["message"].as_str())
+                        .unwrap_or("Responses provider stream failed"),
+                ));
+            }
+            _ => {}
+        }
+        Ok(true)
+    })?;
+    if !started {
+        emit(
+            sink,
+            cancellation,
+            ModelEvent::Started {
+                provider_request_id: None,
+                model: request.model.clone(),
+            },
+        )?;
+    }
+    if !finished {
+        finish_calls(&mut calls, cancellation, sink)?;
+        emit(
+            sink,
+            cancellation,
+            ModelEvent::Finished {
+                reason: StopReason::Other,
+            },
+        )?;
+    }
+    Ok(usage)
 }
 
 fn parse_openai_stream(
@@ -908,6 +1809,19 @@ fn model_list(value: &Value, provider: &str) -> Result<Vec<ModelDescriptor>, Pro
     Ok(models)
 }
 
+fn catalog_descriptor(provider: &str, model: &str) -> ModelDescriptor {
+    ModelDescriptor {
+        provider: provider.into(),
+        id: model.into(),
+        display_name: model.into(),
+        context_tokens: None,
+        output_tokens: None,
+        supports_tools: true,
+        supports_reasoning: true,
+        supports_vision: true,
+    }
+}
+
 fn usage_from_openai(value: &Value) -> Usage {
     Usage {
         input_tokens: value["prompt_tokens"].as_u64().unwrap_or(0),
@@ -937,8 +1851,38 @@ fn anthropic_stop_reason(reason: &str) -> StopReason {
     }
 }
 
+fn bedrock_stop_reason(reason: &str) -> StopReason {
+    match reason {
+        "end_turn" | "stop_sequence" => StopReason::EndTurn,
+        "tool_use" => StopReason::ToolUse,
+        "max_tokens" => StopReason::MaxTokens,
+        "content_filtered" | "guardrail_intervened" => StopReason::ContentRejected,
+        _ => StopReason::Other,
+    }
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(encoded, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    encoded
+}
+
 fn stream_index(value: &Value) -> usize {
     value["index"]
+        .as_u64()
+        .and_then(|index| usize::try_from(index).ok())
+        .unwrap_or(0)
+}
+
+fn response_output_index(value: &Value) -> usize {
+    value["output_index"]
         .as_u64()
         .and_then(|index| usize::try_from(index).ok())
         .unwrap_or(0)
@@ -1242,5 +2186,250 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::Cancelled);
         let _ = server.request();
+    }
+
+    #[test]
+    fn compatible_catalog_provider_streams_with_provider_specific_identity_and_auth() {
+        let stream_body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"compatible\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let server = TestServer::start(vec![
+            response("text/event-stream", stream_body),
+            response("text/event-stream", stream_body),
+        ]);
+        let provider = OpenAiProvider::compatible(
+            "deepseek",
+            ProviderHttpConfig::new(&server.base_url).unwrap(),
+            "deepseek-chat",
+            false,
+        )
+        .unwrap();
+        let credential = ProviderCredential::new("compatible-secret").unwrap();
+        let models = provider.list_models(&credential).unwrap();
+        assert_eq!(models[0].provider, "deepseek");
+        assert_eq!(models[0].id, "deepseek-chat");
+        let mut sink = |_event| Ok(StreamControl::Continue);
+        provider
+            .stream(
+                &request(),
+                &credential,
+                &CancellationToken::default(),
+                &mut sink,
+            )
+            .unwrap();
+        let bearer_request = server.request();
+        assert!(bearer_request.starts_with("POST /chat/completions "));
+        assert!(bearer_request.contains("authorization: Bearer compatible-secret"));
+
+        let azure = OpenAiProvider::compatible(
+            "azure-openai-responses",
+            ProviderHttpConfig::new(&server.base_url).unwrap(),
+            "gpt-4.1",
+            false,
+        )
+        .unwrap()
+        .with_api_key_header();
+        azure
+            .stream(
+                &request(),
+                &credential,
+                &CancellationToken::default(),
+                &mut sink,
+            )
+            .unwrap();
+        let api_key_request = server.request();
+        assert!(api_key_request.contains("api-key: compatible-secret"));
+        assert!(!api_key_request.contains("authorization: Bearer"));
+    }
+
+    #[test]
+    fn anthropic_compatible_routes_apply_copilot_and_cloudflare_auth_contracts() {
+        let stream_body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n"
+        );
+        let server = TestServer::start(vec![
+            response("text/event-stream", stream_body),
+            response("text/event-stream", stream_body),
+        ]);
+        let credential = ProviderCredential::new("compatible-token").unwrap();
+        let mut sink = |_event| Ok(StreamControl::Continue);
+
+        let copilot = AnthropicProvider::compatible(
+            "github-copilot",
+            ProviderHttpConfig::new(&server.base_url).unwrap(),
+            "claude-sonnet-4-5",
+            true,
+        )
+        .unwrap()
+        .with_default_header("editor-version", "vscode/1.107.0")
+        .unwrap();
+        copilot
+            .stream(
+                &request(),
+                &credential,
+                &CancellationToken::default(),
+                &mut sink,
+            )
+            .unwrap();
+        let copilot_request = server.request();
+        assert!(copilot_request.contains("authorization: Bearer compatible-token"));
+        assert!(copilot_request.contains("editor-version: vscode/1.107.0"));
+        assert!(copilot_request.contains("x-initiator: user"));
+        assert!(copilot_request.contains("openai-intent: conversation-edits"));
+
+        let cloudflare = AnthropicProvider::compatible(
+            "cloudflare-ai-gateway",
+            ProviderHttpConfig::new(&server.base_url).unwrap(),
+            "claude-sonnet-4-5",
+            true,
+        )
+        .unwrap()
+        .with_credential_header("cf-aig-authorization", true)
+        .unwrap();
+        cloudflare
+            .stream(
+                &request(),
+                &credential,
+                &CancellationToken::default(),
+                &mut sink,
+            )
+            .unwrap();
+        let cloudflare_request = server.request();
+        assert!(cloudflare_request.contains("cf-aig-authorization: Bearer compatible-token"));
+        assert!(
+            !cloudflare_request
+                .lines()
+                .any(|line| line.starts_with("authorization: Bearer compatible-token"))
+        );
+    }
+
+    #[test]
+    fn codex_responses_adapter_streams_multiple_tools_and_scopes_oauth_headers() {
+        let stream_body = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"working\"}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"lookup\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"q\\\":1}\"}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"name\":\"lookup\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"q\\\":2}\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":1}\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":2}\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":2}}}}\n\n"
+        );
+        let server = TestServer::start(vec![response("text/event-stream", stream_body)]);
+        let provider = OpenAiResponsesProvider::codex(
+            ProviderHttpConfig::new(&server.base_url).unwrap(),
+            "gpt-5.1",
+        )
+        .unwrap();
+        let token = concat!(
+            "e30.",
+            "eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC10ZXN0In19",
+            ".signature"
+        );
+        let credential = ProviderCredential::new(token).unwrap();
+        assert_eq!(provider.list_models(&credential).unwrap()[0].id, "gpt-5.1");
+        let mut events = Vec::new();
+        let mut sink = |event| {
+            events.push(event);
+            Ok(StreamControl::Continue)
+        };
+        let usage = provider
+            .stream(
+                &request(),
+                &credential,
+                &CancellationToken::default(),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(usage.total_tokens(), 8);
+        assert!(matches!(events.first(), Some(ModelEvent::Started { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ModelEvent::TextDelta { text } if text == "working"))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ModelEvent::ToolCallCompleted { .. }))
+                .count(),
+            2
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ModelEvent::Finished {
+                reason: StopReason::ToolUse
+            }
+        )));
+        let request = server.request();
+        assert!(request.starts_with("POST /codex/responses "));
+        assert!(request.contains(&format!("authorization: Bearer {token}")));
+        assert!(request.contains("chatgpt-account-id: acct-test"));
+        assert!(request.contains("openai-beta: responses=experimental"));
+        assert!(!request.split("\r\n\r\n").nth(1).unwrap().contains(token));
+    }
+
+    #[test]
+    fn bedrock_converse_adapter_normalizes_response_and_encodes_model_path() {
+        let response_body = json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"text": "bedrock"},
+                        {"toolUse": {"toolUseId": "call-1", "name": "lookup", "input": {"q": 4}}}
+                    ]
+                }
+            },
+            "stopReason": "tool_use",
+            "usage": {"inputTokens": 9, "outputTokens": 4, "cacheReadInputTokens": 2}
+        })
+        .to_string();
+        let server = TestServer::start(vec![response("application/json", &response_body)]);
+        let provider = AmazonBedrockProvider::new(
+            ProviderHttpConfig::new(&server.base_url).unwrap(),
+            "us.anthropic.claude-sonnet-4-20250514-v1:0",
+        )
+        .unwrap();
+        let credential = ProviderCredential::new("bedrock-bearer-secret").unwrap();
+        let mut normalized_request = request();
+        normalized_request.model = "arn:aws:bedrock:us-east-1:1:profile/model".into();
+        let mut events = Vec::new();
+        let mut sink = |event| {
+            events.push(event);
+            Ok(StreamControl::Continue)
+        };
+        let usage = provider
+            .stream(
+                &normalized_request,
+                &credential,
+                &CancellationToken::default(),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(usage.total_tokens(), 13);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ModelEvent::TextDelta { text } if text == "bedrock"))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ModelEvent::Finished {
+                reason: StopReason::ToolUse
+            }
+        )));
+        let request = server.request();
+        assert!(request.starts_with(
+            "POST /model/arn%3Aaws%3Abedrock%3Aus-east-1%3A1%3Aprofile%2Fmodel/converse "
+        ));
+        assert!(request.contains("authorization: Bearer bedrock-bearer-secret"));
+        let body = request.split("\r\n\r\n").nth(1).unwrap();
+        assert!(body.contains("\"toolConfig\""));
+        assert!(!body.contains("bedrock-bearer-secret"));
     }
 }

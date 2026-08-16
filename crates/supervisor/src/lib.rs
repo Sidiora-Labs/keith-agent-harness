@@ -96,6 +96,8 @@ struct ManagedWorker {
 
 pub struct WorkerSupervisor {
     state_dir: PathBuf,
+    control_directory: PathBuf,
+    next_control_id: u64,
     lease_database: PathBuf,
     executable: PathBuf,
     options: SupervisorOptions,
@@ -155,8 +157,12 @@ impl WorkerSupervisor {
         fs::create_dir_all(&state_dir)?;
         let lease_database = state_dir.join("leases.sqlite");
         let leases = LeaseManager::open(&lease_database)?;
+        let control_directory =
+            std::env::temp_dir().join(format!("keith-agent-control-{}", WorkerId::new()));
         Ok(Self {
             state_dir,
+            control_directory,
+            next_control_id: 1,
             lease_database,
             executable: executable.into(),
             options,
@@ -234,11 +240,10 @@ impl WorkerSupervisor {
         let grant =
             self.leases
                 .claim(&root_tree_id, WorkerId::new(), self.options.lease_duration)?;
-        let control_socket = self.state_dir.join("control").join(format!(
-            "{}-{}.sock",
-            root_tree_id,
-            grant.generation.get()
-        ));
+        let control_socket = self
+            .control_directory
+            .join(format!("worker-{}.sock", self.next_control_id));
+        self.next_control_id = self.next_control_id.saturating_add(1);
         let mut child = match self.spawn(&grant, &control_socket) {
             Ok(child) => child,
             Err(error) => {

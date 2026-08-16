@@ -979,11 +979,11 @@ mod tests {
 
     fn registry(provider: Arc<dyn ModelProvider>, profile_id: &ProfileId) -> ModelRegistry {
         let registry = ModelRegistry::new();
-        let provider_id = provider.provider_id();
+        let provider_id = provider.provider_id().to_owned();
         registry.register_provider(provider).unwrap();
         registry
             .refresh_models(
-                provider_id,
+                &provider_id,
                 &ProviderCredential::new("test-credential").unwrap(),
             )
             .unwrap();
@@ -992,12 +992,12 @@ mod tests {
                 profile_id.clone(),
                 ModelRoute {
                     primary: ModelSelection {
-                        provider: provider_id.into(),
                         model: if provider_id == "openai" {
                             "model-a".into()
                         } else {
                             "script-model".into()
                         },
+                        provider: provider_id,
                         credential_ref: Some("test".into()),
                     },
                     fallbacks: Vec::new(),

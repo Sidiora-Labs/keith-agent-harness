@@ -1283,7 +1283,7 @@ requires = ["5.2", "5.4", "11.2", "11.4", "13.1"]
 
 [task.13.3]
 title  = "Reproducible release artifacts and installation lifecycle"
-status = "pending"
+status = "in_progress"
 wave   = 23
 do_1   = "Build daemon, worker, CLI, TUI, channel gateway, runners, web assets, desktop, built-ins, provider metadata, and schemas"
 do_2   = "Lock dependencies, sign artifacts, and generate software bill of materials and license report"

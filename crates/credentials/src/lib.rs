@@ -155,6 +155,82 @@ pub struct NativeMasterKeyStore {
     account: String,
 }
 
+pub struct RestrictedMasterKeyStore {
+    directory: Dir,
+    ambient_root: PathBuf,
+}
+
+impl Debug for RestrictedMasterKeyStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RestrictedMasterKeyStore")
+            .field("root", &"<redacted-path>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl RestrictedMasterKeyStore {
+    /// Opens a permission-restricted local key store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory cannot be created, restricted, or opened.
+    pub fn open(root: impl AsRef<Path>) -> Result<Self, CredentialError> {
+        std::fs::create_dir_all(root.as_ref())?;
+        restrict_directory(root.as_ref())?;
+        let ambient_root = std::fs::canonicalize(root.as_ref())?;
+        let directory = Dir::open_ambient_dir(&ambient_root, ambient_authority())?;
+        Ok(Self {
+            directory,
+            ambient_root,
+        })
+    }
+
+    /// Loads the existing master key or creates it atomically with owner-only permissions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the key is inaccessible, malformed, or cannot be persisted safely.
+    pub fn load_or_create(&self) -> Result<MasterKey, CredentialError> {
+        const FILENAME: &str = "master-key";
+        match self.load(FILENAME) {
+            Ok(key) => return Ok(key),
+            Err(CredentialError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let key = MasterKey::generate()?;
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        configure_file_mode(&mut options);
+        match self.directory.open_with(FILENAME, &options) {
+            Ok(mut file) => {
+                file.write_all(&key.bytes)?;
+                file.sync_all()?;
+                std::fs::File::open(&self.ambient_root)?.sync_all()?;
+                Ok(key)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => self.load(FILENAME),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn load(&self, filename: &str) -> Result<MasterKey, CredentialError> {
+        let metadata = self.directory.symlink_metadata(filename)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(CredentialError::Corrupt);
+        }
+        restrict_key_file(&self.ambient_root.join(filename))?;
+        let mut file = self.directory.open(filename)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let key: [u8; KEY_BYTES] = bytes.try_into().map_err(|_| CredentialError::Corrupt)?;
+        Ok(MasterKey::from_bytes(key))
+    }
+}
+
 impl Debug for NativeMasterKeyStore {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -750,6 +826,19 @@ fn restrict_directory(path: &Path) -> Result<(), CredentialError> {
 
 #[cfg(not(unix))]
 fn restrict_directory(_path: &Path) -> Result<(), CredentialError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_key_file(path: &Path) -> Result<(), CredentialError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_key_file(_path: &Path) -> Result<(), CredentialError> {
     Ok(())
 }
 

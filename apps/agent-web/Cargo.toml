@@ -19,6 +19,7 @@ workspace = true
 
 [dependencies]
 keith-agent-types = { path = "../../crates/agent-types" }
+keith-provider-catalog = { path = "../../crates/provider-catalog" }
 keith-protocol = { path = "../../crates/protocol" }
 keith-ui-model = { path = "../../crates/ui-model" }
 serde.workspace = true

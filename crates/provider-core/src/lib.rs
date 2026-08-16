@@ -323,7 +323,7 @@ where
 }
 
 pub trait ModelProvider: Send + Sync {
-    fn provider_id(&self) -> &'static str;
+    fn provider_id(&self) -> &str;
 
     /// # Errors
     ///

@@ -180,6 +180,27 @@ fn chat_lines(app: &TuiApp, height: u16) -> Vec<String> {
 
 #[allow(clippy::too_many_lines)]
 fn projection_lines(app: &TuiApp, surface: Surface) -> Vec<String> {
+    if surface == Surface::Models {
+        let mut providers = vec![
+            "Use /model <provider> [model]. Omitting model selects the catalog default.".into(),
+        ];
+        providers.extend(
+            keith_provider_catalog::BUILTIN_PROVIDERS
+                .iter()
+                .map(|provider| {
+                    format!(
+                        "{}  {}  default {}",
+                        provider.id,
+                        terminal_safe(provider.display_name),
+                        provider.default_model
+                    )
+                }),
+        );
+        return providers;
+    }
+    if surface == Surface::Logs {
+        return app.logs().iter().map(|line| terminal_safe(line)).collect();
+    }
     let Some(reducer) = &app.reducer else {
         return Vec::new();
     };
@@ -195,9 +216,7 @@ fn projection_lines(app: &TuiApp, surface: Surface) -> Vec<String> {
             .iter()
             .map(|action| format!("{}  {}", action.state, terminal_safe(&action.source)))
             .collect(),
-        Surface::Models => {
-            vec!["Model selection is submitted through the shared SelectModel command.".into()]
-        }
+        Surface::Models => unreachable!("models are rendered from the installation catalog"),
         Surface::Plans => snapshot
             .plans
             .iter()
@@ -262,7 +281,7 @@ fn projection_lines(app: &TuiApp, surface: Surface) -> Vec<String> {
             format!("Composer display width: {}", app.composer_display_width()),
             format!("Queued commands: {}", app.pending_len()),
         ],
-        Surface::Logs => app.logs().iter().map(|line| terminal_safe(line)).collect(),
+        Surface::Logs => unreachable!("logs are rendered without a session projection"),
         Surface::Artifacts => vec!["Artifacts are exposed by tool and export projections.".into()],
         Surface::Knowledge => {
             vec!["Knowledge changes use shared memory and command results.".into()]

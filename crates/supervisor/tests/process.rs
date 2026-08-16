@@ -129,3 +129,18 @@ fn renewal_loss_stops_stale_worker_and_forced_replacement_advances_generation() 
     supervisor.drain(&root).unwrap();
     assert!(supervisor.status(&root).is_none());
 }
+
+#[test]
+#[cfg(unix)]
+fn worker_control_endpoint_survives_a_long_state_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let long_component = "state-directory-segment-that-forces-the-unix-socket-path-past-its-limit";
+    let state_directory = directory.path().join(long_component).join(long_component);
+    let executable = env!("CARGO_BIN_EXE_keith-worker-process-host");
+    let root = RootTreeId::new();
+    let mut supervisor = WorkerSupervisor::open(&state_directory, executable, options()).unwrap();
+
+    let status = supervisor.start(root.clone()).unwrap();
+    assert_eq!(status.health, WorkerHealth::Healthy);
+    supervisor.drain(&root).unwrap();
+}

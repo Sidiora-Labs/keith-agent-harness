@@ -4,12 +4,14 @@ use std::rc::Rc;
 
 use keith_agent_types::{
     CURRENT_PROTOCOL_VERSION, ClientId, CommandId, EntityId, ProfileId, SessionId, UtcTimestamp,
+    WorkspaceId,
 };
 use keith_protocol::{
-    BranchRequest, CancelTarget, ClientCommand, CommandEnvelope, CommandResult,
-    ConfirmationDecision, ConfirmationResolution, CreateSchedule, DaemonEvent, DeliveryPolicy,
-    MessageRole, ModelSelection, ReplyRoute, ResponsePayload, ScheduleExpression, SteerAction,
-    SubmitPrompt, WireMessage,
+    BranchRequest, CancelTarget, ChildWorkspaceMode, ClientCommand, CommandEnvelope, CommandResult,
+    ConfirmationDecision, ConfirmationResolution, CreateChild, CreateGoal, CreateSchedule,
+    CreateSession, DaemonEvent, DeliveryPolicy, ExportFormat, ExportRequest, GoalLimits,
+    MemoryQuery, MessageRole, ModelSelection, ReplyRoute, ResponsePayload, ScheduleExpression,
+    SteerAction, SubmitPrompt, WireMessage,
 };
 use keith_ui_model::{ProjectionReducer, ReductionOutcome, VirtualizationConfig};
 use wasm_bindgen::JsCast;
@@ -23,6 +25,7 @@ struct ClientApp {
     document: Document,
     csrf: String,
     profile: String,
+    workspace: String,
     session: String,
     socket: Option<WebSocket>,
     reducer: Option<ProjectionReducer>,
@@ -47,6 +50,7 @@ pub fn start() -> Result<(), JsValue> {
         document,
         csrf,
         profile: root.get_attribute("data-profile").unwrap_or_default(),
+        workspace: root.get_attribute("data-workspace").unwrap_or_default(),
         session: root.get_attribute("data-session").unwrap_or_default(),
         socket: None,
         reducer: None,
@@ -54,6 +58,7 @@ pub fn start() -> Result<(), JsValue> {
         last_prompt: None,
     }));
     bind_navigation(&app)?;
+    bind_new_session(&app)?;
     bind_session_picker(&app)?;
     bind_composer(&app)?;
     bind_domain_forms(&app)?;
@@ -67,6 +72,37 @@ pub fn start() -> Result<(), JsValue> {
     } else {
         connect_subscription(&app)?;
     }
+    Ok(())
+}
+
+fn bind_new_session(app: &Rc<RefCell<ClientApp>>) -> Result<(), JsValue> {
+    let button = app
+        .borrow()
+        .document
+        .get_element_by_id("new-session")
+        .ok_or_else(|| JsValue::from_str("new session action unavailable"))?;
+    let app = Rc::clone(app);
+    let callback = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+        event.prevent_default();
+        let state = app.borrow();
+        let Ok(profile_id) = state.profile.parse::<ProfileId>() else {
+            return;
+        };
+        let Ok(workspace_id) = state.workspace.parse::<WorkspaceId>() else {
+            return;
+        };
+        drop(state);
+        let command = ClientCommand::CreateSession(CreateSession {
+            profile_id,
+            workspace_id,
+            title: Some("New chat".into()),
+        });
+        if send_command(&app, None, command).is_err() {
+            set_status(&app.borrow().document, "New session could not be created");
+        }
+    });
+    button.add_event_listener_with_callback("click", callback.as_ref().unchecked_ref())?;
+    callback.forget();
     Ok(())
 }
 
@@ -318,13 +354,30 @@ fn bind_model_form(app: &Rc<RefCell<ClientApp>>) -> Result<(), JsValue> {
         return Ok(());
     };
     let form: HtmlFormElement = form.dyn_into()?;
+    if let (Some(provider), Some(model)) = (
+        form.query_selector("select[name='provider']")?,
+        form.query_selector("input[name='model']")?,
+    ) {
+        let provider: HtmlSelectElement = provider.dyn_into()?;
+        let model: HtmlInputElement = model.dyn_into()?;
+        let provider_for_change = provider.clone();
+        let callback = Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+            if let Ok(Some(option)) = provider_for_change.query_selector("option:checked")
+                && let Some(default_model) = option.get_attribute("data-default-model")
+            {
+                model.set_value(&default_model);
+            }
+        });
+        provider.add_event_listener_with_callback("change", callback.as_ref().unchecked_ref())?;
+        callback.forget();
+    }
     let app = Rc::clone(app);
     let form_for_callback = form.clone();
     let callback = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
         event.prevent_default();
         let result = (|| -> Result<(), JsValue> {
-            let provider: HtmlInputElement = form_for_callback
-                .query_selector("input[name='provider']")?
+            let provider: HtmlSelectElement = form_for_callback
+                .query_selector("select[name='provider']")?
                 .ok_or_else(|| JsValue::from_str("provider unavailable"))?
                 .dyn_into()?;
             let model: HtmlInputElement = form_for_callback
@@ -420,6 +473,25 @@ fn domain_command(
     value: String,
 ) -> ClientCommand {
     match kind {
+        "goal" => ClientCommand::CreateGoal(CreateGoal {
+            session_id: session_id.clone(),
+            objective: value,
+            limits: GoalLimits {
+                max_turns: Some(100),
+                max_tokens: Some(1_000_000),
+                deadline: None,
+            },
+        }),
+        "child" => ClientCommand::CreateChild(CreateChild {
+            parent_session_id: session_id.clone(),
+            objective: value,
+            workspace_mode: ChildWorkspaceMode::SharedWorkspace,
+            limits: GoalLimits {
+                max_turns: Some(100),
+                max_tokens: Some(1_000_000),
+                deadline: None,
+            },
+        }),
         "schedule" => ClientCommand::CreateSchedule(CreateSchedule {
             profile_id: profile_id.clone(),
             session_id: Some(session_id.clone()),
@@ -438,11 +510,15 @@ fn domain_command(
                 thread: None,
             }),
         }),
-        "memory" => ClientCommand::SubmitPrompt(SubmitPrompt {
+        "memory" => ClientCommand::QueryMemory(MemoryQuery {
+            profile_id: profile_id.clone(),
+            query: value,
+            limit: 20,
+        }),
+        "export" => ClientCommand::Export(ExportRequest {
             session_id: session_id.clone(),
-            text: format!("Update durable memory with this user-authored content:\n{value}"),
-            delivery: DeliveryPolicy::Immediate,
-            reply_route: None,
+            format: ExportFormat::PortableBundle,
+            include_artifacts: true,
         }),
         _ => ClientCommand::SubmitPrompt(SubmitPrompt {
             session_id: session_id.clone(),
@@ -573,10 +649,18 @@ fn connect_subscription(app: &Rc<RefCell<ClientApp>>) -> Result<(), JsValue> {
 
 fn apply_wire_message(app: &Rc<RefCell<ClientApp>>, message: WireMessage) {
     let mut state = app.borrow_mut();
+    let mut connect_new_session = false;
+    let mut refresh_current = false;
     match message {
         WireMessage::CommandResult(result) => match result.result {
             CommandResult::Data(payload) => match *payload {
                 ResponsePayload::Snapshot(snapshot) => {
+                    if state.session != snapshot.session.session_id.to_string() {
+                        state.session = snapshot.session.session_id.to_string();
+                        state.profile = snapshot.session.profile_id.to_string();
+                        state.reducer = None;
+                        connect_new_session = true;
+                    }
                     if let Some(reducer) = &mut state.reducer {
                         if reducer.apply_snapshot(*snapshot.clone()).is_err() {
                             state.reducer = new_reducer(*snapshot);
@@ -591,6 +675,13 @@ fn apply_wire_message(app: &Rc<RefCell<ClientApp>>, message: WireMessage) {
                         &format!("Memory query returned {} results", results.len()),
                     );
                 }
+                ResponsePayload::Goal(_)
+                | ResponsePayload::Child(_)
+                | ResponsePayload::Schedule(_) => refresh_current = true,
+                ResponsePayload::Export(export) => set_status(
+                    &state.document,
+                    &format!("Export artifact {} is ready", export.artifact_id),
+                ),
                 _ => {}
             },
             CommandResult::Accepted { .. } => set_status(&state.document, "Command accepted"),
@@ -615,6 +706,19 @@ fn apply_wire_message(app: &Rc<RefCell<ClientApp>>, message: WireMessage) {
         WireMessage::ClientHello(_) | WireMessage::Command(_) => {}
     }
     render_projection(&state);
+    drop(state);
+    if connect_new_session {
+        let _ = connect_subscription(app);
+    } else if refresh_current {
+        let session_id = app.borrow().session.parse::<SessionId>();
+        if let Ok(session_id) = session_id {
+            let _ = send_command(
+                app,
+                Some(session_id.clone()),
+                ClientCommand::ResumeSession { session_id },
+            );
+        }
+    }
 }
 
 fn new_reducer(snapshot: keith_protocol::SessionSnapshot) -> Option<ProjectionReducer> {

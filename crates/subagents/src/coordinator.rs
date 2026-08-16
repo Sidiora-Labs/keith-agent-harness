@@ -455,6 +455,36 @@ where
         Ok(child.record)
     }
 
+    /// Cancels a nonterminal child and stops its live actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing/terminal child, empty summary, or persistence failure.
+    pub fn cancel(
+        &self,
+        id: &ChildId,
+        summary: impl Into<String>,
+        now: UtcTimestamp,
+    ) -> Result<ChildRecord, ChildError> {
+        let summary = summary.into();
+        if summary.trim().is_empty() {
+            return Err(ChildError::Invalid(
+                "cancellation summary cannot be empty".into(),
+            ));
+        }
+        let _guard = self.lock()?;
+        self.stop_runtime(id);
+        let mut child = self.required_child(id)?;
+        if child.record.status.is_terminal() {
+            return Err(ChildError::InvalidState);
+        }
+        child.record.status = ChildStatus::Cancelled;
+        child.record.terminal_at = Some(now);
+        child.record.terminal_summary = Some(summary);
+        self.persist_child(&mut child, now)?;
+        Ok(child.record)
+    }
+
     /// Applies parent cancellation policies recursively.
     ///
     /// # Errors

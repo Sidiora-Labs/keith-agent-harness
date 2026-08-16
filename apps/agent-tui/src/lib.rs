@@ -9,11 +9,15 @@ pub use render::render;
 use std::collections::VecDeque;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use keith_agent_types::{ClientId, CommandId, EntityId, SessionId, UtcTimestamp};
+use keith_agent_types::{
+    ChildId, ClientId, CommandId, EntityId, GoalId, JobId, SessionId, UtcTimestamp,
+};
 use keith_protocol::{
-    AttachSession, CancelTarget, ClientCommand, CommandEnvelope, CommandResult, DaemonEvent,
-    DeliveryPolicy, EventAcknowledgement, ResponsePayload, SessionFilter, SessionSummary,
-    SteerAction, SubmitPrompt, WireMessage,
+    AttachSession, BackgroundControl, BackgroundMode, CancelTarget, ChildMessageRequest,
+    ChildWorkspaceMode, ClientCommand, CommandEnvelope, CommandResult, CreateChild, CreateGoal,
+    CreateSchedule, DaemonEvent, DeliveryPolicy, EventAcknowledgement, ExportFormat, ExportRequest,
+    GoalLimits, MemoryQuery, ResponsePayload, ScheduleExpression, SessionFilter, SessionSummary,
+    SteerAction, SubmitPrompt, UpdateSchedule, WireMessage,
 };
 use keith_ui_model::{
     ClientParity, OperatorCommand, OperatorSurface, ProjectionReducer, ReductionOutcome,
@@ -251,7 +255,15 @@ impl TuiApp {
             }
             WireMessage::CommandResult(result) => match result.result {
                 CommandResult::Data(payload) => match *payload {
-                    ResponsePayload::Sessions(sessions) => self.sessions = sessions,
+                    ResponsePayload::Sessions(sessions) => {
+                        let first = sessions.first().map(|session| session.session_id.clone());
+                        self.sessions = sessions;
+                        if self.attached_session.is_none()
+                            && let Some(session_id) = first
+                        {
+                            self.attach(session_id);
+                        }
+                    }
                     ResponsePayload::Snapshot(snapshot) => self.apply_snapshot(*snapshot),
                     other => self.log(format!("Received {} projection", payload_label(&other))),
                 },
@@ -362,6 +374,31 @@ impl TuiApp {
             self.log("Select a session before sending a prompt");
             return;
         };
+        if let Some(selection) = text.strip_prefix("/model ") {
+            let mut parts = selection.split_whitespace();
+            let Some(provider) = parts.next() else {
+                self.log("Usage: /model <provider> [model]");
+                return;
+            };
+            let Some(provider_spec) = keith_provider_catalog::provider(provider) else {
+                self.log("Unknown provider. Open the Models view for supported provider IDs");
+                return;
+            };
+            let model = parts.next().unwrap_or(provider_spec.default_model);
+            if parts.next().is_some() {
+                self.log("Usage: /model <provider> [model]");
+                return;
+            }
+            self.select_model(provider.to_owned(), model.to_owned());
+            self.composer.clear();
+            self.cursor_byte = 0;
+            return;
+        }
+        if text.starts_with('/') && self.handle_slash_command(&session_id, &text) {
+            self.composer.clear();
+            self.cursor_byte = 0;
+            return;
+        }
         self.enqueue(ClientCommand::SubmitPrompt(SubmitPrompt {
             session_id,
             text: text.clone(),
@@ -371,6 +408,195 @@ impl TuiApp {
         self.last_prompt = Some(text);
         self.composer.clear();
         self.cursor_byte = 0;
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn handle_slash_command(&mut self, session_id: &SessionId, input: &str) -> bool {
+        let (command, argument) = input
+            .split_once(' ')
+            .map_or((input, ""), |(command, argument)| {
+                (command, argument.trim())
+            });
+        let limits = || GoalLimits {
+            max_turns: Some(100),
+            max_tokens: Some(1_000_000),
+            deadline: None,
+        };
+        match command {
+            "/goal" if !argument.is_empty() => self.enqueue(ClientCommand::CreateGoal(
+                CreateGoal {
+                    session_id: session_id.clone(),
+                    objective: argument.into(),
+                    limits: limits(),
+                },
+            )),
+            "/goals" => self.enqueue(ClientCommand::ListGoals {
+                session_id: session_id.clone(),
+            }),
+            "/child" if !argument.is_empty() => self.enqueue(ClientCommand::CreateChild(
+                CreateChild {
+                    parent_session_id: session_id.clone(),
+                    objective: argument.into(),
+                    workspace_mode: ChildWorkspaceMode::SharedWorkspace,
+                    limits: limits(),
+                },
+            )),
+            "/children" => self.enqueue(ClientCommand::ListChildren {
+                session_id: session_id.clone(),
+            }),
+            "/child-message" => {
+                let Some((id, text)) = argument.split_once(' ') else {
+                    self.log("Usage: /child-message <child-id> <text>");
+                    return true;
+                };
+                let Ok(child_id) = id.parse::<ChildId>() else {
+                    self.log("Child identifier is invalid");
+                    return true;
+                };
+                self.enqueue(ClientCommand::SendChildMessage(ChildMessageRequest {
+                    child_id,
+                    text: text.trim().into(),
+                    artifact_ids: Vec::new(),
+                }));
+            }
+            "/archive-child" => {
+                let Ok(child_id) = argument.parse::<ChildId>() else {
+                    self.log("Usage: /archive-child <child-id>");
+                    return true;
+                };
+                self.enqueue(ClientCommand::ArchiveChild { child_id });
+            }
+            "/memory" if !argument.is_empty() => {
+                let Some(profile_id) = self
+                    .reducer
+                    .as_ref()
+                    .map(|reducer| reducer.snapshot().session.profile_id.clone())
+                else {
+                    self.log("Attach a session before querying memory");
+                    return true;
+                };
+                self.enqueue(ClientCommand::QueryMemory(MemoryQuery {
+                    profile_id,
+                    query: argument.into(),
+                    limit: 20,
+                }));
+            }
+            "/schedule" => {
+                let Some((seconds, prompt)) = argument.split_once(' ') else {
+                    self.log("Usage: /schedule <interval-seconds> <prompt>");
+                    return true;
+                };
+                let Ok(seconds) = seconds.parse::<u64>() else {
+                    self.log("Schedule interval must be an integer number of seconds");
+                    return true;
+                };
+                let Some(profile_id) = self
+                    .reducer
+                    .as_ref()
+                    .map(|reducer| reducer.snapshot().session.profile_id.clone())
+                else {
+                    self.log("Attach a session before creating a schedule");
+                    return true;
+                };
+                self.enqueue(ClientCommand::CreateSchedule(CreateSchedule {
+                    profile_id,
+                    session_id: Some(session_id.clone()),
+                    expression: ScheduleExpression::IntervalSeconds(seconds),
+                    time_zone: "UTC".into(),
+                    prompt: prompt.trim().into(),
+                    reply_route: None,
+                }));
+            }
+            "/pause-schedule" | "/resume-schedule" => {
+                let Ok(job_id) = argument.parse::<JobId>() else {
+                    self.log("Usage: /pause-schedule <job-id> or /resume-schedule <job-id>");
+                    return true;
+                };
+                self.enqueue(ClientCommand::UpdateSchedule(UpdateSchedule {
+                    job_id,
+                    expression: None,
+                    prompt: None,
+                    paused: Some(command == "/pause-schedule"),
+                }));
+            }
+            "/delete-schedule" => {
+                let Ok(job_id) = argument.parse::<JobId>() else {
+                    self.log("Usage: /delete-schedule <job-id>");
+                    return true;
+                };
+                self.enqueue(ClientCommand::DeleteSchedule { job_id });
+            }
+            "/export" => self.enqueue(ClientCommand::Export(ExportRequest {
+                session_id: session_id.clone(),
+                format: match argument {
+                    "jsonl" => ExportFormat::JsonLines,
+                    "markdown" | "md" => ExportFormat::Markdown,
+                    "" | "bundle" => ExportFormat::PortableBundle,
+                    _ => {
+                        self.log("Usage: /export [jsonl|markdown|bundle]");
+                        return true;
+                    }
+                },
+                include_artifacts: true,
+            })),
+            "/select-branch" => {
+                let Ok(leaf_entry_id) = argument.parse::<EntityId>() else {
+                    self.log("Usage: /select-branch <entry-id>");
+                    return true;
+                };
+                self.enqueue(ClientCommand::SelectBranch(keith_protocol::SelectBranch {
+                    session_id: session_id.clone(),
+                    leaf_entry_id,
+                }));
+            }
+            "/cancel-goal" => {
+                let Ok(goal_id) = argument.parse::<GoalId>() else {
+                    self.log("Usage: /cancel-goal <goal-id>");
+                    return true;
+                };
+                self.enqueue(ClientCommand::Cancel(CancelTarget::Goal(goal_id)));
+            }
+            "/cancel-child" => {
+                let Ok(child_id) = argument.parse::<ChildId>() else {
+                    self.log("Usage: /cancel-child <child-id>");
+                    return true;
+                };
+                self.enqueue(ClientCommand::Cancel(CancelTarget::Child(child_id)));
+            }
+            "/background" => {
+                let mode = match argument {
+                    "disabled" | "off" => BackgroundMode::Disabled,
+                    "suggest" => BackgroundMode::Suggest,
+                    "confirm" => BackgroundMode::ConfirmSelected,
+                    "bounded" => BackgroundMode::Bounded,
+                    _ => {
+                        self.log("Usage: /background <disabled|suggest|confirm|bounded>");
+                        return true;
+                    }
+                };
+                let Some(profile_id) = self
+                    .reducer
+                    .as_ref()
+                    .map(|reducer| reducer.snapshot().session.profile_id.clone())
+                else {
+                    self.log("Attach a session before changing background control");
+                    return true;
+                };
+                self.enqueue(ClientCommand::SetBackgroundControl(BackgroundControl {
+                    profile_id,
+                    mode,
+                    pause_until: None,
+                }));
+            }
+            "/help" => self.log(
+                "Commands: /model /goal /goals /child /children /child-message /archive-child /memory /schedule /pause-schedule /resume-schedule /delete-schedule /export /select-branch /cancel-goal /cancel-child /background",
+            ),
+            _ if input.starts_with('/') => {
+                self.log("Unknown command. Use /help for available commands");
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn steer(&mut self) {
@@ -684,6 +910,50 @@ mod tests {
             app.next_command(),
             Some(ClientCommand::SelectModel(selection))
                 if selection.provider == "provider" && selection.model == "model"
+        ));
+        app.replace_composer("/model openai gpt-4.1-mini".into());
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.next_command(),
+            Some(ClientCommand::SelectModel(selection))
+                if selection.provider == "openai" && selection.model == "gpt-4.1-mini"
+        ));
+        app.replace_composer("/model deepseek".into());
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.next_command(),
+            Some(ClientCommand::SelectModel(selection))
+                if selection.provider == "deepseek" && selection.model == "deepseek-chat"
+        ));
+        app.replace_composer("/goal Ship the integration".into());
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.next_command(),
+            Some(ClientCommand::CreateGoal(CreateGoal { objective, .. }))
+                if objective == "Ship the integration"
+        ));
+        app.replace_composer("/child Verify the integration".into());
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.next_command(),
+            Some(ClientCommand::CreateChild(CreateChild { objective, .. }))
+                if objective == "Verify the integration"
+        ));
+        app.replace_composer("/export markdown".into());
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.next_command(),
+            Some(ClientCommand::Export(ExportRequest {
+                format: ExportFormat::Markdown,
+                ..
+            }))
+        ));
+        let goal_id = GoalId::new();
+        app.replace_composer(format!("/cancel-goal {goal_id}"));
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.next_command(),
+            Some(ClientCommand::Cancel(CancelTarget::Goal(id))) if id == goal_id
         ));
         let confirmation_id = EntityId::new();
         app.resolve_confirmation(
