@@ -58,21 +58,37 @@ async fn platform_web_startup_serves_browser_and_guarded_compatibility_boundarie
     assert!(unavailable.starts_with("HTTP/1.1 503 Service Unavailable"));
     assert!(unavailable.contains("keith_native_api_unavailable"));
 
-    let unsupported_body = br#"{"model":"keith","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function"}]}"#;
-    let unsupported = request(
+    let advisory_body = br#"{"model":"keith","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"openwebui_search","description":"Search through the client UI","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}}],"tool_choice":"auto"}"#;
+    let advisory = request(
         address,
         format!(
             "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer platform-openai-compatibility-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            unsupported_body.len()
+            advisory_body.len()
         )
         .into_bytes()
         .into_iter()
-        .chain(unsupported_body.iter().copied())
+        .chain(advisory_body.iter().copied())
         .collect(),
     )
     .await;
-    assert!(unsupported.starts_with("HTTP/1.1 400 Bad Request"));
-    assert!(unsupported.contains("unsupported_feature"));
+    assert!(advisory.starts_with("HTTP/1.1 503 Service Unavailable"));
+    assert!(advisory.contains("keith_native_api_unavailable"));
+
+    let forced_body = br#"{"model":"keith","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"openwebui_search","parameters":{"type":"object"}}}],"tool_choice":"required"}"#;
+    let forced = request(
+        address,
+        format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer platform-openai-compatibility-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            forced_body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(forced_body.iter().copied())
+        .collect(),
+    )
+    .await;
+    assert!(forced.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(forced.contains("unsupported_feature"));
 
     let oversized_body = vec![b' '; 129 * 1024];
     let oversized = request(

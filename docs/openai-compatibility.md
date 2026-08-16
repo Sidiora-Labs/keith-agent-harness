@@ -35,7 +35,7 @@ The base URL is `http://127.0.0.1:7341/v1`. Every route requires `Authorization:
 
 The selected model identifies a Keith profile, not a raw upstream model. The installed profile continues to own provider routing, fallback, persona, rules, tools, confirmations, memory, and resource limits. The convenience model alias `keith` is accepted only when exactly one profile is enabled.
 
-Text Chat Completions with one choice are supported. Image/audio/file parts, client-defined function tools and tool-call history, multiple choices, log probabilities, and JSON/structured-output modes return explicit OpenAI-shaped `unsupported_feature` errors. Keith's server-owned tools remain active inside the native turn.
+Text Chat Completions with one choice are supported. Bounded client function declarations are accepted when `tool_choice` is absent, `auto`, or `none` so clients such as Open WebUI can attach their ordinary tool catalog, but those declarations are compatibility metadata only: Keith does not execute or return client-defined tool calls, and its profile-owned tools remain active inside the native turn. Required or forced client functions, client tool-call history, image/audio/file parts, multiple choices, log probabilities, and JSON/structured-output modes return explicit OpenAI-shaped `unsupported_feature` errors.
 
 ## Durable conversation mapping
 
@@ -52,6 +52,8 @@ In Open WebUI, add an OpenAI connection with:
 - Model filter: optional; `/models` discovery returns the canonical Keith profile model IDs.
 
 Docker-to-host access normally requires a non-loopback bind. Use the explicit acknowledgement described above and restrict the port to the Open WebUI host/network. Open WebUI documents that OpenAI-compatible connections use Chat Completions and verify through `/models`: <https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible>.
+
+Open WebUI may attach function declarations to ordinary chat requests even when the user did not select a client-side tool. Keith accepts a bounded standard function catalog in automatic mode so those requests continue normally, without granting the remote client new execution authority. Configure the connection to use Chat Completions; the `/v1/responses` endpoint is not currently exposed.
 
 ## assistant-ui and OpenAI SDKs
 

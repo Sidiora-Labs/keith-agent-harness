@@ -458,7 +458,7 @@
   - [x] 13.4 OpenAI-compatible application adapter over AgentConnection
     - Add separately authenticated OpenAI-compatible model discovery and chat-completions routes to the packaged Rust HTTP boundary
     - Translate profile models, ordered text messages, native session extensions, durable client conversation bindings, completions, usage, errors, and SSE without bypassing AgentConnection
-    - Bound payloads, concurrency, timeouts, and output; explicitly reject unsupported modalities, external tools, multiple choices, and incompatible output modes
+    - Bound payloads, concurrency, timeouts, output, and advisory client function declarations; accept only auto/none external tool projection without execution authority and explicitly reject forced external execution, unsupported modalities, multiple choices, and incompatible output modes
     - Document Open WebUI, assistant-ui, curl, and SDK configuration while keeping bearer values out of arguments, logs, URLs, browser storage, and examples
     - Run real daemon/worker/provider conformance for authentication, discovery, JSON/SSE turns, continuation, restart, isolation, failure, and native-client coexistence
     - _Requirements: 2.1-2.6, 15.1-15.5, 41.1-41.6, 47.2-47.3, 51.1-51.7_
