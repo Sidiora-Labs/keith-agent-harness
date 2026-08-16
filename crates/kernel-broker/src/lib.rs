@@ -65,7 +65,25 @@ def bridge(operation):
         raise RuntimeError(reply["error"].get("message", "bridge request denied"))
     return reply.get("result")
 
-STATE = {"bridge": bridge, "__builtins__": __builtins__}
+class RlmBridge:
+    """Typed, host-authorized operations exposed to the persistent guest."""
+    def __call__(self, objective):
+        return self.run(objective)
+    def run(self, objective):
+        return bridge({"kind": "create_child", "objective": objective})
+    def send_message(self, session_id, text):
+        return bridge({"kind": "send_message", "session_id": session_id, "text": text})
+    def update_goal(self, goal_id, state, summary=None):
+        return bridge({"kind": "update_goal", "goal_id": goal_id, "state": state, "summary": summary})
+    def call_mcp(self, server, tool, arguments=None):
+        return bridge({"kind": "call_mcp", "server": server, "tool": tool, "arguments": arguments or {}})
+    def compact(self, target_tokens=32000):
+        return bridge({"kind": "compact", "target_tokens": target_tokens})
+    def create_artifact(self, text, media_type="text/plain"):
+        return bridge({"kind": "create_artifact", "media_type": media_type, "text": text})
+
+rlm = RlmBridge()
+STATE = {"bridge": bridge, "rlm": rlm, "__builtins__": __builtins__}
 
 def json_value(value):
     try:
@@ -111,7 +129,7 @@ for line in sys.__stdin__:
             saved = {}
             excluded = []
             for name, value in STATE.items():
-                if name.startswith("__") or name == "bridge":
+                if name.startswith("__") or name in ("bridge", "rlm"):
                     continue
                 try:
                     json.dumps(value)
@@ -124,7 +142,7 @@ for line in sys.__stdin__:
             emit({"event": "snapshot", "state": saved, "excluded": excluded}, request_id)
         elif kind == "restore":
             for name in list(STATE):
-                if not name.startswith("__") and name != "bridge":
+                if not name.startswith("__") and name not in ("bridge", "rlm"):
                     del STATE[name]
             STATE.update(command["state"])
             emit({"event": "restored"}, request_id)
@@ -220,6 +238,31 @@ pub struct KernelOutputChunk {
 
 pub trait KernelOutputSink: Send {
     fn emit(&mut self, chunk: &KernelOutputChunk);
+}
+
+/// Stores oversized output under the authority of the executing session.
+pub trait KernelOutputSpill: Send + Sync {
+    /// # Errors
+    ///
+    /// Returns an artifact error when output cannot be stored durably.
+    fn spill(
+        &self,
+        session_id: &SessionId,
+        bytes: &[u8],
+    ) -> Result<SpilledOutput, keith_artifacts::ArtifactError>;
+}
+
+impl<T> KernelOutputSpill for T
+where
+    T: OutputSpill,
+{
+    fn spill(
+        &self,
+        _session_id: &SessionId,
+        bytes: &[u8],
+    ) -> Result<SpilledOutput, keith_artifacts::ArtifactError> {
+        OutputSpill::spill(self, bytes)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -391,7 +434,7 @@ pub struct KernelBroker {
     root: PathBuf,
     sandbox: SandboxStatus,
     bridge: Arc<dyn BridgeHandler>,
-    spill: Option<Arc<dyn OutputSpill>>,
+    spill: Option<Arc<dyn KernelOutputSpill>>,
     kernels: Mutex<BTreeMap<KernelId, Arc<KernelProcess>>>,
 }
 
@@ -404,7 +447,7 @@ impl KernelBroker {
     pub fn open(
         root: impl AsRef<Path>,
         bridge: Arc<dyn BridgeHandler>,
-        spill: Option<Arc<dyn OutputSpill>>,
+        spill: Option<Arc<dyn KernelOutputSpill>>,
     ) -> Result<Self, KernelError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(root.join("snapshots"))?;
@@ -613,7 +656,7 @@ impl KernelBroker {
                 .as_ref()
                 .map(|spill| {
                     spill
-                        .spill(&collected)
+                        .spill(&process.spec.session_id, &collected)
                         .map_err(|error| KernelError::Artifact(error.to_string()))
                 })
                 .transpose()?
@@ -689,6 +732,7 @@ impl KernelBroker {
             return Err(KernelError::SnapshotLimit);
         }
         write_snapshot(&self.snapshot_path(&snapshot.id), &bytes)?;
+        self.prune_session_snapshots(&snapshot)?;
         process
             .last_used_ms
             .store(now.unix_millis(), Ordering::Release);
@@ -757,6 +801,37 @@ impl KernelBroker {
         serde_json::from_slice(&bytes).map_err(KernelError::from)
     }
 
+    /// Returns the newest durable snapshot owned by a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the snapshot directory or a candidate snapshot is unreadable.
+    pub fn latest_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<KernelSnapshot>, KernelError> {
+        let snapshots = self.root.join("snapshots");
+        let mut latest: Option<KernelSnapshot> = None;
+        for entry in fs::read_dir(snapshots)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                continue;
+            }
+            let candidate: KernelSnapshot = serde_json::from_slice(&fs::read(entry.path())?)?;
+            if &candidate.session_id != session_id {
+                continue;
+            }
+            let replace = latest.as_ref().is_none_or(|current| {
+                (candidate.created_at, &candidate.id) > (current.created_at, &current.id)
+            });
+            if replace {
+                latest = Some(candidate);
+            }
+        }
+        Ok(latest)
+    }
+
     /// Returns a redacted inspection without process paths, environment, or guest state.
     ///
     /// # Errors
@@ -803,12 +878,18 @@ impl KernelBroker {
     ///
     /// Returns an error when broker state is inaccessible.
     pub fn evict_idle(&self, now: UtcTimestamp) -> Result<Vec<KernelId>, KernelError> {
-        let mut kernels = self.kernels.lock().map_err(|_| KernelError::LockPoisoned)?;
-        let expired = kernels
+        let expired = self
+            .kernels
+            .lock()
+            .map_err(|_| KernelError::LockPoisoned)?
             .iter()
             .filter(|(_, process)| idle_or_expired(process, now))
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
+        for id in &expired {
+            let _ = self.snapshot(id, &CancellationToken::default(), now);
+        }
+        let mut kernels = self.kernels.lock().map_err(|_| KernelError::LockPoisoned)?;
         for id in &expired {
             kernels.remove(id);
         }
@@ -843,6 +924,24 @@ impl KernelBroker {
 
     fn snapshot_path(&self, id: &EntityId) -> PathBuf {
         self.root.join("snapshots").join(format!("{id}.json"))
+    }
+
+    fn prune_session_snapshots(&self, current: &KernelSnapshot) -> Result<(), KernelError> {
+        for entry in fs::read_dir(self.root.join("snapshots"))? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_file()
+                || file_type.is_symlink()
+                || entry.path() == self.snapshot_path(&current.id)
+            {
+                continue;
+            }
+            let candidate: KernelSnapshot = serde_json::from_slice(&fs::read(entry.path())?)?;
+            if candidate.session_id == current.session_id {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
     }
 
     fn exchange<F>(
@@ -1568,6 +1667,10 @@ mod tests {
                 )
                 .unwrap();
             assert!(snapshot.excluded.iter().any(|item| item.name == "handle"));
+            assert_eq!(
+                broker.latest_snapshot(&session).unwrap().unwrap().id,
+                snapshot.id
+            );
             snapshot_id = snapshot.id;
         }
         let broker = broker(&root, Arc::new(DenyBridge));
@@ -1599,6 +1702,21 @@ mod tests {
                 UtcTimestamp::from_unix_millis(5)
             ),
             Err(KernelError::IncompatibleSnapshot)
+        ));
+        let replacement = broker
+            .snapshot(
+                &restored,
+                &CancellationToken::default(),
+                UtcTimestamp::from_unix_millis(6),
+            )
+            .unwrap();
+        assert_eq!(
+            broker.latest_snapshot(&session).unwrap().unwrap().id,
+            replacement.id
+        );
+        assert!(matches!(
+            broker.load_snapshot(&snapshot_id),
+            Err(KernelError::SnapshotMissing)
         ));
     }
 
@@ -1672,7 +1790,7 @@ mod tests {
         let result = broker
             .execute(
                 &id,
-                "bridge({'kind':'compact','target_tokens':128})['accepted']",
+                "rlm.compact(128)['accepted']",
                 &CancellationToken::default(),
                 &mut NoKernelOutput,
                 UtcTimestamp::from_unix_millis(1),
@@ -1690,7 +1808,7 @@ mod tests {
         let denied = broker
             .execute(
                 &denied_id,
-                "bridge({'kind':'compact','target_tokens':128})",
+                "rlm.compact(128)",
                 &CancellationToken::default(),
                 &mut NoKernelOutput,
                 UtcTimestamp::from_unix_millis(3),

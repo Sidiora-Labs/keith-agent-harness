@@ -455,7 +455,7 @@
     - Document and test install, first run, service lifecycle, backup, restore, update, rollback, uninstall, and data choices
     - Run clean-install provider/tool/restart/uninstall matrix
     - _Requirements: 49.1-49.5_
-  - [-] 13.4 OpenAI-compatible application adapter over AgentConnection
+  - [x] 13.4 OpenAI-compatible application adapter over AgentConnection
     - Add separately authenticated OpenAI-compatible model discovery and chat-completions routes to the packaged Rust HTTP boundary
     - Translate profile models, ordered text messages, native session extensions, durable client conversation bindings, completions, usage, errors, and SSE without bypassing AgentConnection
     - Bound payloads, concurrency, timeouts, and output; explicitly reject unsupported modalities, external tools, multiple choices, and incompatible output modes

@@ -1306,7 +1306,7 @@ requires = ["11.5", "12.5", "13.2"]
 
 [task.13.4]
 title  = "OpenAI-compatible application adapter over AgentConnection"
-status = "in_progress"
+status = "done"
 wave   = 23
 do_1   = "Add separately authenticated OpenAI-compatible model discovery and chat-completions routes to the packaged Rust HTTP boundary"
 do_2   = "Translate profile models, ordered text messages, native session extensions, durable client conversation bindings, completions, usage, errors, and SSE without bypassing AgentConnection"

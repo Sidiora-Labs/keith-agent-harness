@@ -59,9 +59,10 @@ use keith_goals::{
 };
 use keith_initiative::{InitiativeCandidate, InitiativeSignals};
 use keith_kernel_broker::{
-    DenyBridge, KernelBroker, KernelIsolation, KernelLimits, KernelNetwork, KernelRuntime,
-    KernelSpec, NoKernelOutput,
+    BridgeHandler, KernelBroker, KernelIsolation, KernelLimits, KernelNetwork, KernelOutputSpill,
+    KernelRuntime, KernelSpec, NoKernelOutput,
 };
+use keith_kernel_protocol::{BridgeCapability, BridgeContext, BridgeFailure, BridgeOperation};
 use keith_knowledge::{KnowledgeError, KnowledgeService};
 use keith_mcp::McpManager;
 use keith_memory::{MemoryPolicy, MemoryRecordState, MemoryService};
@@ -197,11 +198,11 @@ pub struct LocalRuntimeConfig {
 }
 
 pub struct LocalRuntime {
-    profiles: ProfileRegistry<EmbeddedStore>,
+    profiles: Arc<ProfileRegistry<EmbeddedStore>>,
     sessions: SessionStore,
-    actions: PersistentActionInbox<EmbeddedStore>,
-    goals: GoalService,
-    children: ChildService,
+    actions: Arc<PersistentActionInbox<EmbeddedStore>>,
+    goals: Arc<GoalService>,
+    children: Arc<ChildService>,
     scheduler: LocalScheduler,
     scheduler_claimant: EntityId,
     retrieval: Arc<RetrievalService>,
@@ -227,12 +228,436 @@ struct SystemModules {
     deliveries: Arc<LocalDelivery>,
     experience: Arc<ExperienceService<EmbeddedStore>>,
     kernels: Arc<KernelBroker>,
+    kernel_bridge: Arc<RuntimeBridge>,
     kernel_sessions: Arc<Mutex<BTreeMap<SessionId, KernelId>>>,
     mcp: Arc<Mutex<McpManager>>,
     plans: Arc<PlanService<EmbeddedStore>>,
     plugins: Arc<Mutex<PluginHost>>,
     resources: Arc<ResourceGovernor<EmbeddedStore>>,
     telemetry: Arc<TelemetryHub>,
+}
+
+#[derive(Clone, Debug)]
+enum PendingKernelEffect {
+    LinkChild {
+        child_id: keith_agent_types::ChildId,
+        child_session_id: SessionId,
+    },
+    Compact {
+        target_tokens: u64,
+    },
+}
+
+struct RuntimeBridge {
+    sessions: SessionStore,
+    profiles: Arc<ProfileRegistry<EmbeddedStore>>,
+    actions: Arc<PersistentActionInbox<EmbeddedStore>>,
+    goals: Arc<GoalService>,
+    children: Arc<ChildService>,
+    artifacts: Arc<ArtifactService>,
+    mcp: Arc<Mutex<McpManager>>,
+    root_scope: Option<RootTreeId>,
+    pending: Mutex<BTreeMap<SessionId, Vec<PendingKernelEffect>>>,
+}
+
+struct KernelArtifactSpill {
+    sessions: SessionStore,
+    artifacts: Arc<ArtifactService>,
+    root_scope: Option<RootTreeId>,
+}
+
+impl KernelArtifactSpill {
+    fn manifest(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionManifest, keith_artifacts::ArtifactError> {
+        let manifest = self
+            .sessions
+            .manifest(session_id)
+            .map_err(|_| keith_artifacts::ArtifactError::AccessDenied)?;
+        if self
+            .root_scope
+            .as_ref()
+            .is_some_and(|root| root != &manifest.root_tree_id)
+        {
+            return Err(keith_artifacts::ArtifactError::AccessDenied);
+        }
+        Ok(manifest)
+    }
+}
+
+impl KernelOutputSpill for KernelArtifactSpill {
+    fn spill(
+        &self,
+        session_id: &SessionId,
+        bytes: &[u8],
+    ) -> Result<keith_artifacts::SpilledOutput, keith_artifacts::ArtifactError> {
+        let manifest = self.manifest(session_id)?;
+        let spill = self.artifacts.scoped_spill(
+            ArtifactScope {
+                root_tree_id: manifest.root_tree_id,
+                session_id: manifest.session_id,
+                profile_id: manifest.profile_id,
+            },
+            ArtifactSource::Kernel,
+            "auto",
+            RetentionPolicy::Retain,
+        );
+        keith_artifacts::OutputSpill::spill(&spill, bytes)
+    }
+}
+
+impl RuntimeBridge {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        sessions: SessionStore,
+        profiles: Arc<ProfileRegistry<EmbeddedStore>>,
+        actions: Arc<PersistentActionInbox<EmbeddedStore>>,
+        goals: Arc<GoalService>,
+        children: Arc<ChildService>,
+        artifacts: Arc<ArtifactService>,
+        mcp: Arc<Mutex<McpManager>>,
+        root_scope: Option<RootTreeId>,
+    ) -> Self {
+        Self {
+            sessions,
+            profiles,
+            actions,
+            goals,
+            children,
+            artifacts,
+            mcp,
+            root_scope,
+            pending: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn manifest(&self, session_id: &SessionId) -> Result<SessionManifest, BridgeFailure> {
+        let manifest = self
+            .sessions
+            .manifest(session_id)
+            .map_err(|error| bridge_failure("session", error))?;
+        if manifest.archived
+            || self
+                .root_scope
+                .as_ref()
+                .is_some_and(|root| root != &manifest.root_tree_id)
+        {
+            return Err(BridgeFailure {
+                code: "scope_denied".into(),
+                message: "kernel session is outside the owning runtime scope".into(),
+            });
+        }
+        Ok(manifest)
+    }
+
+    fn profile(&self, manifest: &SessionManifest) -> Result<RegisteredProfile, BridgeFailure> {
+        self.profiles
+            .get(&manifest.profile_id)
+            .map_err(|error| bridge_failure("profile", error))?
+            .ok_or_else(|| BridgeFailure {
+                code: "profile".into(),
+                message: "kernel session profile was not found".into(),
+            })
+    }
+
+    fn queue_effect(
+        &self,
+        session_id: &SessionId,
+        effect: PendingKernelEffect,
+    ) -> Result<(), BridgeFailure> {
+        self.pending
+            .lock()
+            .map_err(|_| BridgeFailure {
+                code: "state".into(),
+                message: "kernel bridge state is unavailable".into(),
+            })?
+            .entry(session_id.clone())
+            .or_default()
+            .push(effect);
+        Ok(())
+    }
+
+    fn take_effects(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<PendingKernelEffect>, LocalRuntimeError> {
+        Ok(self
+            .pending
+            .lock()
+            .map_err(|_| LocalRuntimeError::LockPoisoned)?
+            .remove(session_id)
+            .unwrap_or_default())
+    }
+
+    fn create_child(
+        &self,
+        context: &BridgeContext,
+        objective: &str,
+    ) -> Result<serde_json::Value, BridgeFailure> {
+        validate_prompt_text(objective).map_err(|error| bridge_failure("invalid", error))?;
+        let manifest = self.manifest(&context.session_id)?;
+        let profile = self.profile(&manifest)?;
+        let child = self
+            .children
+            .create(
+                ChildSpec {
+                    parent_session_id: context.session_id.clone(),
+                    objective: objective.to_owned(),
+                    workspace_mode: ChildWorkspaceMode::SharedParent,
+                    requested_tools: allowed_tools(&profile),
+                    provider: profile.profile.model_route.provider.clone(),
+                    model: profile.profile.model_route.model.clone(),
+                    limits: ChildLimits {
+                        max_depth: profile.profile.autonomy.max_depth,
+                        max_direct_children: profile.profile.autonomy.max_children,
+                        ..ChildLimits::default()
+                    },
+                    cancellation: ChildCancellation::Propagate,
+                    retention: ChildRetention::Retain,
+                },
+                UtcTimestamp::now().map_err(|error| bridge_failure("clock", error))?,
+            )
+            .map_err(|error| bridge_failure("child", error))?;
+        let now = UtcTimestamp::now().map_err(|error| bridge_failure("clock", error))?;
+        let action = child_prompt_action(&child, objective, now);
+        if let Err(error) = self.actions.submit(action.clone(), now) {
+            let _ = self
+                .children
+                .cancel(&child.id, "child objective admission failed", now);
+            return Err(bridge_failure("action", error));
+        }
+        if let Err(error) = self.queue_effect(
+            &context.session_id,
+            PendingKernelEffect::LinkChild {
+                child_id: child.id.clone(),
+                child_session_id: child.session_id.clone(),
+            },
+        ) {
+            let _ = self
+                .actions
+                .cancel(&action.id, now, "kernel bridge state became unavailable");
+            let _ = self
+                .children
+                .cancel(&child.id, "kernel bridge state became unavailable", now);
+            return Err(error);
+        }
+        Ok(serde_json::json!({
+            "rlm_child_id": child.id,
+            "session_id": child.session_id,
+            "name": format!("subagent-{}", child.id),
+            "model": format!("{}/{}", child.provider, child.model),
+            "status": "admitted",
+            "action_id": action.id,
+        }))
+    }
+
+    fn send_message(
+        &self,
+        context: &BridgeContext,
+        target_session_id: &SessionId,
+        text: &str,
+    ) -> Result<serde_json::Value, BridgeFailure> {
+        validate_prompt_text(text).map_err(|error| bridge_failure("invalid", error))?;
+        self.manifest(&context.session_id)?;
+        self.manifest(target_session_id)?;
+        let sender = self
+            .children
+            .find_session(&context.session_id)
+            .map_err(|error| bridge_failure("child", error))?;
+        let target = self
+            .children
+            .find_session(target_session_id)
+            .map_err(|error| bridge_failure("child", error))?;
+        let now = UtcTimestamp::now().map_err(|error| bridge_failure("clock", error))?;
+        let (message, action) = if let Some(sender) = sender {
+            if target_session_id == &sender.parent_session_id {
+                let message = self
+                    .children
+                    .send_message(
+                        &sender.id,
+                        ChildMessageSender::Child,
+                        ChildMessageKind::Text { text: text.into() },
+                        now,
+                    )
+                    .map_err(|error| bridge_failure("message", error))?;
+                let action = child_result_action(
+                    &message,
+                    target_session_id.clone(),
+                    text.to_owned(),
+                    Vec::new(),
+                    now,
+                );
+                (message, action)
+            } else {
+                return Err(BridgeFailure {
+                    code: "scope_denied".into(),
+                    message: "child kernels may message only their direct parent".into(),
+                });
+            }
+        } else if let Some(target) = target {
+            if target.parent_session_id != context.session_id {
+                return Err(BridgeFailure {
+                    code: "scope_denied".into(),
+                    message: "kernel may message only a direct child session".into(),
+                });
+            }
+            let message = self
+                .children
+                .send_message(
+                    &target.id,
+                    ChildMessageSender::Parent,
+                    ChildMessageKind::Text { text: text.into() },
+                    now,
+                )
+                .map_err(|error| bridge_failure("message", error))?;
+            let action = child_follow_up_action(&target, text, now);
+            (message, action)
+        } else {
+            return Err(BridgeFailure {
+                code: "scope_denied".into(),
+                message: "target is not a direct parent or child session".into(),
+            });
+        };
+        self.actions
+            .submit(action.clone(), now)
+            .map_err(|error| bridge_failure("action", error))?;
+        Ok(serde_json::json!({
+            "message_id": message.id,
+            "action_id": action.id,
+            "accepted": true,
+        }))
+    }
+
+    fn update_goal(
+        &self,
+        context: &BridgeContext,
+        goal_id: &keith_agent_types::GoalId,
+        state: &str,
+        summary: Option<&str>,
+    ) -> Result<serde_json::Value, BridgeFailure> {
+        self.manifest(&context.session_id)?;
+        let current = self
+            .goals
+            .get(goal_id)
+            .map_err(|error| bridge_failure("goal", error))?
+            .ok_or_else(|| BridgeFailure {
+                code: "goal".into(),
+                message: "goal was not found".into(),
+            })?;
+        if current.session_id != context.session_id {
+            return Err(BridgeFailure {
+                code: "scope_denied".into(),
+                message: "goal is outside the kernel session".into(),
+            });
+        }
+        let desired = parse_bridge_goal_state(state)?;
+        let now = UtcTimestamp::now().map_err(|error| bridge_failure("clock", error))?;
+        let goal = transition_bridge_goal(&self.goals, current, desired, summary, now)?;
+        Ok(serde_json::json!({
+            "goal_id": goal.id,
+            "state": bridge_goal_state_name(goal.state),
+            "accepted": true,
+        }))
+    }
+
+    fn call_mcp(
+        &self,
+        context: &BridgeContext,
+        server: &str,
+        tool: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<serde_json::Value, BridgeFailure> {
+        let manifest = self.manifest(&context.session_id)?;
+        let mut manager = self.mcp.lock().map_err(|_| BridgeFailure {
+            code: "mcp".into(),
+            message: "MCP manager is unavailable".into(),
+        })?;
+        manager
+            .open_session(&context.session_id, manifest.profile_id, server)
+            .map_err(|error| bridge_failure("mcp", error))?;
+        serde_json::to_value(
+            manager
+                .call_tool(&context.session_id, server, tool, arguments)
+                .map_err(|error| bridge_failure("mcp", error))?,
+        )
+        .map_err(|error| bridge_failure("mcp", error))
+    }
+
+    fn create_artifact(
+        &self,
+        context: &BridgeContext,
+        media_type: &str,
+        text: &str,
+    ) -> Result<serde_json::Value, BridgeFailure> {
+        let manifest = self.manifest(&context.session_id)?;
+        let metadata = self
+            .artifacts
+            .create(NewArtifact {
+                scope: ArtifactScope {
+                    root_tree_id: manifest.root_tree_id,
+                    session_id: manifest.session_id,
+                    profile_id: manifest.profile_id,
+                },
+                source: ArtifactSource::Kernel,
+                media_type,
+                bytes: text.as_bytes(),
+                created_at: UtcTimestamp::now().map_err(|error| bridge_failure("clock", error))?,
+                display: None,
+                retention: RetentionPolicy::Retain,
+            })
+            .map_err(|error| bridge_failure("artifact", error))?;
+        Ok(serde_json::json!({
+            "artifact_id": metadata.id,
+            "media_type": metadata.media_type,
+            "byte_length": metadata.byte_length,
+            "sha256": metadata.sha256,
+        }))
+    }
+}
+
+impl BridgeHandler for RuntimeBridge {
+    fn handle(
+        &self,
+        context: &BridgeContext,
+        operation: &BridgeOperation,
+    ) -> Result<serde_json::Value, BridgeFailure> {
+        match operation {
+            BridgeOperation::CreateChild { objective } => self.create_child(context, objective),
+            BridgeOperation::SendMessage { session_id, text } => {
+                self.send_message(context, session_id, text)
+            }
+            BridgeOperation::UpdateGoal {
+                goal_id,
+                state,
+                summary,
+            } => self.update_goal(context, goal_id, state, summary.as_deref()),
+            BridgeOperation::CallMcp {
+                server,
+                tool,
+                arguments,
+            } => self.call_mcp(context, server, tool, arguments),
+            BridgeOperation::Compact { target_tokens } => {
+                self.manifest(&context.session_id)?;
+                if !(1_024..=96_000).contains(target_tokens) {
+                    return Err(BridgeFailure {
+                        code: "invalid".into(),
+                        message: "compaction target_tokens must be between 1024 and 96000".into(),
+                    });
+                }
+                self.queue_effect(
+                    &context.session_id,
+                    PendingKernelEffect::Compact {
+                        target_tokens: *target_tokens,
+                    },
+                )?;
+                Ok(serde_json::json!({"accepted": true, "target_tokens": target_tokens}))
+            }
+            BridgeOperation::CreateArtifact { media_type, text } => {
+                self.create_artifact(context, media_type, text)
+            }
+        }
+    }
 }
 
 struct ProfileModules {
@@ -249,7 +674,9 @@ impl SystemModules {
     fn open(
         data_root: &Path,
         state_path: &Path,
-        credentials: Arc<EncryptedCredentialStore>,
+        mcp: Arc<Mutex<McpManager>>,
+        kernel_bridge: Arc<RuntimeBridge>,
+        kernel_spill: Arc<KernelArtifactSpill>,
     ) -> Result<Self, LocalRuntimeError> {
         let commitment_repository =
             Arc::new(EmbeddedStore::open(state_path, Some(&FileBackupHook))?);
@@ -271,9 +698,12 @@ impl SystemModules {
             ExperienceConfig::default(),
         )
         .map_err(module_error)?;
-        let kernels = KernelBroker::open(data_root.join("kernels"), Arc::new(DenyBridge), None)
-            .map_err(module_error)?;
-        let mcp = McpManager::open(data_root.join("mcp"), credentials, 32).map_err(module_error)?;
+        let kernels = KernelBroker::open(
+            data_root.join("kernels"),
+            kernel_bridge.clone(),
+            Some(kernel_spill),
+        )
+        .map_err(module_error)?;
         let plans = PlanService::new(EmbeddedStore::open(state_path, Some(&FileBackupHook))?);
         let safe_mode = std::env::var_os("KEITH_PLUGIN_SAFE_MODE").is_some();
         let plugins =
@@ -293,8 +723,9 @@ impl SystemModules {
             deliveries: Arc::new(deliveries),
             experience: Arc::new(experience),
             kernels: Arc::new(kernels),
+            kernel_bridge,
             kernel_sessions: Arc::new(Mutex::new(BTreeMap::new())),
-            mcp: Arc::new(Mutex::new(mcp)),
+            mcp,
             plans: Arc::new(plans),
             plugins: Arc::new(Mutex::new(plugins)),
             resources: Arc::new(resources),
@@ -532,8 +963,9 @@ impl LocalRuntime {
         migrate_legacy_session_root(&config.data_root)?;
         let state_path = config.data_root.join("state.sqlite");
         let state = EmbeddedStore::open(&state_path, Some(&FileBackupHook))?;
-        let profiles = ProfileRegistry::new(state);
+        let profiles = Arc::new(ProfileRegistry::new(state));
         let sessions = SessionStore::open(config.data_root.join("sessions"))?;
+        migrate_legacy_child_session_store(&config.data_root, sessions.root())?;
         let credentials = Arc::new(EncryptedCredentialStore::open(
             config.credential_root,
             config.credential_key,
@@ -621,23 +1053,24 @@ impl LocalRuntime {
             config.data_root.join("artifacts"),
             ArtifactLimits::default(),
         )?);
-        let actions = PersistentActionInbox::new(
+        let actions = Arc::new(PersistentActionInbox::new(
             EmbeddedStore::open(&state_path, Some(&FileBackupHook))?,
             ActionInboxConfig::default(),
-        )?;
+        )?);
         let goal_actions = PersistentActionInbox::new(
             EmbeddedStore::open(&state_path, Some(&FileBackupHook))?,
             ActionInboxConfig::default(),
         )?;
-        let goals = PersistentGoalService::new(
+        let goals = Arc::new(PersistentGoalService::new(
             EmbeddedStore::open(&state_path, Some(&FileBackupHook))?,
             goal_actions,
-        );
-        let children = ChildCoordinator::open(
+        ));
+        let children = Arc::new(ChildCoordinator::open_with_session_store(
             config.data_root.join("children"),
             EmbeddedStore::open(&state_path, Some(&FileBackupHook))?,
             Arc::clone(&artifacts),
-        )?;
+            sessions.clone(),
+        )?);
         let schedule_repository =
             Arc::new(EmbeddedStore::open(&state_path, Some(&FileBackupHook))?);
         let schedule_sink = Arc::new(PersistentActionInbox::new(
@@ -656,8 +1089,27 @@ impl LocalRuntime {
             None,
         )?);
         let background = Arc::new(EmbeddedStore::open(&state_path, Some(&FileBackupHook))?);
+        let mcp = Arc::new(Mutex::new(
+            McpManager::open(data_root.join("mcp"), Arc::clone(&credentials), 32)
+                .map_err(module_error)?,
+        ));
+        let kernel_bridge = Arc::new(RuntimeBridge::new(
+            sessions.clone(),
+            Arc::clone(&profiles),
+            Arc::clone(&actions),
+            Arc::clone(&goals),
+            Arc::clone(&children),
+            Arc::clone(&artifacts),
+            Arc::clone(&mcp),
+            config.root_scope.clone(),
+        ));
+        let kernel_spill = Arc::new(KernelArtifactSpill {
+            sessions: sessions.clone(),
+            artifacts: Arc::clone(&artifacts),
+            root_scope: config.root_scope.clone(),
+        });
         let system_modules =
-            SystemModules::open(&data_root, &state_path, Arc::clone(&credentials))?;
+            SystemModules::open(&data_root, &state_path, mcp, kernel_bridge, kernel_spill)?;
         let runtime = Self {
             profiles,
             sessions,
@@ -903,21 +1355,37 @@ impl LocalRuntime {
         )
         .run(request, &cancellation);
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let compaction_result = match &result {
-            Ok(run) => {
+        let bridge_effects = self.apply_kernel_effects(session_id, &mut writer);
+        let compaction_result = match (&result, &bridge_effects) {
+            (Ok(run), Ok(requested_target)) => {
                 let reported_tokens = run
                     .usage
                     .input_tokens
                     .saturating_add(run.usage.output_tokens);
-                self.compact_writer_if_needed(
-                    &profile,
-                    &mut writer,
-                    reported_tokens,
-                    &resolver,
-                    &cancellation,
-                )
+                if let Some(target_tokens) = requested_target {
+                    self.compact_writer_with_policy(
+                        &profile,
+                        &mut writer,
+                        1,
+                        CompactionPolicy {
+                            trigger_tokens: 1,
+                            target_tokens: *target_tokens,
+                            ..CompactionPolicy::default()
+                        },
+                        &resolver,
+                        &cancellation,
+                    )
+                } else {
+                    self.compact_writer_if_needed(
+                        &profile,
+                        &mut writer,
+                        reported_tokens,
+                        &resolver,
+                        &cancellation,
+                    )
+                }
             }
-            Err(_) => Ok(Usage::default()),
+            (Err(_), _) | (_, Err(_)) => Ok(Usage::default()),
         };
         self.finish_turn_lease(session_id, &lease_id)?;
         match &result {
@@ -992,6 +1460,7 @@ impl LocalRuntime {
             }
         }
         result?;
+        bridge_effects?;
         compaction_result?;
         drop(writer);
         self.snapshot(session_id, generation, SessionState::Ready)
@@ -1007,9 +1476,27 @@ impl LocalRuntime {
     ) -> Result<Usage, LocalRuntimeError> {
         let ancestry = writer.active_ancestry()?;
         let estimated_tokens = reported_tokens.max(estimated_context_tokens(&ancestry));
-        let Some(request) =
-            writer.request_compaction(estimated_tokens, CompactionPolicy::default())?
-        else {
+        self.compact_writer_with_policy(
+            profile,
+            writer,
+            estimated_tokens,
+            CompactionPolicy::default(),
+            credentials,
+            cancellation,
+        )
+    }
+
+    fn compact_writer_with_policy(
+        &self,
+        profile: &RegisteredProfile,
+        writer: &mut keith_session_store::SessionWriter,
+        estimated_tokens: u64,
+        policy: CompactionPolicy,
+        credentials: &dyn CredentialResolver,
+        cancellation: &CancellationToken,
+    ) -> Result<Usage, LocalRuntimeError> {
+        let ancestry = writer.active_ancestry()?;
+        let Some(request) = writer.request_compaction(estimated_tokens, policy)? else {
             return Ok(Usage::default());
         };
         let (output, usage) = match self.model_compaction_output(
@@ -1036,6 +1523,39 @@ impl LocalRuntime {
             )
             .map_err(module_error)?;
         Ok(usage)
+    }
+
+    fn apply_kernel_effects(
+        &self,
+        session_id: &SessionId,
+        writer: &mut keith_session_store::SessionWriter,
+    ) -> Result<Option<u64>, LocalRuntimeError> {
+        let mut requested_target: Option<u64> = None;
+        for effect in self.system_modules.kernel_bridge.take_effects(session_id)? {
+            match effect {
+                PendingKernelEffect::LinkChild {
+                    child_id,
+                    child_session_id,
+                } => {
+                    let parent = writer.manifest().active_leaf.clone();
+                    writer.append(
+                        parent,
+                        UtcTimestamp::now()?,
+                        SessionEntryPayload::ChildLinked {
+                            child_id,
+                            child_session_id,
+                        },
+                    )?;
+                }
+                PendingKernelEffect::Compact { target_tokens } => {
+                    requested_target = Some(
+                        requested_target
+                            .map_or(target_tokens, |current| current.min(target_tokens)),
+                    );
+                }
+            }
+        }
+        Ok(requested_target)
     }
 
     fn model_compaction_output(
@@ -1630,6 +2150,15 @@ impl LocalRuntime {
             },
             UtcTimestamp::now()?,
         )?;
+        let now = UtcTimestamp::now()?;
+        let action = child_prompt_action(&child, &request.objective, now);
+        let action_id = action.id.clone();
+        if let Err(error) = self.actions.submit(action, now) {
+            let _ = self
+                .children
+                .cancel(&child.id, "child objective admission failed", now);
+            return Err(error.into());
+        }
         let link_result = (|| -> Result<(), LocalRuntimeError> {
             let mut writer = self.sessions.acquire_writer(
                 &request.parent_session_id,
@@ -1647,6 +2176,7 @@ impl LocalRuntime {
             Ok(())
         })();
         if let Err(error) = link_result {
+            let _ = self.actions.cancel(&action_id, now, "parent link failed");
             let _ = self.children.cancel(
                 &child.id,
                 "Parent session link could not be committed",
@@ -1693,6 +2223,29 @@ impl LocalRuntime {
                 &request.child_id,
                 ChildMessageSender::Parent,
                 ChildMessageKind::Artifacts { references },
+                now,
+            )?;
+        }
+        if !request.text.trim().is_empty() || !request.artifact_ids.is_empty() {
+            self.actions.submit(
+                SessionAction {
+                    id: ActionId::new(),
+                    session_id: child.session_id.clone(),
+                    source: ActionSource::FollowUp,
+                    delivery: ActionDeliveryPolicy::Immediate,
+                    priority: ActionPriority::User,
+                    created_at: now,
+                    not_before: None,
+                    deadline: None,
+                    limits: ActionLimits::default(),
+                    reply_route: Some(ActionReplyRoute::Session {
+                        session_id: child.parent_session_id.clone(),
+                    }),
+                    payload: ActionPayload::ChildMessage {
+                        text: request.text.clone(),
+                        artifacts: request.artifact_ids.clone(),
+                    },
+                },
                 now,
             )?;
         }
@@ -2150,7 +2703,11 @@ impl LocalRuntime {
         generation: Generation,
         operator_initiated: bool,
     ) -> Result<Option<SessionSnapshot>, LocalRuntimeError> {
-        if !operator_initiated && !self.background_allowed(session_id, UtcTimestamp::now()?)? {
+        let child = self.children.find_session(session_id)?;
+        if !operator_initiated
+            && child.is_none()
+            && !self.background_allowed(session_id, UtcTimestamp::now()?)?
+        {
             return Ok(None);
         }
         let mut last_snapshot = None;
@@ -2170,10 +2727,28 @@ impl LocalRuntime {
             let action_id = selected.record.action.id.clone();
             self.actions
                 .mark_running(&action_id, UtcTimestamp::now()?)?;
-            let text = self.action_text(session_id, &selected.record.action.payload)?;
+            let text = match self.action_text(session_id, &selected.record.action.payload) {
+                Ok(text) => text,
+                Err(error) => {
+                    self.actions
+                        .fail(&action_id, UtcTimestamp::now()?, error.to_string())?;
+                    return Err(error);
+                }
+            };
             match self.run_prompt(session_id, &text, generation) {
                 Ok(snapshot) => {
-                    self.enqueue_action_delivery(&selected.record.action, &snapshot)?;
+                    let delivery = self
+                        .enqueue_action_delivery(&selected.record.action, &snapshot)
+                        .and_then(|()| {
+                            child
+                                .as_ref()
+                                .map_or(Ok(()), |child| self.publish_child_result(child, &snapshot))
+                        });
+                    if let Err(error) = delivery {
+                        self.actions
+                            .fail(&action_id, UtcTimestamp::now()?, error.to_string())?;
+                        return Err(error);
+                    }
                     self.actions.complete(&action_id, UtcTimestamp::now()?)?;
                     last_snapshot = Some(snapshot);
                 }
@@ -2185,6 +2760,64 @@ impl LocalRuntime {
             }
         }
         Ok(last_snapshot)
+    }
+
+    fn publish_child_result(
+        &self,
+        child: &keith_subagents::ChildProjection,
+        snapshot: &SessionSnapshot,
+    ) -> Result<(), LocalRuntimeError> {
+        let text = snapshot
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == ProjectionMessageRole::Assistant)
+            .map(|message| message.text.clone())
+            .filter(|text| !text.trim().is_empty())
+            .ok_or_else(|| {
+                LocalRuntimeError::Invalid(
+                    "child action completed without an assistant response".into(),
+                )
+            })?;
+        let artifact_ids = self.latest_turn_artifacts(&child.session_id)?;
+        let now = UtcTimestamp::now()?;
+        let message = self.children.send_message(
+            &child.id,
+            ChildMessageSender::Child,
+            ChildMessageKind::Text { text: text.clone() },
+            now,
+        )?;
+        if !artifact_ids.is_empty() {
+            let manifest = self.sessions.manifest(&child.session_id)?;
+            self.children.send_message(
+                &child.id,
+                ChildMessageSender::Child,
+                ChildMessageKind::Artifacts {
+                    references: artifact_ids
+                        .iter()
+                        .cloned()
+                        .map(|id| ArtifactReference {
+                            id,
+                            root_tree_id: manifest.root_tree_id.clone(),
+                            profile_id: manifest.profile_id.clone(),
+                        })
+                        .collect(),
+                },
+                now,
+            )?;
+        }
+        self.actions.submit(
+            child_result_action(
+                &message,
+                child.parent_session_id.clone(),
+                text,
+                artifact_ids,
+                now,
+            ),
+            now,
+        )?;
+        self.children.set_waiting(&child.id, true, now)?;
+        Ok(())
     }
 
     fn enqueue_action_delivery(
@@ -3736,6 +4369,13 @@ impl LocalRuntime {
                 .entry(plugin_tool_name(plugin_id))
                 .or_insert(ExecutionDecision::Allow);
         }
+        if let Some(child) = self.children.find_session(session_id)? {
+            for (name, decision) in &mut per_tool {
+                if !child.allowed_tools.contains(name) {
+                    *decision = ExecutionDecision::Deny;
+                }
+            }
+        }
         let profile_rules = ExecutionRules {
             default: ExecutionDecision::Deny,
             per_tool,
@@ -4012,6 +4652,167 @@ fn allowed_tools(profile: &RegisteredProfile) -> BTreeSet<String> {
         .filter(|(_, permission)| **permission != ToolPermission::Deny)
         .map(|(name, _)| name.clone())
         .collect()
+}
+
+fn bridge_failure(code: &str, error: impl std::fmt::Display) -> BridgeFailure {
+    BridgeFailure {
+        code: code.into(),
+        message: error.to_string(),
+    }
+}
+
+fn child_prompt_action(
+    child: &keith_subagents::ChildRecord,
+    objective: &str,
+    now: UtcTimestamp,
+) -> SessionAction {
+    SessionAction {
+        id: ActionId::new(),
+        session_id: child.session_id.clone(),
+        source: ActionSource::FollowUp,
+        delivery: ActionDeliveryPolicy::Immediate,
+        priority: ActionPriority::User,
+        created_at: now,
+        not_before: None,
+        deadline: None,
+        limits: ActionLimits::default(),
+        reply_route: Some(ActionReplyRoute::Session {
+            session_id: child.parent_session_id.clone(),
+        }),
+        payload: ActionPayload::Prompt {
+            text: format!("[task from parent]\n{objective}"),
+        },
+    }
+}
+
+fn child_follow_up_action(
+    child: &keith_subagents::ChildProjection,
+    text: &str,
+    now: UtcTimestamp,
+) -> SessionAction {
+    SessionAction {
+        id: ActionId::new(),
+        session_id: child.session_id.clone(),
+        source: ActionSource::FollowUp,
+        delivery: ActionDeliveryPolicy::Immediate,
+        priority: ActionPriority::User,
+        created_at: now,
+        not_before: None,
+        deadline: None,
+        limits: ActionLimits::default(),
+        reply_route: Some(ActionReplyRoute::Session {
+            session_id: child.parent_session_id.clone(),
+        }),
+        payload: ActionPayload::ChildMessage {
+            text: text.to_owned(),
+            artifacts: Vec::new(),
+        },
+    }
+}
+
+fn child_result_action(
+    message: &keith_subagents::ChildMessage,
+    parent_session_id: SessionId,
+    text: String,
+    artifacts: Vec<keith_agent_types::ArtifactId>,
+    now: UtcTimestamp,
+) -> SessionAction {
+    SessionAction {
+        id: ActionId::new(),
+        session_id: parent_session_id,
+        source: ActionSource::Child {
+            child_id: message.child_id.clone(),
+            message_id: message.id.clone(),
+        },
+        delivery: ActionDeliveryPolicy::Immediate,
+        priority: ActionPriority::ChildResult,
+        created_at: now,
+        not_before: None,
+        deadline: None,
+        limits: ActionLimits::default(),
+        reply_route: Some(ActionReplyRoute::Session {
+            session_id: message.child_session_id.clone(),
+        }),
+        payload: ActionPayload::ChildMessage { text, artifacts },
+    }
+}
+
+fn parse_bridge_goal_state(state: &str) -> Result<RuntimeGoalState, BridgeFailure> {
+    match state.trim().to_ascii_lowercase().as_str() {
+        "draft" => Ok(RuntimeGoalState::Draft),
+        "ready" => Ok(RuntimeGoalState::Ready),
+        "running" => Ok(RuntimeGoalState::Running),
+        "waiting" => Ok(RuntimeGoalState::Waiting),
+        "reviewing" => Ok(RuntimeGoalState::Reviewing),
+        "paused" => Ok(RuntimeGoalState::Paused),
+        "blocked" => Ok(RuntimeGoalState::Blocked),
+        "complete" => Ok(RuntimeGoalState::Complete),
+        "failed" => Ok(RuntimeGoalState::Failed),
+        "cancelled" => Ok(RuntimeGoalState::Cancelled),
+        _ => Err(BridgeFailure {
+            code: "invalid".into(),
+            message: "unknown goal state".into(),
+        }),
+    }
+}
+
+const fn bridge_goal_state_name(state: RuntimeGoalState) -> &'static str {
+    match state {
+        RuntimeGoalState::Draft => "draft",
+        RuntimeGoalState::Ready => "ready",
+        RuntimeGoalState::Running => "running",
+        RuntimeGoalState::Waiting => "waiting",
+        RuntimeGoalState::Reviewing => "reviewing",
+        RuntimeGoalState::Paused => "paused",
+        RuntimeGoalState::Blocked => "blocked",
+        RuntimeGoalState::Complete => "complete",
+        RuntimeGoalState::Failed => "failed",
+        RuntimeGoalState::Cancelled => "cancelled",
+    }
+}
+
+fn transition_bridge_goal(
+    goals: &GoalService,
+    mut current: keith_goals::Goal,
+    desired: RuntimeGoalState,
+    summary: Option<&str>,
+    now: UtcTimestamp,
+) -> Result<keith_goals::Goal, BridgeFailure> {
+    if current.state == desired {
+        return Ok(current);
+    }
+    if desired == RuntimeGoalState::Running && current.state == RuntimeGoalState::Draft {
+        current = goals
+            .transition(&current.id, RuntimeGoalState::Ready, None, now)
+            .map_err(|error| bridge_failure("goal", error))?;
+    }
+    let detail = summary
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| bridge_goal_state_name(desired));
+    match desired {
+        RuntimeGoalState::Paused => goals.pause(&current.id, now),
+        RuntimeGoalState::Blocked => goals.block(&current.id, detail, now),
+        RuntimeGoalState::Cancelled => goals.cancel(&current.id, detail, now),
+        RuntimeGoalState::Complete | RuntimeGoalState::Failed => {
+            goals.transition(&current.id, desired, Some(detail.into()), now)
+        }
+        RuntimeGoalState::Running
+            if matches!(
+                current.state,
+                RuntimeGoalState::Paused | RuntimeGoalState::Blocked
+            ) =>
+        {
+            goals.resume(&current.id, now)
+        }
+        RuntimeGoalState::Draft => {
+            return Err(BridgeFailure {
+                code: "invalid".into(),
+                message: "a goal cannot transition back to draft".into(),
+            });
+        }
+        _ => goals.transition(&current.id, desired, None, now),
+    }
+    .map_err(|error| bridge_failure("goal", error))
 }
 
 const fn child_workspace_mode(mode: keith_protocol::ChildWorkspaceMode) -> ChildWorkspaceMode {
@@ -4430,6 +5231,45 @@ fn migrate_legacy_session_root(data_root: &Path) -> Result<(), LocalRuntimeError
         fs::rename(entry.path(), destination)?;
     }
     fs::remove_dir(&legacy)?;
+    Ok(())
+}
+
+fn migrate_legacy_child_session_store(
+    data_root: &Path,
+    current_store_root: &Path,
+) -> Result<(), LocalRuntimeError> {
+    let legacy_store = data_root.join("children").join("session-store");
+    let legacy_sessions = legacy_store.join("sessions");
+    if !legacy_sessions.is_dir() {
+        return Ok(());
+    }
+    let current_sessions = current_store_root.join("sessions");
+    fs::create_dir_all(&current_sessions)?;
+    for entry in fs::read_dir(&legacy_sessions)? {
+        let entry = entry?;
+        if entry.file_type()?.is_symlink() || !entry.file_type()?.is_dir() {
+            return Err(LocalRuntimeError::Invalid(
+                "legacy child session store contains an unexpected entry".into(),
+            ));
+        }
+        let destination = current_sessions.join(entry.file_name());
+        if destination.exists() {
+            return Err(LocalRuntimeError::Invalid(format!(
+                "legacy and shared session stores both contain {}",
+                entry.file_name().to_string_lossy()
+            )));
+        }
+        fs::rename(entry.path(), destination)?;
+    }
+    fs::remove_dir(&legacy_sessions)?;
+    for directory in [legacy_store, data_root.join("children")] {
+        match fs::remove_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     Ok(())
 }
 
@@ -5982,7 +6822,7 @@ impl KernelTool {
         Self {
             definition: tool_definition(
                 "kernel",
-                "Execute code in a persistent isolated Python kernel for this session",
+                "Execute code in a persistent isolated Python reasoning environment. Variables survive turns and compaction; use rlm(...) for admitted child work and rlm.send_message, update_goal, call_mcp, compact, or create_artifact for typed host operations.",
                 serde_json::json!({"code": {"type": "string"}}),
                 &["code"],
                 ToolBehavior {
@@ -6037,28 +6877,53 @@ impl ManagedTool for KernelTool {
             .sessions
             .lock()
             .map_err(|_| ToolExecutionError::new("kernel session registry lock was poisoned"))?;
+        let mut restored_snapshot = None;
+        let mut restore_warning = None;
         let kernel_id = if let Some(existing) = sessions.get(&self.session_id) {
             existing.clone()
         } else {
-            let id = self
+            let spec = KernelSpec {
+                session_id: self.session_id.clone(),
+                runtime: KernelRuntime::Python {
+                    executable: Self::python().ok_or_else(|| {
+                        ToolExecutionError::new("Python kernel runtime is unavailable")
+                    })?,
+                },
+                working_directory: self.workspace_root.clone(),
+                isolation: KernelIsolation::Untrusted,
+                network: KernelNetwork::Denied,
+                limits: KernelLimits::default(),
+                allowed_bridge: BTreeSet::from([
+                    BridgeCapability::Children,
+                    BridgeCapability::Messages,
+                    BridgeCapability::Goals,
+                    BridgeCapability::Mcp,
+                    BridgeCapability::Compaction,
+                    BridgeCapability::Artifacts,
+                ]),
+            };
+            let now = UtcTimestamp::now().map_err(tool_error)?;
+            let latest = self
                 .broker
-                .start(
-                    KernelSpec {
-                        session_id: self.session_id.clone(),
-                        runtime: KernelRuntime::Python {
-                            executable: Self::python().ok_or_else(|| {
-                                ToolExecutionError::new("Python kernel runtime is unavailable")
-                            })?,
-                        },
-                        working_directory: self.workspace_root.clone(),
-                        isolation: KernelIsolation::Untrusted,
-                        network: KernelNetwork::Denied,
-                        limits: KernelLimits::default(),
-                        allowed_bridge: BTreeSet::new(),
-                    },
-                    UtcTimestamp::now().map_err(tool_error)?,
-                )
+                .latest_snapshot(&self.session_id)
                 .map_err(tool_error)?;
+            let id = if let Some(snapshot) = latest {
+                match self
+                    .broker
+                    .restore(&snapshot.id, spec.clone(), cancellation, now)
+                {
+                    Ok(id) => {
+                        restored_snapshot = Some(snapshot.id);
+                        id
+                    }
+                    Err(error) => {
+                        restore_warning = Some(error.to_string());
+                        self.broker.start(spec, now).map_err(tool_error)?
+                    }
+                }
+            } else {
+                self.broker.start(spec, now).map_err(tool_error)?
+            };
             sessions.insert(self.session_id.clone(), id.clone());
             id
         };
@@ -6074,6 +6939,14 @@ impl ManagedTool for KernelTool {
                 UtcTimestamp::now().map_err(tool_error)?,
             )
             .map_err(tool_error)?;
+        let (snapshot_id, snapshot_excluded, snapshot_warning) = match self.broker.snapshot(
+            &kernel_id,
+            &CancellationToken::default(),
+            UtcTimestamp::now().map_err(tool_error)?,
+        ) {
+            Ok(snapshot) => (Some(snapshot.id), snapshot.excluded, None),
+            Err(error) => (None, Vec::new(), Some(error.to_string())),
+        };
         let spill = execution.spill.as_ref().map(|spill| {
             serde_json::json!({
                 "artifact_id": spill.artifact_id,
@@ -6085,6 +6958,11 @@ impl ManagedTool for KernelTool {
         });
         serde_json::to_vec(&serde_json::json!({
             "kernel_id": kernel_id,
+            "restored_snapshot_id": restored_snapshot,
+            "restore_warning": restore_warning,
+            "snapshot_id": snapshot_id,
+            "snapshot_excluded": snapshot_excluded,
+            "snapshot_warning": snapshot_warning,
             "result": execution.result,
             "error": execution.error,
             "preview": execution.preview,
@@ -6684,6 +7562,297 @@ mod tests {
             validate_prompt_text(&"x".repeat(MAX_RUNTIME_PROMPT_BYTES + 1)),
             Err(LocalRuntimeError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn legacy_child_sessions_move_into_the_shared_runtime_store() {
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path().join("data");
+        let legacy = SessionStore::open(data_root.join("children/session-store")).unwrap();
+        let child_session_id = SessionId::new();
+        legacy
+            .create(keith_session_store::NewSession {
+                kind: keith_session_store::SessionKind::DurableChild,
+                session_id: child_session_id.clone(),
+                root_tree_id: RootTreeId::new(),
+                parent_session_id: Some(SessionId::new()),
+                profile_id: ProfileId::new(),
+                workspace_id: WorkspaceId::new(),
+                created_at: UtcTimestamp::UNIX_EPOCH,
+                label: Some("legacy child".into()),
+                profile_snapshot: None,
+            })
+            .unwrap();
+        let shared = SessionStore::open(data_root.join("sessions")).unwrap();
+        migrate_legacy_child_session_store(&data_root, shared.root()).unwrap();
+        assert_eq!(
+            shared.manifest(&child_session_id).unwrap().session_id,
+            child_session_id
+        );
+        assert!(!data_root.join("children/session-store/sessions").exists());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn production_kernel_bridge_uses_real_scoped_runtime_services() {
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path().join("data");
+        let credential_root = root.path().join("credentials");
+        let workspace_root = root.path().join("workspace");
+        let key = [19_u8; 32];
+        seed_provider_credential(&credential_root, key, "openai", "bridge-secret");
+        let runtime = LocalRuntime::open(LocalRuntimeConfig {
+            data_root,
+            credential_root,
+            credential_key: MasterKey::from_bytes(key),
+            workspace_root: workspace_root.clone(),
+            openai_base_url: "http://127.0.0.1:65535".into(),
+            anthropic_base_url: "http://127.0.0.1:65535".into(),
+            provider_base_urls: BTreeMap::new(),
+            root_scope: None,
+            worker_id: WorkerId::new(),
+            owner_instance: EntityId::new(),
+        })
+        .unwrap();
+        let profile = runtime.registered_profiles().unwrap().remove(0);
+        let session = runtime
+            .create_session(
+                &profile.profile.id,
+                &profile.profile.workspace_id,
+                Some("Kernel bridge integration".into()),
+            )
+            .unwrap();
+        let goal = runtime
+            .goals
+            .create(
+                session.session_id.clone(),
+                "Prove the typed bridge",
+                RuntimeGoalLimits::default(),
+                UtcTimestamp::now().unwrap(),
+            )
+            .unwrap();
+        let spec = KernelSpec {
+            session_id: session.session_id.clone(),
+            runtime: KernelRuntime::Python {
+                executable: KernelTool::python().unwrap(),
+            },
+            working_directory: workspace_root,
+            isolation: KernelIsolation::TrustedLocal,
+            network: KernelNetwork::Allowed,
+            limits: KernelLimits::default(),
+            allowed_bridge: BTreeSet::from([
+                BridgeCapability::Children,
+                BridgeCapability::Messages,
+                BridgeCapability::Goals,
+                BridgeCapability::Mcp,
+                BridgeCapability::Compaction,
+                BridgeCapability::Artifacts,
+            ]),
+        };
+        let kernel_id = runtime
+            .system_modules
+            .kernels
+            .start(spec, UtcTimestamp::now().unwrap())
+            .unwrap();
+        let execute = |code: String| {
+            runtime
+                .system_modules
+                .kernels
+                .execute(
+                    &kernel_id,
+                    code,
+                    &CancellationToken::default(),
+                    &mut NoKernelOutput,
+                    UtcTimestamp::now().unwrap(),
+                )
+                .unwrap()
+        };
+        let artifact = execute("rlm.create_artifact('durable kernel result', 'text/plain')".into());
+        assert!(artifact.error.is_none());
+        assert!(
+            artifact
+                .result
+                .as_ref()
+                .and_then(|value| value.get("artifact_id"))
+                .is_some()
+        );
+        let flooded = execute("print('x' * 40000)".into());
+        assert!(flooded.spill.is_some());
+
+        let child_result = execute("rlm('Inspect the runtime bridge end to end')".into());
+        assert!(child_result.error.is_none());
+        let child_session = child_result
+            .result
+            .as_ref()
+            .and_then(|value| value.get("session_id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_owned();
+        let child = runtime
+            .children
+            .list_parent(&session.session_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(child.session_id.to_string(), child_session);
+        assert_eq!(
+            runtime
+                .sessions
+                .manifest(&child.session_id)
+                .unwrap()
+                .parent_session_id,
+            Some(session.session_id.clone())
+        );
+        assert_eq!(
+            runtime
+                .actions
+                .list_session(&child.session_id)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let message = execute(format!(
+            "rlm.send_message('{}', 'Use the durable child action queue')",
+            child.session_id
+        ));
+        assert!(message.error.is_none());
+        assert_eq!(
+            runtime
+                .actions
+                .list_session(&child.session_id)
+                .unwrap()
+                .len(),
+            2
+        );
+        let goal_update = execute(format!("rlm.update_goal('{}', 'running')", goal.id));
+        assert!(goal_update.error.is_none());
+        assert_eq!(
+            runtime.goals.get(&goal.id).unwrap().unwrap().state,
+            RuntimeGoalState::Running
+        );
+        assert!(execute("rlm.compact(4096)".into()).error.is_none());
+
+        let mut writer = runtime
+            .sessions
+            .acquire_writer(
+                &session.session_id,
+                runtime.writer_identity(Generation::new(1), UtcTimestamp::now().unwrap()),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .apply_kernel_effects(&session.session_id, &mut writer)
+                .unwrap(),
+            Some(4096)
+        );
+        let ancestry = writer.active_ancestry().unwrap();
+        assert!(ancestry.iter().any(|entry| matches!(
+            &entry.payload,
+            SessionEntryPayload::ChildLinked { child_id, child_session_id }
+                if child_id == &child.id && child_session_id == &child.session_id
+        )));
+        drop(writer);
+
+        let manifest = runtime.sessions.manifest(&session.session_id).unwrap();
+        let scope = ArtifactScope {
+            root_tree_id: manifest.root_tree_id,
+            session_id: manifest.session_id,
+            profile_id: manifest.profile_id,
+        };
+        assert_eq!(runtime.artifacts.list(&scope).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn admitted_child_runs_the_real_provider_loop_and_returns_a_parent_action() {
+        let models = r#"{"data":[{"id":"gpt-4.1-mini"}]}"#;
+        let child_turn = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Child runtime completed the delegated analysis.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":9}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let server = ProviderServer::start(vec![
+            response("application/json", models),
+            response("text/event-stream", child_turn),
+        ]);
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path().join("data");
+        let credential_root = root.path().join("credentials");
+        let workspace_root = root.path().join("workspace");
+        let key = [29_u8; 32];
+        seed_provider_credential(&credential_root, key, "openai", "child-secret");
+        let runtime = LocalRuntime::open(LocalRuntimeConfig {
+            data_root,
+            credential_root,
+            credential_key: MasterKey::from_bytes(key),
+            workspace_root,
+            openai_base_url: server.base_url.clone(),
+            anthropic_base_url: server.base_url.clone(),
+            provider_base_urls: BTreeMap::new(),
+            root_scope: None,
+            worker_id: WorkerId::new(),
+            owner_instance: EntityId::new(),
+        })
+        .unwrap();
+        let profile = runtime.registered_profiles().unwrap().remove(0);
+        let parent = runtime
+            .create_session(
+                &profile.profile.id,
+                &profile.profile.workspace_id,
+                Some("Recursive parent".into()),
+            )
+            .unwrap();
+        runtime
+            .create_child(&CreateChild {
+                parent_session_id: parent.session_id.clone(),
+                objective: "Analyze the delegated runtime path".into(),
+                workspace_mode: keith_protocol::ChildWorkspaceMode::SharedWorkspace,
+                limits: keith_protocol::GoalLimits {
+                    max_turns: Some(4),
+                    max_tokens: Some(10_000),
+                    deadline: None,
+                },
+            })
+            .unwrap();
+        let child = runtime
+            .children
+            .list_parent(&parent.session_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let snapshot = runtime
+            .drain_session_actions(&child.session_id, Generation::new(1), true)
+            .unwrap()
+            .unwrap();
+        assert!(snapshot.messages.iter().any(|message| {
+            message.role == ProjectionMessageRole::Assistant
+                && message.text == "Child runtime completed the delegated analysis."
+        }));
+        let child_messages = runtime.children.messages(&child.id).unwrap();
+        assert!(child_messages.iter().any(|message| {
+            matches!(
+                &message.kind,
+                ChildMessageKind::Text { text }
+                    if text == "Child runtime completed the delegated analysis."
+            )
+        }));
+        let parent_actions = runtime.actions.list_session(&parent.session_id).unwrap();
+        assert_eq!(parent_actions.len(), 1);
+        assert!(matches!(
+            &parent_actions[0].action.payload,
+            ActionPayload::ChildMessage { text, .. }
+                if text == "Child runtime completed the delegated analysis."
+        ));
+        assert_eq!(
+            runtime.children.projection(&child.id).unwrap().status,
+            ChildStatus::Waiting
+        );
+
+        let discovery_request = server.request();
+        let child_request = server.request();
+        assert!(discovery_request.starts_with("GET /v1/models "));
+        assert!(child_request.contains("[task from parent]"));
+        assert!(child_request.contains("Analyze the delegated runtime path"));
     }
 
     fn read_request(stream: &mut TcpStream) -> String {

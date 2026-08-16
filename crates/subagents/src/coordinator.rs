@@ -58,10 +58,35 @@ where
     ) -> Result<Self, ChildError> {
         fs::create_dir_all(root.as_ref())?;
         let root = fs::canonicalize(root.as_ref())?;
+        let sessions = SessionStore::open(root.join("session-store"))?;
+        Self::open_with_canonical_root(root, repository, artifacts, sessions)
+    }
+
+    /// Opens child coordination while sharing the owning runtime's session store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a child-owned root cannot be created or canonicalized.
+    pub fn open_with_session_store(
+        root: impl AsRef<Path>,
+        repository: R,
+        artifacts: Arc<ArtifactService>,
+        sessions: SessionStore,
+    ) -> Result<Self, ChildError> {
+        fs::create_dir_all(root.as_ref())?;
+        let root = fs::canonicalize(root.as_ref())?;
+        Self::open_with_canonical_root(root, repository, artifacts, sessions)
+    }
+
+    fn open_with_canonical_root(
+        root: PathBuf,
+        repository: R,
+        artifacts: Arc<ArtifactService>,
+        sessions: SessionStore,
+    ) -> Result<Self, ChildError> {
         let workspaces_root = create_owned_root(&root, "workspaces")?;
         let artifacts_root = create_owned_root(&root, "artifacts")?;
         let runtime_root = create_owned_root(&root, "runtime")?;
-        let sessions = SessionStore::open(root.join("session-store"))?;
         Ok(Self {
             root,
             workspaces_root,
@@ -276,6 +301,23 @@ where
             .collect::<Vec<_>>();
         children.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(children)
+    }
+
+    /// Finds a child projection by its durable runtime session identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for repository or record-integrity failures.
+    pub fn find_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<ChildProjection>, ChildError> {
+        let _guard = self.lock()?;
+        Ok(self
+            .load_children()?
+            .into_iter()
+            .find(|child| &child.record.session_id == session_id)
+            .map(|child| ChildProjection::from(&child.record)))
     }
 
     /// Dispatches through the same bounded actor used by root sessions.

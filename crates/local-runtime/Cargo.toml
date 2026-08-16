@@ -23,6 +23,7 @@ keith-delivery = { path = "../delivery" }
 keith-evolution = { path = "../evolution" }
 keith-goals = { path = "../goals" }
 keith-kernel-broker = { path = "../kernel-broker" }
+keith-kernel-protocol = { path = "../kernel-protocol" }
 keith-knowledge = { path = "../knowledge" }
 keith-initiative = { path = "../initiative" }
 keith-mcp = { path = "../mcp" }
