@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use keith_agent_types::{
-    CURRENT_SCHEMA_VERSION, EntityId, Generation, Revision, RootTreeId, SchemaVersion,
+    CURRENT_SCHEMA_VERSION, EntityId, Generation, Revision, RootTreeId, SchemaVersion, SessionId,
     UtcTimestamp, WorkerId,
 };
 use keith_connection::{
@@ -85,6 +85,14 @@ pub enum PrivateMessage {
     ExecutionResult {
         request_id: EntityId,
         response: Box<RuntimeResponse>,
+    },
+    CancelActive {
+        request_id: EntityId,
+        session_id: SessionId,
+    },
+    CancellationResult {
+        request_id: EntityId,
+        result: Result<bool, String>,
     },
     Fatal {
         reason: String,
@@ -764,12 +772,16 @@ fn run_worker_inner(
     let mut active_request = None;
     let (work_sender, work_receiver) = mpsc::sync_channel(1);
     let (result_sender, result_receiver) = mpsc::sync_channel(1);
-    let executor = thread::spawn(move || runtime_executor(runtime, work_receiver, result_sender));
+    let runtime = runtime.map(Arc::<dyn CommandRuntime>::from);
+    let executor_runtime = runtime.clone();
+    let executor =
+        thread::spawn(move || runtime_executor(executor_runtime, work_receiver, result_sender));
     while !shutdown.load(Ordering::Acquire) && !requested_shutdown {
         if let Some(deadline) = service_control(
             &listener,
             &mut control,
             &grant,
+            runtime.as_ref(),
             &work_sender,
             &result_receiver,
             &mut active_request,
@@ -824,10 +836,14 @@ fn service_control(
     listener: &LocalListener,
     control: &mut Option<PrivateTransport<LocalStream>>,
     grant: &LeaseGrant,
+    runtime: Option<&Arc<dyn CommandRuntime>>,
     work_sender: &SyncSender<RuntimeWork>,
     result_receiver: &Receiver<RuntimeWorkResult>,
     active_request: &mut Option<EntityId>,
 ) -> Result<Option<UtcTimestamp>, WorkerRuntimeError> {
+    if control.is_some() {
+        service_auxiliary_control(listener, grant, runtime)?;
+    }
     if control.is_none() {
         match accept_local(listener) {
             Ok(stream) => {
@@ -906,6 +922,16 @@ fn service_control(
                 })?;
             }
         }
+        Ok(PrivateMessage::CancelActive {
+            request_id,
+            session_id,
+        }) => {
+            let result = runtime.map_or_else(
+                || Err("worker runtime is not configured".into()),
+                |runtime| runtime.cancel_active(&session_id),
+            );
+            connection.send(PrivateMessage::CancellationResult { request_id, result })?;
+        }
         Ok(PrivateMessage::Shutdown { deadline }) => {
             shutdown_deadline = Some(deadline);
         }
@@ -923,6 +949,33 @@ fn service_control(
     Ok(shutdown_deadline)
 }
 
+fn service_auxiliary_control(
+    listener: &LocalListener,
+    grant: &LeaseGrant,
+    runtime: Option<&Arc<dyn CommandRuntime>>,
+) -> Result<(), WorkerRuntimeError> {
+    let stream = match accept_local(listener) {
+        Ok(stream) => stream,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    set_local_read_timeout(&stream, Some(Duration::from_millis(50)))?;
+    set_local_write_timeout(&stream, Some(Duration::from_secs(1)))?;
+    let mut connection = PrivateTransport::new(stream, grant.clone())?;
+    if let Ok(PrivateMessage::CancelActive {
+        request_id,
+        session_id,
+    }) = connection.receive()
+    {
+        let result = runtime.map_or_else(
+            || Err("worker runtime is not configured".into()),
+            |runtime| runtime.cancel_active(&session_id),
+        );
+        let _ = connection.send(PrivateMessage::CancellationResult { request_id, result });
+    }
+    Ok(())
+}
+
 struct RuntimeWork {
     request_id: EntityId,
     request: RuntimeRequest,
@@ -934,7 +987,7 @@ struct RuntimeWorkResult {
 }
 
 fn runtime_executor(
-    runtime: Option<Box<dyn CommandRuntime>>,
+    runtime: Option<Arc<dyn CommandRuntime>>,
     receiver: Receiver<RuntimeWork>,
     sender: SyncSender<RuntimeWorkResult>,
 ) {

@@ -6070,6 +6070,23 @@ impl CommandRuntime for LocalRuntime {
             .map_err(|error| error.to_string())
     }
 
+    fn cancel_active(&self, session_id: &SessionId) -> Result<bool, String> {
+        self.owned_manifest(session_id)
+            .map_err(|error| error.to_string())?;
+        let cancellation = self
+            .active_cancellations
+            .lock()
+            .map_err(|_| LocalRuntimeError::LockPoisoned.to_string())?
+            .get(session_id)
+            .cloned();
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     fn snapshot(
         &self,
         session_id: &SessionId,

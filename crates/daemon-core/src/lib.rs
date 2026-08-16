@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -31,6 +31,7 @@ use keith_protocol::{
 use keith_runtime_api::{RuntimeRequest, RuntimeResponse, RuntimeSession};
 use keith_supervisor::{
     SupervisorError, SupervisorOptions, WorkerEvent, WorkerStatus, WorkerSupervisor,
+    signal_active_cancellation,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -552,6 +553,9 @@ impl DaemonCore {
         }
         let listener = bind_permissioned_local(socket_path)?;
         set_local_listener_nonblocking(&listener, true)?;
+        let maintenance_interval = self.options.maintenance_interval;
+        let instance_id = self.instance_id.clone();
+        let data_root = self.data_root.clone();
         {
             let shared = Mutex::new(&mut *self);
             thread::scope(|scope| -> Result<(), DaemonError> {
@@ -559,18 +563,28 @@ impl DaemonCore {
                     match accept_local(&listener) {
                         Ok(stream) => {
                             let shared = &shared;
+                            let instance_id = &instance_id;
+                            let data_root = &data_root;
                             scope.spawn(move || {
-                                let _ = Self::serve_shared_connection(shared, stream, shutdown);
+                                let _ = Self::serve_shared_connection(
+                                    shared,
+                                    stream,
+                                    shutdown,
+                                    maintenance_interval,
+                                    instance_id,
+                                    data_root,
+                                );
                             });
                         }
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            let interval = {
-                                let mut daemon =
-                                    shared.lock().map_err(|_| DaemonError::LockPoisoned)?;
-                                daemon.maintain()?;
-                                daemon.options.maintenance_interval
-                            };
-                            thread::sleep(interval);
+                            match shared.try_lock() {
+                                Ok(mut daemon) => daemon.maintain()?,
+                                Err(TryLockError::WouldBlock) => {}
+                                Err(TryLockError::Poisoned(_)) => {
+                                    return Err(DaemonError::LockPoisoned);
+                                }
+                            }
+                            thread::sleep(maintenance_interval);
                         }
                         Err(error) => return Err(error.into()),
                     }
@@ -592,12 +606,10 @@ impl DaemonCore {
         shared: &Mutex<&mut Self>,
         stream: LocalStream,
         shutdown: &AtomicBool,
+        maintenance_interval: Duration,
+        instance_id: &EntityId,
+        data_root: &Path,
     ) -> Result<(), DaemonError> {
-        let maintenance_interval = shared
-            .lock()
-            .map_err(|_| DaemonError::LockPoisoned)?
-            .options
-            .maintenance_interval;
         set_local_read_timeout(&stream, Some(maintenance_interval))?;
         let mut transport = FramedTransport::new(stream, WireFormat::Json);
         let WireMessage::ClientHello(client) = transport.receive()? else {
@@ -624,11 +636,7 @@ impl DaemonCore {
         let hello = negotiate(
             &client,
             CURRENT_PROTOCOL_VERSION,
-            shared
-                .lock()
-                .map_err(|_| DaemonError::LockPoisoned)?
-                .instance_id
-                .clone(),
+            instance_id.clone(),
             &features,
         )
         .map_err(keith_connection::ConnectionError::from)?;
@@ -660,6 +668,25 @@ impl DaemonCore {
             let WireMessage::Command(command) = message else {
                 continue;
             };
+            if command.client_id == connected_client_id
+                && command.protocol.major == negotiated.major
+                && command.protocol.minor <= negotiated.minor
+                && let ClientCommand::Cancel(keith_protocol::CancelTarget::Session(session_id)) =
+                    &command.command
+                && command
+                    .session_id
+                    .as_ref()
+                    .is_none_or(|scope| scope == session_id)
+                && let Ok(catalog) = RootCatalog::discover(data_root)
+                && let Some(root_tree_id) = catalog.root_for_session(session_id)
+            {
+                let _ = signal_active_cancellation(
+                    &data_root.join("runtime"),
+                    root_tree_id,
+                    session_id,
+                    Duration::from_millis(250),
+                );
+            }
             let (result, recovery_events) = {
                 let mut daemon = shared.lock().map_err(|_| DaemonError::LockPoisoned)?;
                 daemon.handle_command(&connected_client_id, negotiated, command)

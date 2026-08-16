@@ -134,6 +134,7 @@ pub trait CommandRuntime: Send + Sync {
         prompt: &SubmitPrompt,
         generation: Generation,
     ) -> Result<SessionSnapshot, String>;
+    fn cancel_active(&self, session_id: &SessionId) -> Result<bool, String>;
     fn snapshot(
         &self,
         session_id: &SessionId,

@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use keith_agent_types::{EntityId, Generation, RootTreeId, UtcTimestamp, WorkerId};
+use keith_agent_types::{EntityId, Generation, RootTreeId, SessionId, UtcTimestamp, WorkerId};
 use keith_connection::{
     LocalStream, connect_local, set_local_read_timeout, set_local_write_timeout,
 };
@@ -470,6 +470,8 @@ impl WorkerSupervisor {
                 Ok(
                     PrivateMessage::SupervisorHello
                     | PrivateMessage::Execute { .. }
+                    | PrivateMessage::CancelActive { .. }
+                    | PrivateMessage::CancellationResult { .. }
                     | PrivateMessage::Shutdown { .. }
                     | PrivateMessage::ShutdownAck,
                 ) => return Err(PrivateProtocolError::StaleRoute.into()),
@@ -520,6 +522,8 @@ impl WorkerSupervisor {
                                 | PrivateMessage::Ready { .. }
                                 | PrivateMessage::Execute { .. }
                                 | PrivateMessage::ExecutionResult { .. }
+                                | PrivateMessage::CancelActive { .. }
+                                | PrivateMessage::CancellationResult { .. }
                                 | PrivateMessage::ShutdownAck
                                 | PrivateMessage::SupervisorHello
                                 | PrivateMessage::Shutdown { .. },
@@ -673,6 +677,98 @@ impl WorkerSupervisor {
             self.drain(root)?;
         }
         Ok(roots)
+    }
+}
+
+/// Signals the active request owned by a durable worker lease without borrowing its supervisor.
+///
+/// This auxiliary route allows cancellation to reach the worker while the primary supervisor
+/// connection is synchronously waiting for the active runtime request.
+///
+/// # Errors
+///
+/// Returns an error when the registration and lease disagree or authenticated delivery fails.
+pub fn signal_active_cancellation(
+    state_dir: &Path,
+    root_tree_id: &RootTreeId,
+    session_id: &SessionId,
+    timeout: Duration,
+) -> Result<bool, SupervisorError> {
+    let registration = read_registration(&registration_path(state_dir, root_tree_id))?;
+    let leases = LeaseManager::open(&state_dir.join("leases.sqlite"))?;
+    let grant = leases
+        .current(root_tree_id)?
+        .ok_or_else(|| SupervisorError::NotActive(root_tree_id.clone()))?;
+    if registration.root_tree_id != *root_tree_id
+        || registration.worker_id != grant.worker_id
+        || registration.generation != grant.generation
+        || !matches!(
+            registration.state,
+            WorkerRunState::Starting | WorkerRunState::Ready | WorkerRunState::Draining
+        )
+        || !process_is_alive(registration.pid)
+    {
+        return Err(SupervisorError::StaleRoute {
+            root_tree_id: root_tree_id.clone(),
+            generation: grant.generation,
+        });
+    }
+    leases.validate(&grant)?;
+    let deadline = Instant::now() + timeout;
+    'attempt: loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        leases.validate(&grant)?;
+        let stream = match connect_local(&registration.control_socket) {
+            Ok(stream) => stream,
+            Err(keith_connection::ConnectionError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(5));
+                continue 'attempt;
+            }
+            Err(error) => {
+                return Err(SupervisorError::ProcessControl(format!(
+                    "local worker connection failed: {error}"
+                )));
+            }
+        };
+        set_local_read_timeout(&stream, Some(remaining))?;
+        set_local_write_timeout(&stream, Some(remaining))?;
+        let mut control = PrivateTransport::new(stream, grant.clone())?;
+        let request_id = EntityId::new();
+        control.send(PrivateMessage::CancelActive {
+            request_id: request_id.clone(),
+            session_id: session_id.clone(),
+        })?;
+        loop {
+            match control.receive() {
+                Ok(PrivateMessage::CancellationResult {
+                    request_id: response_id,
+                    result,
+                }) if response_id == request_id => match result {
+                    Ok(true) => return Ok(true),
+                    Ok(false) if Instant::now() < deadline => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue 'attempt;
+                    }
+                    Ok(false) => return Ok(false),
+                    Err(error) => return Err(SupervisorError::Runtime(error)),
+                },
+                Ok(PrivateMessage::Heartbeat { .. } | PrivateMessage::Idle { .. }) => {}
+                Ok(_) => return Err(PrivateProtocolError::StaleRoute.into()),
+                Err(error) if error.is_retryable_io() && Instant::now() < deadline => {}
+                Err(error) => return Err(error.into()),
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+        }
     }
 }
 
