@@ -117,6 +117,8 @@ bin/agent-web --bind 127.0.0.1:7341 --origin http://127.0.0.1:7341 --socket "$KE
 
 Open `http://127.0.0.1:7341`, sign in, and use Settings to configure a provider or Models to change the active model. New chat creates a durable session in the current profile.
 
+`agent-web` can also expose a separately authenticated OpenAI-compatible `/v1` interface for Open WebUI, assistant-ui, OpenAI SDKs, and similar applications. This remains a thin adapter over the primary native `AgentConnection` API. See [OpenAI-compatible application interface](openai-compatibility.md) for enablement, supported behavior, durable session mapping, and network-safety requirements.
+
 ## Start and stop
 
 Run `agentd --data-root DATA_ROOT --socket ENDPOINT --worker-executable RELEASE/bin/agent-worker --workspace-root WORKSPACE` as the user service. Run `agent-web` against the same endpoint. Stop the web process first and send the daemon its normal termination signal; the daemon drains and stops its workers before exiting. Abrupt process termination is recovered from durable state on the next start.

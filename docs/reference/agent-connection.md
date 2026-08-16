@@ -807,6 +807,78 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
             "command",
             "parameters"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "stage_attachment"
+            },
+            "parameters": {
+              "$ref": "#/$defs/StagedAttachment"
+            }
+          },
+          "required": [
+            "command",
+            "parameters"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "claim_delivery"
+            },
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "channel": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "channel"
+              ]
+            }
+          },
+          "required": [
+            "command",
+            "parameters"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "acknowledge_delivery"
+            },
+            "parameters": {
+              "$ref": "#/$defs/DeliveryAcknowledgement"
+            }
+          },
+          "required": [
+            "command",
+            "parameters"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "const": "fail_delivery"
+            },
+            "parameters": {
+              "$ref": "#/$defs/DeliveryFailure"
+            }
+          },
+          "required": [
+            "command",
+            "parameters"
+          ]
         }
       ]
     },
@@ -1628,6 +1700,115 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         }
       ]
     },
+    "DeliveryAcknowledgement": {
+      "type": "object",
+      "properties": {
+        "accepted_at": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "claim_token": {
+          "type": "string"
+        },
+        "delivery_id": {
+          "type": "string"
+        },
+        "duplicate_possible": {
+          "type": "boolean"
+        },
+        "platform_message_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "delivery_id",
+        "claim_token",
+        "platform_message_id",
+        "accepted_at",
+        "duplicate_possible"
+      ]
+    },
+    "DeliveryDispatch": {
+      "type": "object",
+      "properties": {
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "claim_token": {
+          "type": "string"
+        },
+        "delivery_id": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "route": {
+          "$ref": "#/$defs/DeliveryRoute"
+        },
+        "staged_artifacts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StagedDeliveryArtifact"
+          }
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "delivery_id",
+        "claim_token",
+        "idempotency_key",
+        "route",
+        "text",
+        "artifacts"
+      ]
+    },
+    "DeliveryFailure": {
+      "type": "object",
+      "properties": {
+        "claim_token": {
+          "type": "string"
+        },
+        "class": {
+          "$ref": "#/$defs/DeliveryFailureClass"
+        },
+        "delivery_id": {
+          "type": "string"
+        },
+        "retry_after_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "safe_message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "delivery_id",
+        "claim_token",
+        "class",
+        "safe_message"
+      ]
+    },
+    "DeliveryFailureClass": {
+      "type": "string",
+      "enum": [
+        "retryable",
+        "rate_limited",
+        "reconnect",
+        "permanent"
+      ]
+    },
     "DeliveryPolicy": {
       "type": "string",
       "enum": [
@@ -1653,6 +1834,37 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "delivery_id",
         "state",
         "terminal"
+      ]
+    },
+    "DeliveryRoute": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "type": "string"
+        },
+        "conversation": {
+          "type": "string"
+        },
+        "external_account": {
+          "type": "string"
+        },
+        "reply_to_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thread": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "channel",
+        "external_account",
+        "conversation"
       ]
     },
     "ErrorCode": {
@@ -1803,7 +2015,9 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "framed_json",
         "local_binary",
         "stdio",
-        "web_socket"
+        "web_socket",
+        "delivery_dispatch",
+        "attachment_staging"
       ]
     },
     "GoalLimits": {
@@ -2153,6 +2367,20 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "conversation": {
           "type": "string"
         },
+        "external_account": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "reply_to_message": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "thread": {
           "type": [
             "string",
@@ -2313,6 +2541,45 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
             },
             "value": {
               "$ref": "#/$defs/BackgroundProjection"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "artifact"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "delivery_claim"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryDispatch"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -2711,6 +2978,72 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
         "updated_at"
       ]
     },
+    "StagedAttachment": {
+      "type": "object",
+      "properties": {
+        "byte_length": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "file_name": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "staging_file": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "staging_file",
+        "file_name",
+        "media_type",
+        "byte_length",
+        "sha256"
+      ]
+    },
+    "StagedDeliveryArtifact": {
+      "type": "object",
+      "properties": {
+        "artifact_id": {
+          "type": "string"
+        },
+        "byte_length": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "file_name": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "staging_file": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "staging_file",
+        "file_name",
+        "media_type",
+        "byte_length",
+        "sha256"
+      ]
+    },
     "SteerAction": {
       "type": "object",
       "properties": {
@@ -2733,6 +3066,13 @@ Generated from `keith-protocol` 0.1.0 for protocol 1.0. Do not edit by hand.
     "SubmitPrompt": {
       "type": "object",
       "properties": {
+        "artifacts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "delivery": {
           "$ref": "#/$defs/DeliveryPolicy"
         },

@@ -645,3 +645,17 @@ Keith Agent combines the Delta-1 supervised recursive runtime with the Gamma-3 a
 6. A multi-hour journey SHALL prove bounded resources, fair concurrency, client switching, TUI/web/desktop consistency, channel continuity, idle eviction, and truthful presence with no fabricated activity.
 7. NO umbrella or release task SHALL be marked done from source presence, unit tests alone, a rendered UI, an HTTP success, screenshots, simulated external payloads, or model claims; current packaged binaries and real process paths SHALL satisfy every referenced criterion.
 
+## Requirement 51: Secondary OpenAI-compatible application interface over the native runtime
+
+**User Story:** As an application integrator, I want Keith Agent to speak the widely adopted OpenAI protocol, so that existing chat and agent clients can adopt the durable native runtime without a proprietary client rewrite.
+
+### Acceptance Criteria
+
+1. AgentConnection SHALL remain the primary and authoritative API; the compatibility interface SHALL be a thin authenticated adapter that creates, resumes, prompts, and observes sessions only through AgentConnection and SHALL NOT construct a runtime, call a provider, or mutate persistence directly.
+2. THE adapter SHALL expose authenticated `GET /v1/models`, `GET /v1/models/{model}`, and `POST /v1/chat/completions` with OpenAI-shaped JSON errors, non-streamed completions, and `text/event-stream` completion chunks terminated by `[DONE]`.
+3. ENABLED Keith profiles SHALL project as stable model IDs; ambiguous aliases, disabled or unknown profiles, mismatched native sessions, unsupported modalities, external function tools, multiple choices, and unsupported output modes SHALL fail explicitly.
+4. TEXT system, developer, user, assistant, and tool messages SHALL cross the boundary with role and ordering intact while installed Keith persona, rules, profile policy, model routing, tools, confirmations, resource limits, and durable history remain authoritative.
+5. THE adapter SHALL support explicit native session IDs plus privacy-preserving durable conversation binding from stable client conversation metadata, return the resolved native session ID, and create an isolated session when no safe binding is supplied.
+6. BEARER credentials SHALL be configured by named secret environment reference, compared without value-dependent equality, redacted from diagnostics, and required on every compatibility route; non-loopback exposure SHALL require explicit operator acknowledgement.
+7. A real-process conformance suite SHALL exercise model discovery, authenticated JSON and streaming turns, durable continuation, multiple profiles/conversations, malformed and oversized requests, unsupported features, disconnect/restart recovery, native-client coexistence, and OpenAI-compatible client configuration without secret leakage.
+

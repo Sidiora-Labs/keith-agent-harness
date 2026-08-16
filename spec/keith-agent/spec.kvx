@@ -535,6 +535,17 @@ ac_5  = "AN adversarial journey SHALL attack workspaces, network, plugins, MCP, 
 ac_6  = "A multi-hour journey SHALL prove bounded resources, fair concurrency, client switching, TUI/web/desktop consistency, channel continuity, idle eviction, and truthful presence with no fabricated activity."
 ac_7  = "NO umbrella or release task SHALL be marked done from source presence, unit tests alone, a rendered UI, an HTTP success, screenshots, simulated external payloads, or model claims; current packaged binaries and real process paths SHALL satisfy every referenced criterion."
 
+[req.51]
+title = "Secondary OpenAI-compatible application interface over the native runtime"
+story = "As an application integrator, I want Keith Agent to speak the widely adopted OpenAI protocol, so that existing chat and agent clients can adopt the durable native runtime without a proprietary client rewrite."
+ac_1  = "AgentConnection SHALL remain the primary and authoritative API; the compatibility interface SHALL be a thin authenticated adapter that creates, resumes, prompts, and observes sessions only through AgentConnection and SHALL NOT construct a runtime, call a provider, or mutate persistence directly."
+ac_2  = "THE adapter SHALL expose authenticated `GET /v1/models`, `GET /v1/models/{model}`, and `POST /v1/chat/completions` with OpenAI-shaped JSON errors, non-streamed completions, and `text/event-stream` completion chunks terminated by `[DONE]`."
+ac_3  = "ENABLED Keith profiles SHALL project as stable model IDs; ambiguous aliases, disabled or unknown profiles, mismatched native sessions, unsupported modalities, external function tools, multiple choices, and unsupported output modes SHALL fail explicitly."
+ac_4  = "TEXT system, developer, user, assistant, and tool messages SHALL cross the boundary with role and ordering intact while installed Keith persona, rules, profile policy, model routing, tools, confirmations, resource limits, and durable history remain authoritative."
+ac_5  = "THE adapter SHALL support explicit native session IDs plus privacy-preserving durable conversation binding from stable client conversation metadata, return the resolved native session ID, and create an isolated session when no safe binding is supplied."
+ac_6  = "BEARER credentials SHALL be configured by named secret environment reference, compared without value-dependent equality, redacted from diagnostics, and required on every compatibility route; non-loopback exposure SHALL require explicit operator acknowledgement."
+ac_7  = "A real-process conformance suite SHALL exercise model discovery, authenticated JSON and streaming turns, durable continuation, multiple profiles/conversations, malformed and oversized requests, unsupported features, disconnect/restart recovery, native-client coexistence, and OpenAI-compatible client configuration without secret leakage."
+
 # ================================ TASKS ==================================
 
 [tasks]
@@ -1283,7 +1294,7 @@ requires = ["5.2", "5.4", "11.2", "11.4", "13.1"]
 
 [task.13.3]
 title  = "Reproducible release artifacts and installation lifecycle"
-status = "in_progress"
+status = "done"
 wave   = 23
 do_1   = "Build daemon, worker, CLI, TUI, channel gateway, runners, web assets, desktop, built-ins, provider metadata, and schemas"
 do_2   = "Lock dependencies, sign artifacts, and generate software bill of materials and license report"
@@ -1294,6 +1305,20 @@ reqs   = ["49.1-49.5"]
 requires = ["11.5", "12.5", "13.2"]
 
 [task.13.4]
+title  = "OpenAI-compatible application adapter over AgentConnection"
+status = "in_progress"
+wave   = 23
+do_1   = "Add separately authenticated OpenAI-compatible model discovery and chat-completions routes to the packaged Rust HTTP boundary"
+do_2   = "Translate profile models, ordered text messages, native session extensions, durable client conversation bindings, completions, usage, errors, and SSE without bypassing AgentConnection"
+do_3   = "Bound payloads, concurrency, timeouts, and output; explicitly reject unsupported modalities, external tools, multiple choices, and incompatible output modes"
+do_4   = "Document Open WebUI, assistant-ui, curl, and SDK configuration while keeping bearer values out of arguments, logs, URLs, browser storage, and examples"
+do_5   = "Run real daemon/worker/provider conformance for authentication, discovery, JSON/SSE turns, continuation, restart, isolation, failure, and native-client coexistence"
+reqs   = ["2.1-2.6", "15.1-15.5", "41.1-41.6", "47.2-47.3", "51.1-51.7"]
+requires = ["12.1", "12.5", "13.3"]
+symbols = ["OpenAiCompatibility", "chat_completions"]
+touches = ["apps/agent-web/src/*.rs", "apps/agent-web/src/server/*.rs", "apps/agent-web/tests/*.rs", "apps/xtask/src/main.rs", "docs/openai-compatibility.md"]
+
+[task.13.5]
 title  = "Performance, recursive load, and multi-hour soak"
 status = "pending"
 wave   = 23
@@ -1319,7 +1344,7 @@ do_2   = "Connect two real providers and complete a tool-using conversation thro
 do_3   = "Create a durable child, exchange messages/artifacts, kill the worker, reconnect clients, and resume the exact branch"
 do_4   = "Prove goals, plans, limits, kernels, cancellation, and terminal state through packaged binaries"
 reqs   = ["50.1", "50.7"]
-requires = ["13.3", "13.4"]
+requires = ["13.3", "13.4", "13.5"]
 
 [task.14.2]
 title  = "Readable personal memory, knowledge, and skill journey"
@@ -1361,7 +1386,7 @@ requires = ["4.4", "4.5", "6.2", "14.1"]
 title  = "Adversarial complete-system and data-lifecycle journey"
 status = "pending"
 wave   = 25
-do_1   = "Attack workspace, network, browser, plugins, MCP, kernels, channels, routing, credentials, schedules, deliveries, and refinement"
+do_1   = "Attack workspace, network, browser, OpenAI compatibility API, plugins, MCP, kernels, channels, routing, credentials, schedules, deliveries, and refinement"
 do_2   = "Kill processes around external and persistence boundaries and prove unknown outcomes remain honest"
 do_3   = "Attempt cross-profile/session/channel access and data remnant recovery after deletion"
 do_4   = "Prove every persistent/background item is visible, bounded, cancellable, and recoverable"
@@ -1373,7 +1398,7 @@ requires = ["12.3", "12.5", "14.3"]
 title  = "Multi-hour production composition and final anti-performance gate"
 status = "pending"
 wave   = 26
-do_1   = "Run packaged daemon, multiple workers, TUI, web, desktop, channel, schedules, kernels, browser, plugins, MCP, children, retrieval, and life loop for the declared soak"
+do_1   = "Run packaged daemon, multiple workers, native and OpenAI-compatible clients, TUI, web, desktop, channel, schedules, kernels, browser, plugins, MCP, children, retrieval, and life loop for the declared soak"
 do_2   = "Prove fair concurrency, bounded resources, idle eviction, client switching, reconnect, delivery, and consistent projections"
 do_3   = "Prove every presence/progress statement corresponds to real runtime state and zero activity is never embellished"
 do_4   = "Publish reference hardware, versions, configuration, measurements, failures, and remaining limits"

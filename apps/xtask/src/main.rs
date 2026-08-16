@@ -234,6 +234,11 @@ fn assemble_release(
         destination.join("docs/discord.md"),
     )
     .map_err(|error| error.to_string())?;
+    fs::copy(
+        root.join("docs/openai-compatibility.md"),
+        destination.join("docs/openai-compatibility.md"),
+    )
+    .map_err(|error| error.to_string())?;
     fs::copy(root.join("Cargo.lock"), provenance.join("Cargo.lock"))
         .map_err(|error| error.to_string())?;
     fs::write(

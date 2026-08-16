@@ -41,6 +41,10 @@ use url::Url;
 use crate::security::{BrowserSecurity, SecurityError};
 use crate::{APP_CSS, login_page, shell_page};
 
+mod openai_compat;
+
+pub use openai_compat::OpenAiCompatibilityConfig;
+
 const MAX_BROWSER_BODY_BYTES: usize = 128 * 1024;
 const EVENT_QUEUE_CAPACITY: usize = 256;
 const BOOTSTRAP_JS: &str =
@@ -57,6 +61,7 @@ pub struct WebServerConfig {
     pub session_lifetime: Duration,
     pub mutation_limit_per_second: usize,
     pub daemon_timeout: Duration,
+    pub openai_compatibility: Option<OpenAiCompatibilityConfig>,
 }
 
 impl std::fmt::Debug for WebServerConfig {
@@ -73,6 +78,13 @@ impl std::fmt::Debug for WebServerConfig {
             .field("session_lifetime", &self.session_lifetime)
             .field("mutation_limit_per_second", &self.mutation_limit_per_second)
             .field("daemon_timeout", &self.daemon_timeout)
+            .field(
+                "openai_compatibility",
+                &self
+                    .openai_compatibility
+                    .as_ref()
+                    .map(|_| "[CONFIGURED, SECRET REDACTED]"),
+            )
             .finish()
     }
 }
@@ -93,6 +105,8 @@ pub struct ServerArguments {
     pub credential_root: PathBuf,
     pub login_secret_env: String,
     pub credential_key_source: CredentialKeySource,
+    pub openai_api_key_env: String,
+    pub openai_allow_non_loopback: bool,
 }
 
 #[derive(Debug, Error)]
@@ -116,6 +130,7 @@ struct AppState {
     credential_store: Arc<EncryptedCredentialStore>,
     exact_origin: String,
     asset_root: PathBuf,
+    openai_compatibility: Option<Arc<openai_compat::OpenAiCompatibility>>,
 }
 
 pub struct WebServer {
@@ -138,6 +153,13 @@ impl WebServer {
             config.mutation_limit_per_second,
         )?;
         config.login_secret.fill(0);
+        let openai_compatibility = config
+            .openai_compatibility
+            .take()
+            .map(openai_compat::OpenAiCompatibility::new)
+            .transpose()
+            .map_err(ServerError::Configuration)?
+            .map(Arc::new);
         let credential_store =
             EncryptedCredentialStore::open(&config.credential_root, config.credential_key)?;
         Ok(Self {
@@ -150,6 +172,7 @@ impl WebServer {
                 credential_store: Arc::new(credential_store),
                 exact_origin: config.exact_origin,
                 asset_root: config.asset_root,
+                openai_compatibility,
             },
             bind: config.bind,
         })
@@ -170,6 +193,12 @@ impl WebServer {
                 post(write_credential),
             )
             .route("/api/events/{profile}/{session}", get(events))
+            .route("/v1/models", get(openai_compat::models))
+            .route("/v1/models/{model}", get(openai_compat::model))
+            .route(
+                "/v1/chat/completions",
+                post(openai_compat::chat_completions),
+            )
             .layer(DefaultBodyLimit::max(MAX_BROWSER_BODY_BYTES))
             .with_state(self.state.clone())
     }
@@ -217,6 +246,8 @@ impl ServerArguments {
         let mut asset_root = PathBuf::from("apps/agent-web/static");
         let mut credential_root = None;
         let mut login_secret_env = "KEITH_WEB_LOGIN_SECRET".to_owned();
+        let mut openai_api_key_env = "KEITH_OPENAI_COMPAT_API_KEY".to_owned();
+        let mut openai_allow_non_loopback = false;
         let mut credential_key_source = None;
         while let Some(argument) = arguments.next() {
             let argument = argument
@@ -264,6 +295,14 @@ impl ServerArguments {
                             .map_err(|_| "native account must be UTF-8".to_owned())?,
                     });
                 }
+                "--openai-api-key-env" => {
+                    openai_api_key_env = value
+                        .into_string()
+                        .map_err(|_| "environment name must be UTF-8".to_owned())?;
+                }
+                "--openai-allow-non-loopback" => {
+                    openai_allow_non_loopback = parse_boolean(&value.to_string_lossy())?;
+                }
                 _ => return Err(format!("unknown argument {argument}")),
             }
         }
@@ -295,6 +334,8 @@ impl ServerArguments {
             credential_root,
             login_secret_env,
             credential_key_source,
+            openai_api_key_env,
+            openai_allow_non_loopback,
         }))
     }
 
@@ -325,6 +366,12 @@ impl ServerArguments {
                 .and_then(|store| store.load_or_create())
                 .map_err(|error| error.to_string())?,
         };
+        let openai_compatibility =
+            std::env::var_os(&self.openai_api_key_env).map(|value| OpenAiCompatibilityConfig {
+                api_key: value.into_encoded_bytes(),
+                allow_non_loopback: self.openai_allow_non_loopback,
+                max_in_flight: 16,
+            });
         Ok(WebServerConfig {
             bind: self.bind,
             exact_origin: self.exact_origin,
@@ -336,6 +383,7 @@ impl ServerArguments {
             session_lifetime: Duration::from_secs(8 * 60 * 60),
             mutation_limit_per_second: 24,
             daemon_timeout: Duration::from_secs(180),
+            openai_compatibility,
         })
     }
 }
@@ -962,12 +1010,28 @@ fn validate_config(config: &WebServerConfig) -> Result<(), ServerError> {
         || config.login_secret.is_empty()
         || config.session_lifetime.is_zero()
         || config.daemon_timeout.is_zero()
+        || config
+            .openai_compatibility
+            .as_ref()
+            .is_some_and(|compatibility| {
+                compatibility.api_key.len() < 32
+                    || compatibility.max_in_flight == 0
+                    || (!config.bind.ip().is_loopback() && !compatibility.allow_non_loopback)
+            })
     {
         return Err(ServerError::Configuration(
             "origin, secrets, or limits are invalid".into(),
         ));
     }
     Ok(())
+}
+
+fn parse_boolean(value: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err("boolean values must be true or false".to_owned()),
+    }
 }
 
 fn decode_key(encoded: &[u8]) -> Result<[u8; 32], String> {
@@ -1073,10 +1137,16 @@ mod tests {
             "TEST_LOGIN",
             "--credential-key-env",
             "TEST_KEY",
+            "--openai-api-key-env",
+            "TEST_OPENAI_COMPAT",
+            "--openai-allow-non-loopback",
+            "true",
         ])
         .unwrap()
         .unwrap();
         assert_eq!(parsed.login_secret_env, "TEST_LOGIN");
+        assert_eq!(parsed.openai_api_key_env, "TEST_OPENAI_COMPAT");
+        assert!(parsed.openai_allow_non_loopback);
         assert_eq!(
             parsed.credential_key_source,
             CredentialKeySource::Environment("TEST_KEY".into())
@@ -1145,9 +1215,23 @@ mod tests {
             session_lifetime: Duration::from_secs(30),
             mutation_limit_per_second: 4,
             daemon_timeout: Duration::from_secs(1),
+            openai_compatibility: Some(OpenAiCompatibilityConfig {
+                api_key: b"openai-compatibility-diagnostic-secret".to_vec(),
+                allow_non_loopback: false,
+                max_in_flight: 2,
+            }),
         };
         assert!(!format!("{config:?}").contains("diagnostic-secret"));
         assert!(decode_key(b"not-a-key").unwrap_err().contains("64"));
+        let mut exposed = config;
+        exposed.bind = "0.0.0.0:7341".parse().unwrap();
+        assert!(validate_config(&exposed).is_err());
+        exposed
+            .openai_compatibility
+            .as_mut()
+            .unwrap()
+            .allow_non_loopback = true;
+        assert!(validate_config(&exposed).is_ok());
     }
 
     #[test]

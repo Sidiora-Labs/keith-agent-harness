@@ -84,6 +84,7 @@ fn chromium_navigation_refresh_reconnect_restart_and_mutations_are_real() {
         session_lifetime: Duration::from_secs(60),
         mutation_limit_per_second: 64,
         daemon_timeout: Duration::from_secs(2),
+        openai_compatibility: None,
     })
     .unwrap();
     let task = runtime.spawn(server.serve_listener(listener));

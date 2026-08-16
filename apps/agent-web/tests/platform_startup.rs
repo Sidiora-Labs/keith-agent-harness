@@ -3,11 +3,11 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use keith_agent_web::{WebServer, WebServerConfig};
+use keith_agent_web::{OpenAiCompatibilityConfig, WebServer, WebServerConfig};
 use keith_credentials::MasterKey;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn platform_web_startup_serves_the_login_shell() {
+async fn platform_web_startup_serves_browser_and_guarded_compatibility_boundaries() {
     let directory = tempfile::tempdir().unwrap();
     let assets = directory.path().join("assets");
     std::fs::create_dir(&assets).unwrap();
@@ -26,22 +26,81 @@ async fn platform_web_startup_serves_the_login_shell() {
         session_lifetime: Duration::from_secs(60),
         mutation_limit_per_second: 8,
         daemon_timeout: Duration::from_secs(1),
+        openai_compatibility: Some(OpenAiCompatibilityConfig {
+            api_key: b"platform-openai-compatibility-key".to_vec(),
+            allow_non_loopback: false,
+            max_in_flight: 2,
+        }),
     })
     .unwrap();
     let task = tokio::spawn(server.serve_listener(listener));
-    let response = tokio::task::spawn_blocking(move || {
+    let response = request(
+        address,
+        b"GET /login HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".to_vec(),
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(response.contains("Keith Agent sign in"));
+
+    let unauthenticated = request(
+        address,
+        b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".to_vec(),
+    )
+    .await;
+    assert!(unauthenticated.starts_with("HTTP/1.1 401 Unauthorized"));
+    assert!(unauthenticated.contains("invalid_api_key"));
+
+    let unavailable = request(
+        address,
+        b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer platform-openai-compatibility-key\r\nConnection: close\r\n\r\n".to_vec(),
+    )
+    .await;
+    assert!(unavailable.starts_with("HTTP/1.1 503 Service Unavailable"));
+    assert!(unavailable.contains("keith_native_api_unavailable"));
+
+    let unsupported_body = br#"{"model":"keith","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function"}]}"#;
+    let unsupported = request(
+        address,
+        format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer platform-openai-compatibility-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            unsupported_body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(unsupported_body.iter().copied())
+        .collect(),
+    )
+    .await;
+    assert!(unsupported.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(unsupported.contains("unsupported_feature"));
+
+    let oversized_body = vec![b' '; 129 * 1024];
+    let oversized = request(
+        address,
+        format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer platform-openai-compatibility-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            oversized_body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(oversized_body)
+        .collect(),
+    )
+    .await;
+    task.abort();
+    let _ = task.await;
+    assert!(oversized.starts_with("HTTP/1.1 413 Payload Too Large"));
+    assert!(oversized.contains("request_too_large"));
+}
+
+async fn request(address: std::net::SocketAddr, request: Vec<u8>) -> String {
+    tokio::task::spawn_blocking(move || {
         let mut stream = TcpStream::connect(address).unwrap();
-        stream
-            .write_all(b"GET /login HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-            .unwrap();
+        stream.write_all(&request).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         response
     })
     .await
-    .unwrap();
-    task.abort();
-    let _ = task.await;
-    assert!(response.starts_with("HTTP/1.1 200 OK"));
-    assert!(response.contains("Keith Agent sign in"));
+    .unwrap()
 }

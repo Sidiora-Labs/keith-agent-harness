@@ -448,14 +448,21 @@
     - Implement fail-closed or explicit reduced-isolation behavior
     - Run the platform acceptance matrix on supported release environments
     - _Requirements: 46.1-46.5_
-  - [-] 13.3 Reproducible release artifacts and installation lifecycle
+  - [x] 13.3 Reproducible release artifacts and installation lifecycle
     - Build daemon, worker, CLI, TUI, channel gateway, runners, web assets, desktop, built-ins, provider metadata, and schemas
     - Lock dependencies, sign artifacts, and generate software bill of materials and license report
     - Expose build/protocol/storage/feature versions
     - Document and test install, first run, service lifecycle, backup, restore, update, rollback, uninstall, and data choices
     - Run clean-install provider/tool/restart/uninstall matrix
     - _Requirements: 49.1-49.5_
-  - [ ] 13.4 Performance, recursive load, and multi-hour soak
+  - [-] 13.4 OpenAI-compatible application adapter over AgentConnection
+    - Add separately authenticated OpenAI-compatible model discovery and chat-completions routes to the packaged Rust HTTP boundary
+    - Translate profile models, ordered text messages, native session extensions, durable client conversation bindings, completions, usage, errors, and SSE without bypassing AgentConnection
+    - Bound payloads, concurrency, timeouts, and output; explicitly reject unsupported modalities, external tools, multiple choices, and incompatible output modes
+    - Document Open WebUI, assistant-ui, curl, and SDK configuration while keeping bearer values out of arguments, logs, URLs, browser storage, and examples
+    - Run real daemon/worker/provider conformance for authentication, discovery, JSON/SSE turns, continuation, restart, isolation, failure, and native-client coexistence
+    - _Requirements: 2.1-2.6, 15.1-15.5, 41.1-41.6, 47.2-47.3, 51.1-51.7_
+  - [ ] 13.5 Performance, recursive load, and multi-hour soak
     - Instrument daemon readiness, attach, replay, acknowledgement, stream, tools, retrieval, scheduler, delivery, and recovery
     - Measure TUI/web rendering, long histories, multiple children, and event floods
     - Run multi-hour bounded-memory soak across daemon, workers, clients, channels, kernels, browsers, indexes, and replay
@@ -494,14 +501,14 @@
     - Publish quality, cost, latency, and failure results against the fixed corpus
     - _Requirements: 50.4, 50.7_
   - [ ] 14.5 Adversarial complete-system and data-lifecycle journey
-    - Attack workspace, network, browser, plugins, MCP, kernels, channels, routing, credentials, schedules, deliveries, and refinement
+    - Attack workspace, network, browser, OpenAI compatibility API, plugins, MCP, kernels, channels, routing, credentials, schedules, deliveries, and refinement
     - Kill processes around external and persistence boundaries and prove unknown outcomes remain honest
     - Attempt cross-profile/session/channel access and data remnant recovery after deletion
     - Prove every persistent/background item is visible, bounded, cancellable, and recoverable
     - Resolve all serious containment and privacy findings before completion
     - _Requirements: 50.5, 50.7_
   - [ ] 14.6 Multi-hour production composition and final anti-performance gate
-    - Run packaged daemon, multiple workers, TUI, web, desktop, channel, schedules, kernels, browser, plugins, MCP, children, retrieval, and life loop for the declared soak
+    - Run packaged daemon, multiple workers, native and OpenAI-compatible clients, TUI, web, desktop, channel, schedules, kernels, browser, plugins, MCP, children, retrieval, and life loop for the declared soak
     - Prove fair concurrency, bounded resources, idle eviction, client switching, reconnect, delivery, and consistent projections
     - Prove every presence/progress statement corresponds to real runtime state and zero activity is never embellished
     - Publish reference hardware, versions, configuration, measurements, failures, and remaining limits
@@ -535,7 +542,7 @@
     { "id": 20, "tasks": ["11.5", "12.1", "12.4"] },
     { "id": 21, "tasks": ["12.2", "12.3", "13.1"] },
     { "id": 22, "tasks": ["12.5", "13.2"] },
-    { "id": 23, "tasks": ["13.3", "13.4"] },
+    { "id": 23, "tasks": ["13.3", "13.4", "13.5"] },
     { "id": 24, "tasks": ["14.1", "14.2", "14.3"] },
     { "id": 25, "tasks": ["14.4", "14.5"] },
     { "id": 26, "tasks": ["14.6"] }
