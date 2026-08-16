@@ -24,9 +24,9 @@ use keith_connection::{
     set_local_listener_nonblocking, set_local_read_timeout,
 };
 use keith_protocol::{
-    ClientCommand, CommandError, CommandResult, CommandResultEnvelope, DaemonEvent, Feature,
-    ResponsePayload, SessionFilter, SessionSnapshot, SessionState, SessionSummary, WireFormat,
-    WireMessage, negotiate,
+    ClientCommand, CommandError, CommandResult, CommandResultEnvelope, Feature, ResponsePayload,
+    SessionFilter, SessionSnapshot, SessionState, SessionSummary, WireFormat, WireMessage,
+    negotiate,
 };
 use keith_runtime_api::{RuntimeRequest, RuntimeResponse, RuntimeSession};
 use keith_supervisor::{
@@ -496,6 +496,17 @@ impl DaemonCore {
     /// Returns an error when worker inspection or eviction fails.
     pub fn maintain(&mut self) -> Result<(), DaemonError> {
         self.last_worker_events = self.supervisor.monitor()?;
+        let failed_roots = self
+            .last_worker_events
+            .iter()
+            .filter_map(|event| match event {
+                WorkerEvent::Fatal { root_tree_id, .. } => Some(root_tree_id.clone()),
+                WorkerEvent::Exited { .. } => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for root_tree_id in failed_roots {
+            let _ = self.supervisor.drain(&root_tree_id);
+        }
         self.supervisor.evict_idle(self.options.idle_evict_after)?;
         let runtime_maintenance_due = self.worker_runtime_enabled
             && self
@@ -504,18 +515,16 @@ impl DaemonCore {
         if runtime_maintenance_due {
             let workers = self.supervisor.statuses();
             for worker in workers {
-                match self.execute_worker(
-                    &worker.root_tree_id,
-                    worker.generation,
-                    RuntimeRequest::Maintain,
-                )? {
-                    RuntimeResponse::Complete => {}
-                    response => {
-                        return Err(DaemonError::Runtime(format!(
-                            "worker returned {} for maintenance",
-                            runtime_response_kind(&response)
-                        )));
-                    }
+                let healthy = matches!(
+                    self.execute_worker(
+                        &worker.root_tree_id,
+                        worker.generation,
+                        RuntimeRequest::Maintain,
+                    ),
+                    Ok(RuntimeResponse::Complete)
+                );
+                if !healthy {
+                    let _ = self.supervisor.drain(&worker.root_tree_id);
                 }
             }
             self.last_runtime_maintenance = Some(Instant::now());
@@ -784,6 +793,22 @@ impl DaemonCore {
         scope_session_id: Option<&SessionId>,
         command: ClientCommand,
     ) -> (CommandResult, Vec<keith_protocol::EventEnvelope>) {
+        let embedded_session_id = command_session_id(&command).cloned();
+        if let (Some(scope), Some(embedded)) = (scope_session_id, embedded_session_id.as_ref())
+            && scope != embedded
+        {
+            return (
+                CommandResult::Rejected(CommandError {
+                    error: CommonError::new(
+                        ErrorCode::Unauthorized,
+                        "command session does not match its connection scope",
+                        false,
+                    ),
+                    unsupported_feature: None,
+                }),
+                Vec::new(),
+            );
+        }
         match command {
             ClientCommand::ListProfiles => {
                 let result = if self.worker_runtime_enabled {
@@ -901,23 +926,7 @@ impl DaemonCore {
                 Err(error) => rejected_daemon(error),
             },
             feature => {
-                let embedded_session_id = feature_session_id(&feature);
-                if let (Some(scope), Some(embedded)) = (scope_session_id, embedded_session_id)
-                    && scope != embedded
-                {
-                    return (
-                        CommandResult::Rejected(CommandError {
-                            error: CommonError::new(
-                                ErrorCode::Unauthorized,
-                                "command session does not match its connection scope",
-                                false,
-                            ),
-                            unsupported_feature: None,
-                        }),
-                        Vec::new(),
-                    );
-                }
-                let effective_session_id = embedded_session_id.or(scope_session_id);
+                let effective_session_id = embedded_session_id.as_ref().or(scope_session_id);
                 let generation = match effective_session_id {
                     Some(session_id) => match self.activate_session(session_id) {
                         Ok(status) => status.generation,
@@ -932,20 +941,19 @@ impl DaemonCore {
                     generation,
                 );
                 match result {
-                    Ok(result) => {
+                    Ok(mut result) => {
                         if !matches!(result, CommandResult::Rejected(_))
                             && let Some(session_id) = effective_session_id
                         {
-                            let refresh = if matches!(
-                                feature,
-                                ClientCommand::Cancel(keith_protocol::CancelTarget::Session(_))
-                            ) {
-                                self.archive_catalog_session(session_id)
-                            } else {
-                                self.publish_runtime_snapshot(session_id, generation)
-                            };
-                            if let Err(error) = refresh {
-                                return rejected_daemon(error);
+                            let authoritative =
+                                match self.publish_runtime_snapshot(session_id, generation) {
+                                    Ok(snapshot) => snapshot,
+                                    Err(error) => return rejected_daemon(error),
+                                };
+                            if let CommandResult::Data(payload) = &mut result
+                                && matches!(payload.as_ref(), ResponsePayload::Snapshot(_))
+                            {
+                                **payload = ResponsePayload::Snapshot(Box::new(authoritative));
                             }
                         }
                         (result, Vec::new())
@@ -1206,7 +1214,7 @@ impl DaemonCore {
         &mut self,
         session_id: &SessionId,
         generation: Generation,
-    ) -> Result<(), DaemonError> {
+    ) -> Result<SessionSnapshot, DaemonError> {
         let root = self
             .catalog
             .root_for_session(session_id)
@@ -1230,33 +1238,9 @@ impl DaemonCore {
             }
         };
         if let Some(hub) = self.event_hubs.get_mut(&root) {
-            let _ = hub.publish(DaemonEvent::Snapshot(Box::new(snapshot)))?;
+            return hub.publish_snapshot(snapshot).map_err(Into::into);
         }
-        Ok(())
-    }
-
-    fn archive_catalog_session(&mut self, session_id: &SessionId) -> Result<(), DaemonError> {
-        let root = self
-            .catalog
-            .root_for_session(session_id)
-            .cloned()
-            .ok_or_else(|| DaemonError::UnknownSession(session_id.clone()))?;
-        let updated = {
-            let manifest = self
-                .catalog
-                .roots
-                .get_mut(&root)
-                .ok_or_else(|| DaemonError::UnknownRoot(root.clone()))?;
-            manifest.state = SessionState::Archived;
-            manifest.updated_at =
-                UtcTimestamp::now().map_err(|error| io::Error::other(error.to_string()))?;
-            manifest.clone()
-        };
-        self.persist_root_manifest(&updated)?;
-        if let Some(hub) = self.event_hubs.get_mut(&root) {
-            let _ = hub.publish(DaemonEvent::SessionChanged(updated.summary()))?;
-        }
-        Ok(())
+        Ok(snapshot)
     }
 
     fn run_prompt(
@@ -1293,7 +1277,7 @@ impl DaemonCore {
             self.persist_root_manifest(&updated)?;
         }
         if let Some(hub) = self.event_hubs.get_mut(&root) {
-            let _ = hub.publish(DaemonEvent::Snapshot(Box::new(snapshot.clone())))?;
+            return hub.publish_snapshot(snapshot).map_err(DaemonError::from);
         }
         Ok(snapshot)
     }
@@ -1332,14 +1316,19 @@ const fn runtime_response_kind(response: &RuntimeResponse) -> &'static str {
     }
 }
 
-fn feature_session_id(command: &ClientCommand) -> Option<&SessionId> {
+fn command_session_id(command: &ClientCommand) -> Option<&SessionId> {
     match command {
-        ClientCommand::BranchSession(request) => Some(&request.session_id),
-        ClientCommand::SelectBranch(request) => Some(&request.session_id),
-        ClientCommand::Steer(request) => Some(&request.session_id),
-        ClientCommand::Cancel(keith_protocol::CancelTarget::Session(session_id))
+        ClientCommand::AttachSession(request) => Some(&request.session_id),
+        ClientCommand::DetachSession { session_id }
+        | ClientCommand::ResumeSession { session_id }
+        | ClientCommand::Cancel(keith_protocol::CancelTarget::Session(session_id))
         | ClientCommand::ListGoals { session_id }
         | ClientCommand::ListChildren { session_id } => Some(session_id),
+        ClientCommand::BranchSession(request) => Some(&request.session_id),
+        ClientCommand::SelectBranch(request) => Some(&request.session_id),
+        ClientCommand::SubmitPrompt(request) => Some(&request.session_id),
+        ClientCommand::Steer(request) => Some(&request.session_id),
+        ClientCommand::SelectModel(request) => Some(&request.session_id),
         ClientCommand::CreateGoal(request) => Some(&request.session_id),
         ClientCommand::CreateChild(request) => Some(&request.parent_session_id),
         ClientCommand::CreateSchedule(request) => request.session_id.as_ref(),

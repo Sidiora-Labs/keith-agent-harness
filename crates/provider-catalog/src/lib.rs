@@ -313,7 +313,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         ApiKeyHeader,
         "XIAOMI_API_KEY",
         Some("https://api.xiaomimimo.com/anthropic"),
-        "mimo-v2-flash"
+        "mimo-v2.5-pro"
     ),
     provider!(
         "xiaomi-token-plan-cn",

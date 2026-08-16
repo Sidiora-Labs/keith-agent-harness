@@ -280,6 +280,7 @@ fn projection_lines(app: &TuiApp, surface: Surface) -> Vec<String> {
             format!("Stream: {:?}", reducer.stream_state()),
             format!("Composer display width: {}", app.composer_display_width()),
             format!("Queued commands: {}", app.pending_len()),
+            format!("In-flight commands: {}", app.in_flight_len()),
         ],
         Surface::Logs => unreachable!("logs are rendered without a session projection"),
         Surface::Artifacts => vec!["Artifacts are exposed by tool and export projections.".into()],
@@ -350,8 +351,13 @@ fn render_status(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palet
         .map_or("unavailable".into(), |reducer| {
             format!("{:?}", reducer.snapshot().presence.state)
         });
+    let activity = if app.in_flight_len() == 0 {
+        String::new()
+    } else {
+        format!("  working {}", app.in_flight_len())
+    };
     let status = format!(
-        " {connection}  presence {presence}  Tab view  Ctrl-S sessions  Ctrl-X cancel  Ctrl-Q quit"
+        " {connection}  presence {presence}{activity}  Tab view  Ctrl-S sessions  Ctrl-Q quit"
     );
     let color = if app.connected {
         palette.accent

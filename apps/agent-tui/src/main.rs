@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyEventKind};
 use keith_agent_tui::{
-    Accessibility, AgentConnectionClient, AppAction, TuiApp, TuiArguments, render,
+    Accessibility, AgentCommandDispatcher, AgentConnectionClient, AppAction, DispatchEvent, TuiApp,
+    TuiArguments, render,
 };
 use keith_protocol::WireMessage;
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -36,13 +37,14 @@ fn run() -> Result<(), String> {
         reduced_motion: arguments.reduced_motion,
     };
     let mut app = TuiApp::new(accessibility);
-    let mut client = AgentConnectionClient::connect(
+    let client = AgentConnectionClient::connect(
         arguments.mode,
         app.client_id.clone(),
         None,
         arguments.startup_timeout,
     )
     .map_err(|error| error.to_string())?;
+    let mut dispatcher = AgentCommandDispatcher::new(client, arguments.startup_timeout);
     app.connected = true;
     app.list_sessions();
     if let Some(session_id) = arguments.session_id {
@@ -50,16 +52,9 @@ fn run() -> Result<(), String> {
     }
 
     loop {
-        let exit = ratatui::run(|terminal| {
-            event_loop(
-                terminal,
-                &mut app,
-                &mut client,
-                &shutdown,
-                arguments.startup_timeout,
-            )
-        })
-        .map_err(|error| error.to_string())?;
+        let exit =
+            ratatui::run(|terminal| event_loop(terminal, &mut app, &mut dispatcher, &shutdown))
+                .map_err(|error| error.to_string())?;
         match exit {
             LoopExit::Quit => return Ok(()),
             LoopExit::ExternalEditor => edit_composer(&mut app)?,
@@ -70,35 +65,38 @@ fn run() -> Result<(), String> {
 fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut TuiApp,
-    client: &mut AgentConnectionClient,
+    dispatcher: &mut AgentCommandDispatcher,
     shutdown: &AtomicBool,
-    startup_timeout: Duration,
 ) -> io::Result<LoopExit> {
     while !shutdown.load(Ordering::Acquire) && !app.quit {
-        while let Some(command) = app.next_command() {
-            let envelope = app.command_envelope(command);
-            if let Ok(result) = client.execute(envelope, |message| app.apply_wire_message(message))
-            {
-                app.apply_wire_message(WireMessage::CommandResult(result));
-            } else {
-                app.connected = false;
-                app.reconnecting = true;
-                let resume = app.reducer.as_ref().map(|reducer| {
-                    let snapshot = reducer.snapshot();
-                    keith_protocol::ResumeCursor {
-                        root_tree_id: snapshot.session.root_tree_id.clone(),
-                        generation: snapshot.generation,
-                        last_sequence: snapshot.through_sequence,
+        while let Some(event) = dispatcher.try_next() {
+            match event {
+                DispatchEvent::Message(message) => {
+                    let message = *message;
+                    if matches!(message, WireMessage::CommandResult(_)) {
+                        app.command_finished();
                     }
-                });
-                if client.reconnect(resume, startup_timeout).is_ok() {
-                    app.connected = true;
-                    app.reconnecting = false;
+                    app.apply_wire_message(message);
+                }
+                DispatchEvent::CommandFailed(error) => {
+                    app.command_finished();
+                    app.report_command_failure(error);
+                }
+                DispatchEvent::Reconnecting => app.report_reconnecting(),
+                DispatchEvent::Reconnected => {
+                    app.report_reconnected();
                     if let Some(session_id) = app.attached_session.clone() {
                         app.attach(session_id);
                     }
                 }
-                break;
+                DispatchEvent::ReconnectFailed(error) => app.report_reconnect_failure(error),
+            }
+        }
+        while let Some(command) = app.next_command() {
+            let envelope = app.command_envelope(command);
+            match dispatcher.dispatch(envelope) {
+                Ok(()) => app.command_dispatched(),
+                Err(error) => app.report_command_failure(error),
             }
         }
         terminal.draw(|frame| render(frame, app))?;

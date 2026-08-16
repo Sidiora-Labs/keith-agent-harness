@@ -54,6 +54,7 @@ keith-tool-runner-core = { path = "../tool-runner" }
 keith-web = { path = "../web" }
 keith-waiting = { path = "../waiting" }
 keith-workspace = { path = "../workspace" }
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true

@@ -87,6 +87,10 @@ impl EntityId {
         Self(ulid::Ulid::new().to_string())
     }
 
+    pub fn from_u128(value: u128) -> Self {
+        Self(ulid::Ulid::from(value).to_string())
+    }
+
     /// # Errors
     ///
     /// Returns [`EntityIdError::Invalid`] unless the value is a canonical ULID.

@@ -151,6 +151,22 @@ impl EventHub {
         Ok(envelope)
     }
 
+    /// Publishes a replacement snapshot and returns the stream-stamped authoritative value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the snapshot belongs to another root or stream counters overflow.
+    pub fn publish_snapshot(
+        &mut self,
+        snapshot: SessionSnapshot,
+    ) -> Result<SessionSnapshot, EventStreamError> {
+        if snapshot.session.root_tree_id != self.root_tree_id {
+            return Err(EventStreamError::RootMismatch);
+        }
+        self.publish(DaemonEvent::Snapshot(Box::new(snapshot)))?;
+        Ok(self.snapshot.clone())
+    }
+
     /// Computes exact delta replay when retained, otherwise snapshot replacement.
     pub fn recover(&self, cursor: Option<&ResumeCursor>) -> RecoveryBatch {
         let Some(cursor) = cursor else {
@@ -630,6 +646,37 @@ mod tests {
         }));
         assert_eq!(gap.mode, ResumeMode::SnapshotThenDelta);
         assert_eq!(gap.snapshot.unwrap().generation, Generation::new(2));
+    }
+
+    #[test]
+    fn published_snapshot_returns_the_stream_stamped_authoritative_value() {
+        let root = RootTreeId::new();
+        let generation = Generation::new(3);
+        let mut hub = EventHub::new(
+            root.clone(),
+            generation,
+            snapshot(root.clone(), generation),
+            8,
+            8,
+        )
+        .unwrap();
+        hub.publish(committed(0)).unwrap();
+        let mut replacement = snapshot(root, generation);
+        replacement.messages.push(MessageProjection {
+            message_id: MessageId::new(),
+            role: MessageRole::Assistant,
+            text: "completed turn".into(),
+            committed: true,
+        });
+        replacement.revision = Revision::new(7);
+
+        let authoritative = hub.publish_snapshot(replacement).unwrap();
+
+        assert_eq!(authoritative.generation, generation);
+        assert_eq!(authoritative.through_sequence, Sequence::new(2));
+        assert_eq!(authoritative.revision, Revision::new(8));
+        assert_eq!(authoritative.messages[0].text, "completed turn");
+        assert_eq!(hub.snapshot(), &authoritative);
     }
 
     #[test]

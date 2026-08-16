@@ -104,8 +104,12 @@ pub struct CommitReceipt {
     pub applied_mutations: usize,
 }
 
+pub trait ClassifiedRepositoryError: Error + Send + Sync + 'static {
+    fn is_conflict(&self) -> bool;
+}
+
 pub trait AtomicStateRepository: Send + Sync {
-    type Error: Error + Send + Sync + 'static;
+    type Error: ClassifiedRepositoryError;
 
     /// # Errors
     ///

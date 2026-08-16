@@ -1092,7 +1092,7 @@ esac
         let root = TempDir::new().expect("manager root");
         let credentials_root = TempDir::new().expect("credential root");
         let scripts = TempDir::new().expect("scripts");
-        let credentials = credential_store(credentials_root.path());
+        let credentials = Arc::new(credential_store(credentials_root.path()));
         let profile = ProfileId::new();
         for (id, body, expected) in [
             ("slow", "sleep 2", McpError::Timeout),

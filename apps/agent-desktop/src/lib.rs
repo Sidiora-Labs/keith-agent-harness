@@ -1318,7 +1318,7 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), DesktopError> {
             let mut output = OpenOptions::new()
                 .create_new(true)
                 .write(true)
-                .open(destination)?;
+                .open(&destination)?;
             std::io::copy(&mut input, &mut output)?;
             output.sync_all()?;
             restrict_copied_file(&entry.path(), &destination)?;

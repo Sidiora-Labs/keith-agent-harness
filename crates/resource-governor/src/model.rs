@@ -383,6 +383,8 @@ pub enum ResourceError {
     LockPoisoned,
     #[error("resource repository failed: {0}")]
     Repository(String),
+    #[error("resource repository write conflicted: {0}")]
+    RepositoryConflict(String),
     #[error("resource record serialization failed: {0}")]
     Serialize(#[from] serde_json::Error),
 }

@@ -10,12 +10,12 @@ use std::time::Duration;
 use keith_agent_types::{CURRENT_SCHEMA_VERSION, EntityId, Revision, SchemaVersion, UtcTimestamp};
 use keith_state_store_core::{
     ActionRepository, AtomicStateRepository, AttentionRepository, CatalogRepository,
-    ChannelOffsetRepository, ChildMessageRepository, ChildRepository, Collection, CommitReceipt,
-    CommitmentRepository, DeliveryRepository, GenerationRepository, GoalRepository,
-    InitiativeRepository, JobAttemptRepository, LeaseRepository, MigrationRepository,
-    PlanRepository, ProfileRepository, RecordMutation, RefinementRepository, ResourceRepository,
-    RouteRepository, ScheduleRepository, ToolExperienceRepository, VersionedRecord, WaitRepository,
-    WritePrecondition,
+    ChannelOffsetRepository, ChildMessageRepository, ChildRepository, ClassifiedRepositoryError,
+    Collection, CommitReceipt, CommitmentRepository, DeliveryRepository, GenerationRepository,
+    GoalRepository, InitiativeRepository, JobAttemptRepository, LeaseRepository,
+    MigrationRepository, PlanRepository, ProfileRepository, RecordMutation, RefinementRepository,
+    ResourceRepository, RouteRepository, ScheduleRepository, ToolExperienceRepository,
+    VersionedRecord, WaitRepository, WritePrecondition,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
@@ -93,6 +93,12 @@ pub enum StoreError {
     Injected(FaultPoint),
     #[error("transaction committed but acknowledgement was interrupted")]
     UnknownOutcome,
+}
+
+impl ClassifiedRepositoryError for StoreError {
+    fn is_conflict(&self) -> bool {
+        matches!(self, Self::Conflict { .. })
+    }
 }
 
 pub struct EmbeddedStore {

@@ -41,8 +41,8 @@ use keith_configuration::{
     RefinementSettings, ThinkingLevel, ToolPermission,
 };
 use keith_credentials::{
-    EncryptedCredentialStore, MasterKey, NativeMasterKeyStore, ProviderCredentialResolver,
-    RestrictedMasterKeyStore,
+    CredentialError, CredentialOwner, CredentialRef, EncryptedCredentialStore, MasterKey,
+    NativeMasterKeyStore, ProviderCredentialResolver, RestrictedMasterKeyStore,
 };
 use keith_data_control::{DataControl, DataDomain, DataLimits, DataScope};
 use keith_delivery::{DeliveryConfig, DeliveryOutbox, DeliverySource, NewDelivery};
@@ -65,7 +65,7 @@ use keith_knowledge::{KnowledgeError, KnowledgeService};
 use keith_mcp::McpManager;
 use keith_memory::{MemoryPolicy, MemoryRecordState, MemoryService};
 use keith_model_registry::{
-    CredentialResolver, ModelRegistry, ModelRoute, ModelSelection, RegistryError,
+    CredentialResolver, ModelPurpose, ModelRegistry, ModelRoute, ModelSelection, RegistryError,
 };
 use keith_planner::{
     Assignee, NewPlan, PlanBudget, PlanService, PlanState, PlanStep, ResultCheck, ResultCheckKind,
@@ -94,7 +94,8 @@ use keith_provider_catalog::{
 };
 use keith_provider_core::{
     CancellationToken, ContentBlock as ProviderContentBlock, Message as ProviderMessage,
-    MessageRole as ProviderMessageRole, ModelRequest, ProviderError,
+    MessageRole as ProviderMessageRole, ModelEvent, ModelRequest, ProviderError, ProviderErrorKind,
+    StopReason, StreamControl, Usage,
 };
 use keith_resource_governor::{
     AcquireRequest, ExhaustionBehavior, ResourceCeiling, ResourceGovernor, ResourceKind,
@@ -113,8 +114,8 @@ use keith_scheduler::{
 };
 use keith_session_store::{
     CompactionOutput, CompactionPolicy, CompactionRequest, ContentBlock as StoredContentBlock,
-    MessageRole as StoredMessageRole, NewSession, Sensitivity, SessionEntry, SessionEntryPayload,
-    SessionKind, SessionManifest, SessionStore, SessionStoreError, StoredMessage, WriterIdentity,
+    MessageRole as StoredMessageRole, Sensitivity, SessionEntry, SessionEntryPayload,
+    SessionManifest, SessionStore, SessionStoreError, StoredMessage, WriterIdentity,
 };
 use keith_skills::{SkillLimits, SkillRegistry, SkillRoots, SkillSelectionRequest};
 use keith_state_store::{EmbeddedStore, FileBackupHook, StoreError};
@@ -148,7 +149,11 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const DEFAULT_CREDENTIAL_REFERENCE: &str = "default";
-const DEFAULT_OPENAI_MODEL: &str = "gpt-4.1-mini";
+const MAX_RUNTIME_PROMPT_BYTES: usize = 256 * 1_024;
+const COMPACTION_USER_MESSAGE_MAX_TOKENS: u64 = 20_000;
+const COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS: u32 = 12_000;
+const COMPACTION_PROMPT: &str = "You are creating a context checkpoint for another language model that will continue this exact session. Summarize current progress and decisions, binding constraints and user preferences, unresolved work with concrete next steps, and critical data or references needed to resume. Preserve corrections, identifiers, exact values, and verification state. Be concise, structured, and continuity-focused.";
+const COMPACTION_SUMMARY_PREFIX: &str = "A previous language model worked on this session and produced the following continuation checkpoint. Use it to resume without repeating completed work:";
 
 type GoalService = PersistentGoalService<EmbeddedStore, EmbeddedStore>;
 type ChildService = ChildCoordinator<EmbeddedStore>;
@@ -742,7 +747,7 @@ impl LocalRuntime {
             ));
         }
         let profile = self.profile(profile_id)?;
-        self.prepare_model_route(&profile)?;
+        self.configure_model_route(&profile)?;
         let now = UtcTimestamp::now()?;
         let resolver = RouteResolver::new(&self.profiles, &self.models, &self.sessions);
         let (session, _) = resolver
@@ -804,6 +809,7 @@ impl LocalRuntime {
         text: &str,
         generation: Generation,
     ) -> Result<SessionSnapshot, LocalRuntimeError> {
+        validate_prompt_text(text)?;
         let manifest = self.owned_manifest(session_id)?;
         let profile = self.profile(&manifest.profile_id)?;
         self.prepare_model_route(&profile)?;
@@ -895,35 +901,25 @@ impl LocalRuntime {
         )
         .run(request, &cancellation);
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let compaction_result = match &result {
+            Ok(run) => {
+                let reported_tokens = run
+                    .usage
+                    .input_tokens
+                    .saturating_add(run.usage.output_tokens);
+                self.compact_writer_if_needed(
+                    &profile,
+                    &mut writer,
+                    reported_tokens,
+                    &resolver,
+                    &cancellation,
+                )
+            }
+            Err(_) => Ok(Usage::default()),
+        };
         self.finish_turn_lease(session_id, &lease_id)?;
         match &result {
             Ok(run) => {
-                let ancestry = writer.active_ancestry()?;
-                let estimated_tokens = ancestry.iter().fold(0_u64, |total, entry| {
-                    if let SessionEntryPayload::Usage {
-                        input_tokens,
-                        output_tokens,
-                        ..
-                    } = &entry.payload
-                    {
-                        total
-                            .saturating_add(*input_tokens)
-                            .saturating_add(*output_tokens)
-                    } else {
-                        total
-                    }
-                });
-                if let Some(request) =
-                    writer.request_compaction(estimated_tokens, CompactionPolicy::default())?
-                {
-                    let output = conservative_compaction_output(&request, &ancestry);
-                    let emission =
-                        writer.commit_compaction(&request, output, UtcTimestamp::now()?)?;
-                    self.profile_modules(&profile)?
-                        .memory
-                        .apply_compaction(session_id, emission, UtcTimestamp::now()?)
-                        .map_err(module_error)?;
-                }
                 self.record_provider_experience(
                     &profile,
                     text,
@@ -940,7 +936,12 @@ impl LocalRuntime {
                 let tokens = run
                     .usage
                     .input_tokens
-                    .saturating_add(run.usage.output_tokens);
+                    .saturating_add(run.usage.output_tokens)
+                    .saturating_add(
+                        compaction_result
+                            .as_ref()
+                            .map_or(0, |usage| usage.total_tokens()),
+                    );
                 if tokens > 0 {
                     let outcome = self
                         .system_modules
@@ -989,8 +990,124 @@ impl LocalRuntime {
             }
         }
         result?;
+        compaction_result?;
         drop(writer);
         self.snapshot(session_id, generation, SessionState::Ready)
+    }
+
+    fn compact_writer_if_needed(
+        &self,
+        profile: &RegisteredProfile,
+        writer: &mut keith_session_store::SessionWriter,
+        reported_tokens: u64,
+        credentials: &dyn CredentialResolver,
+        cancellation: &CancellationToken,
+    ) -> Result<Usage, LocalRuntimeError> {
+        let ancestry = writer.active_ancestry()?;
+        let estimated_tokens = reported_tokens.max(estimated_context_tokens(&ancestry));
+        let Some(request) =
+            writer.request_compaction(estimated_tokens, CompactionPolicy::default())?
+        else {
+            return Ok(Usage::default());
+        };
+        let (output, usage) = match self.model_compaction_output(
+            profile,
+            &request,
+            &ancestry,
+            credentials,
+            cancellation,
+        ) {
+            Ok(compaction) => compaction,
+            Err(error) if cancellation.is_cancelled() => return Err(error),
+            Err(_) => (
+                conservative_compaction_output(&request, &ancestry),
+                Usage::default(),
+            ),
+        };
+        let emission = writer.commit_compaction(&request, output, UtcTimestamp::now()?)?;
+        self.profile_modules(profile)?
+            .memory
+            .apply_compaction(
+                &writer.manifest().session_id,
+                emission,
+                UtcTimestamp::now()?,
+            )
+            .map_err(module_error)?;
+        Ok(usage)
+    }
+
+    fn model_compaction_output(
+        &self,
+        profile: &RegisteredProfile,
+        request: &CompactionRequest,
+        ancestry: &[SessionEntry],
+        credentials: &dyn CredentialResolver,
+        cancellation: &CancellationToken,
+    ) -> Result<(CompactionOutput, Usage), LocalRuntimeError> {
+        let mut model_request =
+            self.model_request(profile, ancestry, Vec::new(), COMPACTION_PROMPT)?;
+        model_request.messages.push(ProviderMessage {
+            role: ProviderMessageRole::User,
+            content: vec![ProviderContentBlock::Text {
+                text: COMPACTION_PROMPT.into(),
+            }],
+        });
+        model_request.tools.clear();
+        model_request.max_output_tokens = Some(COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS);
+
+        loop {
+            let mut summary = String::new();
+            let mut stop_reason = None;
+            let attempt = self.models.stream_with_fallback(
+                &profile.profile.id,
+                ModelPurpose::Summarization,
+                &model_request,
+                credentials,
+                cancellation,
+                &mut |event| {
+                    match event {
+                        ModelEvent::TextDelta { text } => summary.push_str(&text),
+                        ModelEvent::Finished { reason } => stop_reason = Some(reason),
+                        ModelEvent::ToolCallStarted { .. }
+                        | ModelEvent::ToolCallArgumentsDelta { .. }
+                        | ModelEvent::ToolCallCompleted { .. } => {
+                            return Err(ProviderError::new(
+                                ProviderErrorKind::MalformedResponse,
+                                "compaction response attempted a tool call",
+                            ));
+                        }
+                        ModelEvent::Started { .. }
+                        | ModelEvent::ReasoningDelta { .. }
+                        | ModelEvent::Usage { .. } => {}
+                    }
+                    Ok(StreamControl::Continue)
+                },
+            );
+            match attempt {
+                Ok(attempt)
+                    if matches!(
+                        stop_reason,
+                        Some(StopReason::EndTurn | StopReason::MaxTokens | StopReason::Other)
+                    ) && !summary.trim().is_empty() =>
+                {
+                    let output = compaction_output_from_summary(request, &summary);
+                    return Ok((output, attempt.usage));
+                }
+                Ok(_) => {
+                    return Err(LocalRuntimeError::Provider(ProviderError::new(
+                        ProviderErrorKind::MalformedResponse,
+                        "compaction response did not contain a completed summary",
+                    )));
+                }
+                Err(error)
+                    if is_context_overflow(&error)
+                        && remove_oldest_compaction_message(&mut model_request.messages) =>
+                {
+                    model_request.request_id = EntityId::new();
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     fn run_submitted_prompt(
@@ -1161,7 +1278,7 @@ impl LocalRuntime {
             .map(|plan| {
                 let current = plan.current();
                 PlanProjection {
-                    plan_id: plan.id,
+                    plan_id: plan.id.clone(),
                     summary: current.restated_outcome.clone(),
                     state: plan_state_name(current.state).into(),
                     revision: plan.current_revision,
@@ -1965,9 +2082,6 @@ impl LocalRuntime {
                 {
                     token.cancel();
                 }
-                self.children.parent_unavailable(session_id, now)?;
-                self.sessions
-                    .archive_session(session_id, self.writer_identity(Generation::ZERO, now))?;
                 Ok(CommandResult::Accepted { action_id: None })
             }
             CancelTarget::Child(child_id) => {
@@ -2587,42 +2701,17 @@ impl LocalRuntime {
                 idle_timeout_ms: 5 * 60 * 1_000,
             })
             .map_err(module_error)?;
-        let outcomes = self
+        let outcome = self
             .system_modules
             .resources
-            .schedule(now, 4_096)
+            .schedule_request(&request_id, now)
             .map_err(module_error)?;
-        let mut selected = None;
-        for outcome in outcomes {
-            match outcome {
-                ResourceScheduleOutcome::Granted(lease) if lease.request.id == request_id => {
-                    selected = Some(lease.id);
-                }
-                ResourceScheduleOutcome::Granted(lease) => {
-                    self.system_modules
-                        .resources
-                        .release(&lease.id, now)
-                        .map_err(module_error)?;
-                }
-                ResourceScheduleOutcome::Paused {
-                    request_id: candidate,
-                    ..
-                }
-                | ResourceScheduleOutcome::Failed {
-                    request_id: candidate,
-                    ..
-                } if candidate == request_id => {
-                    return Err(LocalRuntimeError::Invalid(
-                        "runtime session capacity is exhausted".into(),
-                    ));
-                }
-                ResourceScheduleOutcome::Paused { .. } | ResourceScheduleOutcome::Failed { .. } => {
-                }
-            }
+        match outcome {
+            ResourceScheduleOutcome::Granted(lease) => Ok(lease.id),
+            ResourceScheduleOutcome::Paused { .. } | ResourceScheduleOutcome::Failed { .. } => Err(
+                LocalRuntimeError::Invalid("runtime session capacity is exhausted".into()),
+            ),
         }
-        selected.ok_or_else(|| {
-            LocalRuntimeError::Invalid("runtime session admission remained pending".into())
-        })
     }
 
     fn finish_turn_lease(
@@ -3135,6 +3224,12 @@ impl LocalRuntime {
             &keith_root.join("MEMORY.md"),
             "# Durable memory\n\nUser-approved long-term facts and preferences live here.\n",
         )?;
+        let initial_provider = self.configured_default_provider()?.ok_or_else(|| {
+            LocalRuntimeError::Invalid(
+                "no default provider credential is configured; run `agent-cli provider set` before starting agentd"
+                    .into(),
+            )
+        })?;
         let now = UtcTimestamp::now()?;
         self.profiles.register(RegisteredProfile {
             profile: AgentProfile {
@@ -3146,8 +3241,8 @@ impl LocalRuntime {
                 user_file: ".keith/USER.md".into(),
                 rule_files: vec![".keith/RULE.md".into()],
                 model_route: ProfileModelRoute {
-                    provider: "openai".into(),
-                    model: DEFAULT_OPENAI_MODEL.into(),
+                    provider: initial_provider.id.into(),
+                    model: initial_provider.default_model.into(),
                     fallbacks: Vec::new(),
                     credential_ref: Some(DEFAULT_CREDENTIAL_REFERENCE.into()),
                 },
@@ -3210,6 +3305,27 @@ impl LocalRuntime {
             updated_at: now,
         })?;
         Ok(())
+    }
+
+    fn configured_default_provider(
+        &self,
+    ) -> Result<Option<&'static keith_provider_catalog::ProviderSpec>, LocalRuntimeError> {
+        for provider in BUILTIN_PROVIDERS {
+            if !self.available_providers.contains(provider.id) {
+                continue;
+            }
+            let owner = CredentialOwner::Provider(provider.id.into());
+            let reference = CredentialRef::new(DEFAULT_CREDENTIAL_REFERENCE, owner.clone())?;
+            match self.credentials.resolve(&reference, &owner) {
+                Ok(credential) => {
+                    drop(credential);
+                    return Ok(Some(provider));
+                }
+                Err(CredentialError::NotFound) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(None)
     }
 
     fn profile(&self, profile_id: &ProfileId) -> Result<RegisteredProfile, LocalRuntimeError> {
@@ -3297,8 +3413,6 @@ impl LocalRuntime {
             resolver.resolve(&selected.provider, selected.credential_ref.as_deref())?;
         self.models
             .refresh_models(&selected.provider, &credential)?;
-        self.models
-            .register_configured_model(&selected.provider, &selected.model)?;
         for fallback in &selected.fallbacks {
             self.ensure_supported_provider(&fallback.provider)?;
             if fallback.provider != selected.provider {
@@ -3307,6 +3421,17 @@ impl LocalRuntime {
                 self.models
                     .refresh_models(&fallback.provider, &credential)?;
             }
+        }
+        self.configure_model_route(profile)
+    }
+
+    fn configure_model_route(&self, profile: &RegisteredProfile) -> Result<(), LocalRuntimeError> {
+        let selected = &profile.profile.model_route;
+        self.ensure_supported_provider(&selected.provider)?;
+        self.models
+            .register_configured_model(&selected.provider, &selected.model)?;
+        for fallback in &selected.fallbacks {
+            self.ensure_supported_provider(&fallback.provider)?;
             self.models
                 .register_configured_model(&fallback.provider, &fallback.model)?;
         }
@@ -3504,19 +3629,28 @@ impl LocalRuntime {
         let compacted_at = entries
             .iter()
             .rposition(|entry| matches!(entry.payload, SessionEntryPayload::Compaction { .. }));
-        if let Some(index) = compacted_at
-            && let SessionEntryPayload::Compaction { summary, .. } = &entries[index].payload
-        {
-            system.push(ProviderContentBlock::Text {
-                text: format!("Durable summary of the earlier selected branch:\n{summary}"),
-            });
+        let mut messages = Vec::new();
+        if let Some(index) = compacted_at {
+            messages.extend(recent_compacted_user_messages(
+                &entries[..index],
+                COMPACTION_USER_MESSAGE_MAX_TOKENS,
+            ));
+            if let SessionEntryPayload::Compaction { summary, .. } = &entries[index].payload {
+                messages.push(ProviderMessage {
+                    role: ProviderMessageRole::User,
+                    content: vec![ProviderContentBlock::Text {
+                        text: summary.clone(),
+                    }],
+                });
+            }
         }
         let context_entries = compacted_at.map_or(entries, |index| &entries[index + 1..]);
+        messages.extend(provider_messages(context_entries));
         Ok(ModelRequest {
             request_id: EntityId::new(),
             model: profile.profile.model_route.model.clone(),
             system,
-            messages: provider_messages(context_entries),
+            messages,
             tools,
             max_output_tokens: Some(16_384),
             temperature: None,
@@ -3715,6 +3849,7 @@ fn ensure_session_scope(
     }
 }
 
+#[cfg(test)]
 fn runtime_writer_identity(generation: Generation, acquired_at: UtcTimestamp) -> WriterIdentity {
     WriterIdentity {
         worker_id: WorkerId::new(),
@@ -4035,6 +4170,26 @@ fn session_markdown(export: &keith_session_store::SessionExport) -> String {
     output
 }
 
+fn compaction_output_from_summary(
+    request: &CompactionRequest,
+    model_summary: &str,
+) -> CompactionOutput {
+    let mut summary = format!("{COMPACTION_SUMMARY_PREFIX}\n{}", model_summary.trim());
+    let target_bytes =
+        usize::try_from(request.target_tokens.saturating_mul(4)).unwrap_or(usize::MAX);
+    truncate_utf8(&mut summary, request.max_summary_bytes.min(target_bytes));
+    let mut daily_entry = summary.clone();
+    truncate_utf8(&mut daily_entry, request.max_candidate_bytes.min(4 * 1_024));
+    CompactionOutput {
+        request_id: request.id.clone(),
+        session_summary: summary,
+        memory_candidates: Vec::new(),
+        daily_entry: Some(daily_entry),
+        open_commitments: Vec::new(),
+        unresolved_items: Vec::new(),
+    }
+}
+
 fn conservative_compaction_output(
     request: &CompactionRequest,
     ancestry: &[SessionEntry],
@@ -4047,8 +4202,15 @@ fn conservative_compaction_output(
         .iter()
         .position(|entry| entry.id == request.range_end)
         .unwrap_or_else(|| ancestry.len().saturating_sub(1));
-    let mut summary =
-        String::from("Exact bounded branch transcript retained during deterministic compaction:\n");
+    let mut lines = Vec::new();
+    if let Some(previous_boundary) = &request.previous_boundary
+        && let Some(SessionEntry {
+            payload: SessionEntryPayload::Compaction { summary, .. },
+            ..
+        }) = ancestry.iter().find(|entry| entry.id == *previous_boundary)
+    {
+        lines.push(format!("Earlier checkpoint: {summary}"));
+    }
     for entry in ancestry.get(start..=end).unwrap_or_default() {
         let line = match &entry.payload {
             SessionEntryPayload::UserMessage { message } => {
@@ -4075,21 +4237,37 @@ fn conservative_compaction_output(
         if line.trim_end_matches(['\n', '\r']).is_empty() {
             continue;
         }
-        summary.push_str(&line);
-        summary.push('\n');
-        if summary.len() >= request.max_summary_bytes {
+        lines.push(line);
+    }
+    let target_bytes =
+        usize::try_from(request.target_tokens.saturating_mul(4)).unwrap_or(usize::MAX);
+    let summary_limit = request.max_summary_bytes.min(target_bytes);
+    let mut summary = String::from(
+        "Bounded selected-branch transcript retained during deterministic compaction:\n",
+    );
+    let available = summary_limit.saturating_sub(summary.len());
+    let per_line = if lines.is_empty() {
+        0
+    } else {
+        available.saturating_sub(lines.len()) / lines.len()
+    };
+    for line in lines {
+        if per_line == 0 {
             break;
         }
+        summary.push_str(&bounded_compaction_line(line, per_line));
+        summary.push('\n');
     }
-    truncate_utf8(&mut summary, request.max_summary_bytes);
+    truncate_utf8(&mut summary, summary_limit);
     if summary.trim().is_empty() {
         summary = format!(
             "Selected branch compacted through entry {}",
             request.range_end
         );
+        truncate_utf8(&mut summary, summary_limit);
     }
     let mut daily_entry = summary.clone();
-    truncate_utf8(&mut daily_entry, request.max_candidate_bytes);
+    truncate_utf8(&mut daily_entry, request.max_candidate_bytes.min(4 * 1_024));
     CompactionOutput {
         request_id: request.id.clone(),
         session_summary: summary,
@@ -4098,6 +4276,117 @@ fn conservative_compaction_output(
         open_commitments: Vec::new(),
         unresolved_items: Vec::new(),
     }
+}
+
+fn validate_prompt_text(text: &str) -> Result<(), LocalRuntimeError> {
+    if text.trim().is_empty() {
+        return Err(LocalRuntimeError::Invalid(
+            "prompt text must not be empty".into(),
+        ));
+    }
+    if text.len() > MAX_RUNTIME_PROMPT_BYTES {
+        return Err(LocalRuntimeError::Invalid(format!(
+            "prompt exceeds the {MAX_RUNTIME_PROMPT_BYTES}-byte runtime limit"
+        )));
+    }
+    Ok(())
+}
+
+fn estimated_context_tokens(ancestry: &[SessionEntry]) -> u64 {
+    let boundary = ancestry
+        .iter()
+        .rposition(|entry| matches!(entry.payload, SessionEntryPayload::Compaction { .. }));
+    let mut estimated = boundary
+        .and_then(|index| match &ancestry[index].payload {
+            SessionEntryPayload::Compaction { summary, .. } => Some(estimated_text_tokens(summary)),
+            _ => None,
+        })
+        .unwrap_or(0);
+    for entry in boundary.map_or(ancestry, |index| &ancestry[index + 1..]) {
+        let tokens = match &entry.payload {
+            SessionEntryPayload::UserMessage { message }
+            | SessionEntryPayload::AssistantMessage { message } => {
+                estimated_text_tokens(&stored_text(&message.content))
+            }
+            SessionEntryPayload::ToolResult { content, .. } => {
+                estimated_text_tokens(&stored_text(content))
+            }
+            SessionEntryPayload::Usage { .. } => 0,
+            _ => 0,
+        };
+        estimated = estimated.saturating_add(tokens);
+    }
+    estimated
+}
+
+fn estimated_text_tokens(text: &str) -> u64 {
+    u64::try_from(text.len().div_ceil(4)).unwrap_or(u64::MAX)
+}
+
+fn recent_compacted_user_messages(
+    entries: &[SessionEntry],
+    max_tokens: u64,
+) -> Vec<ProviderMessage> {
+    let mut remaining = max_tokens;
+    let mut selected = Vec::new();
+    for entry in entries.iter().rev() {
+        let SessionEntryPayload::UserMessage { message } = &entry.payload else {
+            continue;
+        };
+        if remaining == 0 {
+            break;
+        }
+        let mut text = stored_text(&message.content);
+        if text.is_empty() {
+            continue;
+        }
+        let tokens = estimated_text_tokens(&text);
+        if tokens > remaining {
+            let max_bytes = usize::try_from(remaining.saturating_mul(4)).unwrap_or(usize::MAX);
+            truncate_utf8(&mut text, max_bytes);
+            remaining = 0;
+        } else {
+            remaining = remaining.saturating_sub(tokens);
+        }
+        selected.push(ProviderMessage {
+            role: ProviderMessageRole::User,
+            content: vec![ProviderContentBlock::Text { text }],
+        });
+    }
+    selected.reverse();
+    selected
+}
+
+fn remove_oldest_compaction_message(messages: &mut Vec<ProviderMessage>) -> bool {
+    if messages.len() <= 1 {
+        return false;
+    }
+    messages.remove(0);
+    while messages.len() > 1 && messages[0].role != ProviderMessageRole::User {
+        messages.remove(0);
+    }
+    true
+}
+
+fn is_context_overflow(error: &RegistryError) -> bool {
+    matches!(error, RegistryError::Provider(provider)
+        if provider.kind == ProviderErrorKind::InvalidRequest
+            && (provider.message.to_ascii_lowercase().contains("context")
+                || provider.message.to_ascii_lowercase().contains("token limit")))
+}
+
+fn bounded_compaction_line(mut line: String, max_bytes: usize) -> String {
+    const MARKER: &str = "...[truncated]";
+    if line.len() <= max_bytes {
+        return line;
+    }
+    if max_bytes <= MARKER.len() {
+        truncate_utf8(&mut line, max_bytes);
+        return line;
+    }
+    truncate_utf8(&mut line, max_bytes - MARKER.len());
+    line.push_str(MARKER);
+    line
 }
 
 fn truncate_utf8(value: &mut String, max_bytes: usize) {
@@ -6261,6 +6550,139 @@ mod tests {
         }
     }
 
+    #[test]
+    fn deterministic_compaction_fallback_respects_token_budget_and_marks_truncation() {
+        let text = format!("ANCHOR {}", "loadpad ".repeat(10_000));
+        let entry = SessionEntry::new(
+            EntryId::new(),
+            None,
+            UtcTimestamp::UNIX_EPOCH,
+            SessionEntryPayload::UserMessage {
+                message: StoredMessage {
+                    role: StoredMessageRole::User,
+                    content: vec![StoredContentBlock::Text { text }],
+                    provider_metadata: BTreeMap::new(),
+                },
+            },
+        )
+        .unwrap();
+        let request = CompactionRequest {
+            id: EntityId::new(),
+            session_id: SessionId::new(),
+            selected_leaf: entry.id.clone(),
+            range_start: entry.id.clone(),
+            range_end: entry.id.clone(),
+            previous_boundary: None,
+            target_tokens: 512,
+            max_summary_bytes: 4 * 1_024,
+            max_candidates: 8,
+            max_candidate_bytes: 2 * 1_024,
+        };
+        let output = conservative_compaction_output(&request, &[entry]);
+        assert!(output.session_summary.len() <= 2_048);
+        assert!(output.session_summary.contains("ANCHOR"));
+        assert!(output.session_summary.contains("...[truncated]"));
+        assert!(
+            output
+                .daily_entry
+                .as_ref()
+                .is_some_and(|daily| daily.len() <= 2_048)
+        );
+    }
+
+    #[test]
+    fn compacted_context_retains_the_most_recent_user_messages_within_budget() {
+        let entry = |text: &str, parent_id: Option<EntryId>| {
+            SessionEntry::new(
+                EntryId::new(),
+                parent_id,
+                UtcTimestamp::UNIX_EPOCH,
+                SessionEntryPayload::UserMessage {
+                    message: StoredMessage {
+                        role: StoredMessageRole::User,
+                        content: vec![StoredContentBlock::Text { text: text.into() }],
+                        provider_metadata: BTreeMap::new(),
+                    },
+                },
+            )
+            .unwrap()
+        };
+        let first = entry("old-user-message", None);
+        let second = entry(
+            "new-user-message-that-exceeds-the-budget",
+            Some(first.id.clone()),
+        );
+        let retained = recent_compacted_user_messages(&[first, second], 5);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].role, ProviderMessageRole::User);
+        assert!(matches!(
+            retained[0].content.as_slice(),
+            [ProviderContentBlock::Text { text }]
+                if text == "new-user-message-tha"
+        ));
+    }
+
+    #[test]
+    fn active_context_estimate_resets_at_the_latest_checkpoint() {
+        let old = SessionEntry::new(
+            EntryId::new(),
+            None,
+            UtcTimestamp::UNIX_EPOCH,
+            SessionEntryPayload::UserMessage {
+                message: StoredMessage {
+                    role: StoredMessageRole::User,
+                    content: vec![StoredContentBlock::Text {
+                        text: "old ".repeat(100_000),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+            },
+        )
+        .unwrap();
+        let checkpoint = SessionEntry::new(
+            EntryId::new(),
+            Some(old.id.clone()),
+            UtcTimestamp::UNIX_EPOCH,
+            SessionEntryPayload::Compaction {
+                summary: "bounded checkpoint".into(),
+                compacted_through: old.id.clone(),
+            },
+        )
+        .unwrap();
+        let continuation = SessionEntry::new(
+            EntryId::new(),
+            Some(checkpoint.id.clone()),
+            UtcTimestamp::UNIX_EPOCH,
+            SessionEntryPayload::UserMessage {
+                message: StoredMessage {
+                    role: StoredMessageRole::User,
+                    content: vec![StoredContentBlock::Text {
+                        text: "continue".into(),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            estimated_context_tokens(&[old, checkpoint, continuation]),
+            estimated_text_tokens("bounded checkpoint") + estimated_text_tokens("continue")
+        );
+    }
+
+    #[test]
+    fn prompt_validation_rejects_empty_and_oversized_inputs_before_runtime_work() {
+        assert!(matches!(
+            validate_prompt_text(" \n\t"),
+            Err(LocalRuntimeError::Invalid(_))
+        ));
+        assert!(validate_prompt_text(&"x".repeat(MAX_RUNTIME_PROMPT_BYTES)).is_ok());
+        assert!(matches!(
+            validate_prompt_text(&"x".repeat(MAX_RUNTIME_PROMPT_BYTES + 1)),
+            Err(LocalRuntimeError::Invalid(_))
+        ));
+    }
+
     fn read_request(stream: &mut TcpStream) -> String {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -6298,6 +6720,21 @@ mod tests {
         )
     }
 
+    fn seed_provider_credential(root: &Path, key: [u8; 32], provider: &str, secret: &str) {
+        EncryptedCredentialStore::open(root, MasterKey::from_bytes(key))
+            .unwrap()
+            .put(
+                CredentialRef::new(
+                    DEFAULT_CREDENTIAL_REFERENCE,
+                    CredentialOwner::Provider(provider.into()),
+                )
+                .unwrap(),
+                SecretValue::new(secret).unwrap(),
+                UtcTimestamp::now().unwrap(),
+            )
+            .unwrap();
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)]
     fn clean_install_runs_real_provider_tool_turn_and_resumes_after_restart() {
@@ -6322,6 +6759,12 @@ mod tests {
         let credential_root = data_root.join("credentials");
         let workspace_root = root.path().join("workspace");
         let key = [23_u8; 32];
+        seed_provider_credential(
+            &credential_root,
+            key,
+            "openai",
+            "provider-integration-secret",
+        );
         let runtime = LocalRuntime::open(LocalRuntimeConfig {
             data_root: data_root.clone(),
             credential_root: credential_root.clone(),
@@ -6335,18 +6778,6 @@ mod tests {
             owner_instance: EntityId::new(),
         })
         .unwrap();
-        runtime
-            .credentials
-            .put(
-                CredentialRef::new(
-                    DEFAULT_CREDENTIAL_REFERENCE,
-                    CredentialOwner::Provider("openai".into()),
-                )
-                .unwrap(),
-                SecretValue::new("provider-integration-secret").unwrap(),
-                UtcTimestamp::now().unwrap(),
-            )
-            .unwrap();
         let profile = runtime.registered_profiles().unwrap().remove(0);
         let session = runtime
             .create_session(
@@ -6419,8 +6850,107 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn context_limit_uses_the_real_provider_to_install_a_continuation_checkpoint() {
+        let models = r#"{"data":[{"id":"gpt-4.1-mini"}]}"#;
+        let primary_turn = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Primary answer before compaction.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":96000,\"completion_tokens\":8}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let checkpoint_turn = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Progress: the user anchor is lighthouse-731. Next: continue the verification run.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":24}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let server = ProviderServer::start(vec![
+            response("application/json", models),
+            response("text/event-stream", primary_turn),
+            response("text/event-stream", checkpoint_turn),
+        ]);
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path().join("data");
+        let credential_root = data_root.join("credentials");
+        let workspace_root = root.path().join("workspace");
+        let key = [71_u8; 32];
+        seed_provider_credential(&credential_root, key, "openai", "compaction-secret");
+        let runtime = LocalRuntime::open(LocalRuntimeConfig {
+            data_root,
+            credential_root,
+            credential_key: MasterKey::from_bytes(key),
+            workspace_root,
+            openai_base_url: server.base_url.clone(),
+            anthropic_base_url: server.base_url.clone(),
+            provider_base_urls: BTreeMap::new(),
+            root_scope: None,
+            worker_id: WorkerId::new(),
+            owner_instance: EntityId::new(),
+        })
+        .unwrap();
+        let profile = runtime.registered_profiles().unwrap().remove(0);
+        let session = runtime
+            .create_session(
+                &profile.profile.id,
+                &profile.profile.workspace_id,
+                Some("Compaction integration".into()),
+            )
+            .unwrap();
+        runtime
+            .run_prompt(
+                &session.session_id,
+                "Remember that the user anchor is lighthouse-731.",
+                Generation::new(1),
+            )
+            .unwrap();
+
+        let manifest = runtime.sessions.manifest(&session.session_id).unwrap();
+        let ancestry = runtime
+            .sessions
+            .load_index(&session.session_id)
+            .unwrap()
+            .ancestry(manifest.active_leaf.as_ref().unwrap())
+            .unwrap();
+        let summary = ancestry
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.payload {
+                SessionEntryPayload::Compaction { summary, .. } => Some(summary),
+                _ => None,
+            })
+            .unwrap();
+        assert!(summary.starts_with(COMPACTION_SUMMARY_PREFIX));
+        assert!(summary.contains("lighthouse-731"));
+        let resumed_request = runtime
+            .model_request(&profile, &ancestry, Vec::new(), "Continue verification")
+            .unwrap();
+        assert_eq!(resumed_request.messages.len(), 2);
+        assert!(matches!(
+            resumed_request.messages[0].content.as_slice(),
+            [ProviderContentBlock::Text { text }]
+                if text.contains("lighthouse-731")
+        ));
+        assert!(matches!(
+            resumed_request.messages[1].content.as_slice(),
+            [ProviderContentBlock::Text { text }]
+                if text.starts_with(COMPACTION_SUMMARY_PREFIX)
+                    && text.contains("continue the verification run")
+        ));
+
+        let discovery_request = server.request();
+        let primary_request = server.request();
+        let compaction_request = server.request();
+        assert!(discovery_request.starts_with("GET /v1/models "));
+        assert!(primary_request.starts_with("POST /v1/chat/completions "));
+        assert!(compaction_request.starts_with("POST /v1/chat/completions "));
+        assert!(compaction_request.contains("context checkpoint"));
+        assert!(compaction_request.contains("\"tools\":[]"));
+    }
+
+    #[test]
     fn union_catalog_registers_every_provider_when_deployment_endpoints_are_supplied() {
         let root = tempfile::tempdir().unwrap();
+        let credential_root = root.path().join("credentials");
+        seed_provider_credential(&credential_root, [91; 32], "openai", "catalog-secret");
         let overrides = BUILTIN_PROVIDERS
             .iter()
             .filter(|provider| provider.default_base_url.is_none())
@@ -6428,7 +6958,7 @@ mod tests {
             .collect();
         let runtime = LocalRuntime::open(LocalRuntimeConfig {
             data_root: root.path().join("data"),
-            credential_root: root.path().join("credentials"),
+            credential_root,
             credential_key: MasterKey::from_bytes([91; 32]),
             workspace_root: root.path().join("workspace"),
             openai_base_url: "http://127.0.0.1:65535".into(),
@@ -6454,6 +6984,7 @@ mod tests {
         let credential_root = root.path().join("credentials");
         let workspace_root = root.path().join("workspace");
         let key = [37_u8; 32];
+        seed_provider_credential(&credential_root, key, "openai", "feature-secret");
         let configuration = || LocalRuntimeConfig {
             data_root: data_root.clone(),
             credential_root: credential_root.clone(),

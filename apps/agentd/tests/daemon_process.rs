@@ -6,14 +6,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use keith_agent_types::{
-    CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, ClientId, CommandId, ProfileId, RootTreeId,
-    SessionId, UtcTimestamp,
+    CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, ClientId, CommandId, EntityId, ProfileId,
+    RootTreeId, SessionId, UtcTimestamp, WorkerId,
 };
 use keith_connection::{
     AgentTransport, FramedTransport, LocalStream, connect_local, set_local_read_timeout,
     set_local_write_timeout,
 };
+use keith_credentials::{
+    CredentialOwner, CredentialRef, EncryptedCredentialStore, RestrictedMasterKeyStore, SecretValue,
+};
 use keith_daemon_core::RootManifest;
+use keith_local_runtime::{LocalRuntimeLaunchConfig, RuntimeCredentialKeySource};
 use keith_protocol::{
     AttachSession, ClientCommand, ClientHello, CommandEnvelope, CommandResult, ResponsePayload,
     SessionFilter, SessionState, WireFormat, WireMessage,
@@ -24,14 +28,19 @@ use nix::sys::signal::{Signal, kill};
 #[cfg(unix)]
 use nix::unistd::Pid;
 
-fn write_manifest(data_root: &Path, root: &RootTreeId, session: &SessionId) {
+fn write_manifest(
+    data_root: &Path,
+    root: &RootTreeId,
+    session: &SessionId,
+    profile_id: &ProfileId,
+) {
     let directory = data_root.join("sessions").join(root.to_string());
     fs::create_dir_all(&directory).unwrap();
     let manifest = RootManifest {
         version: CURRENT_SCHEMA_VERSION,
         root_tree_id: root.clone(),
         root_session_id: session.clone(),
-        profile_id: ProfileId::new(),
+        profile_id: profile_id.clone(),
         title: Some(format!("root {root}")),
         state: SessionState::Dormant,
         updated_at: UtcTimestamp::UNIX_EPOCH,
@@ -46,6 +55,42 @@ fn write_manifest(data_root: &Path, root: &RootTreeId, session: &SessionId) {
         b"corrupt session state that lazy discovery must never load",
     )
     .unwrap();
+}
+
+fn seed_runtime_session(
+    launch: &LocalRuntimeLaunchConfig,
+    root: &RootTreeId,
+    session: &SessionId,
+) -> ProfileId {
+    let runtime = launch
+        .open_worker(root.clone(), WorkerId::new(), EntityId::new())
+        .unwrap();
+    let profile = runtime.registered_profiles().unwrap().remove(0);
+    runtime
+        .create_session_assigned(
+            &profile.profile.id,
+            &profile.profile.workspace_id,
+            session.clone(),
+            root.clone(),
+            Some(format!("root {root}")),
+        )
+        .unwrap();
+    profile.profile.id
+}
+
+fn seed_provider_credential(launch: &LocalRuntimeLaunchConfig) {
+    let key = RestrictedMasterKeyStore::open(&launch.credential_root)
+        .unwrap()
+        .load_or_create()
+        .unwrap();
+    EncryptedCredentialStore::open(&launch.credential_root, key)
+        .unwrap()
+        .put(
+            CredentialRef::new("default", CredentialOwner::Provider("openai".into())).unwrap(),
+            SecretValue::new("unused-process-test-credential").unwrap(),
+            UtcTimestamp::now().unwrap(),
+        )
+        .unwrap();
 }
 
 fn start_daemon(data_root: &Path, socket: &Path) -> Child {
@@ -189,8 +234,23 @@ fn daemon_process_is_lazy_contains_crashes_and_adopts_after_restart() {
     let first_session = SessionId::new();
     let second_root = RootTreeId::new();
     let second_session = SessionId::new();
-    write_manifest(&data_root, &first_root, &first_session);
-    write_manifest(&data_root, &second_root, &second_session);
+    let launch = LocalRuntimeLaunchConfig {
+        data_root: data_root.clone(),
+        credential_root: data_root.join("credentials"),
+        credential_key_source: RuntimeCredentialKeySource::Restricted(
+            data_root.join("credentials"),
+        ),
+        workspace_root: directory.path().join("workspace"),
+        openai_base_url: "http://127.0.0.1:1".into(),
+        anthropic_base_url: "http://127.0.0.1:1".into(),
+        provider_base_urls: std::collections::BTreeMap::new(),
+    };
+    seed_provider_credential(&launch);
+    let first_profile = seed_runtime_session(&launch, &first_root, &first_session);
+    let second_profile = seed_runtime_session(&launch, &second_root, &second_session);
+    assert_eq!(first_profile, second_profile);
+    write_manifest(&data_root, &first_root, &first_session, &first_profile);
+    write_manifest(&data_root, &second_root, &second_session, &second_profile);
 
     let mut daemon = start_daemon(&data_root, &socket);
     let _idle_connection = open_connection(&socket);

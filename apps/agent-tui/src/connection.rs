@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use keith_agent_types::{CURRENT_PROTOCOL_VERSION, ClientId, ProtocolVersion};
@@ -54,6 +56,8 @@ pub enum TuiConnectionError {
 }
 
 type BoxedTransport = Box<dyn AgentTransport + Send>;
+
+const MAX_DISPATCHED_COMMANDS: usize = 128;
 
 pub struct AgentConnectionClient {
     mode: ConnectionMode,
@@ -153,6 +157,201 @@ impl Drop for AgentConnectionClient {
             let _ = child.wait();
         }
     }
+}
+
+#[derive(Debug)]
+pub enum DispatchEvent {
+    Message(Box<WireMessage>),
+    CommandFailed(String),
+    Reconnecting,
+    Reconnected,
+    ReconnectFailed(String),
+}
+
+pub struct AgentCommandDispatcher {
+    supervised_daemon: Option<Child>,
+    commands: Option<SyncSender<CommandEnvelope>>,
+    event_sender: mpsc::Sender<DispatchEvent>,
+    events: Receiver<DispatchEvent>,
+    dispatch_mode: ConnectionMode,
+    client_id: ClientId,
+    startup_timeout: Duration,
+    worker: Option<JoinHandle<()>>,
+    priority_workers: Vec<JoinHandle<()>>,
+}
+
+impl AgentCommandDispatcher {
+    pub fn new(mut owner: AgentConnectionClient, startup_timeout: Duration) -> Self {
+        let dispatch_mode = parallel_mode(&owner.mode);
+        let client_id = owner.client_id.clone();
+        let supervised_daemon = owner.supervised_daemon.take();
+        drop(owner);
+        let (command_sender, command_receiver) =
+            mpsc::sync_channel::<CommandEnvelope>(MAX_DISPATCHED_COMMANDS);
+        let (event_sender, event_receiver) = mpsc::channel();
+        let worker_mode = dispatch_mode.clone();
+        let worker_client_id = client_id.clone();
+        let worker_events = event_sender.clone();
+        let worker = thread::spawn(move || {
+            command_worker(
+                &worker_mode,
+                &worker_client_id,
+                startup_timeout,
+                &command_receiver,
+                &worker_events,
+            );
+        });
+        Self {
+            supervised_daemon,
+            commands: Some(command_sender),
+            event_sender,
+            events: event_receiver,
+            dispatch_mode,
+            client_id,
+            startup_timeout,
+            worker: Some(worker),
+            priority_workers: Vec::new(),
+        }
+    }
+
+    /// Enqueues an ordinary command or starts a priority cancellation connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bounded dispatcher is full or unavailable.
+    pub fn dispatch(&mut self, command: CommandEnvelope) -> Result<(), String> {
+        self.reap_priority_workers();
+        if matches!(command.command, keith_protocol::ClientCommand::Cancel(_)) {
+            let mode = self.dispatch_mode.clone();
+            let client_id = self.client_id.clone();
+            let startup_timeout = self.startup_timeout;
+            let events = self.event_sender.clone();
+            self.priority_workers.push(thread::spawn(
+                move || match AgentConnectionClient::connect(mode, client_id, None, startup_timeout)
+                {
+                    Ok(mut client) => {
+                        if let Err(error) = forward_command(&mut client, command, &events) {
+                            let _ = events.send(DispatchEvent::CommandFailed(error.to_string()));
+                        }
+                    }
+                    Err(error) => {
+                        let _ = events.send(DispatchEvent::CommandFailed(error.to_string()));
+                    }
+                },
+            ));
+            return Ok(());
+        }
+        let Some(commands) = &self.commands else {
+            return Err("command dispatcher is closed".into());
+        };
+        commands.try_send(command).map_err(|error| match error {
+            TrySendError::Full(_) => "command dispatcher queue is full".to_owned(),
+            TrySendError::Disconnected(_) => "command dispatcher is unavailable".to_owned(),
+        })
+    }
+
+    pub fn try_next(&self) -> Option<DispatchEvent> {
+        self.events.try_recv().ok()
+    }
+
+    fn reap_priority_workers(&mut self) {
+        let mut index = 0;
+        while index < self.priority_workers.len() {
+            if self.priority_workers[index].is_finished() {
+                let worker = self.priority_workers.swap_remove(index);
+                let _ = worker.join();
+            } else {
+                index += 1;
+            }
+        }
+    }
+}
+
+impl Drop for AgentCommandDispatcher {
+    fn drop(&mut self) {
+        self.commands.take();
+        self.reap_priority_workers();
+        if self.worker.as_ref().is_some_and(JoinHandle::is_finished)
+            && let Some(worker) = self.worker.take()
+        {
+            let _ = worker.join();
+        }
+        if let Some(child) = &mut self.supervised_daemon {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn parallel_mode(mode: &ConnectionMode) -> ConnectionMode {
+    match mode {
+        ConnectionMode::SupervisedLocal(config) => ConnectionMode::Attach {
+            socket_path: config.socket_path.clone(),
+        },
+        mode => mode.clone(),
+    }
+}
+
+fn command_worker(
+    mode: &ConnectionMode,
+    client_id: &ClientId,
+    startup_timeout: Duration,
+    commands: &Receiver<CommandEnvelope>,
+    events: &mpsc::Sender<DispatchEvent>,
+) {
+    let mut client =
+        AgentConnectionClient::connect(mode.clone(), client_id.clone(), None, startup_timeout).ok();
+    while let Ok(command) = commands.recv() {
+        if client.is_none() {
+            match AgentConnectionClient::connect(
+                mode.clone(),
+                client_id.clone(),
+                None,
+                startup_timeout,
+            ) {
+                Ok(reconnected) => {
+                    client = Some(reconnected);
+                    let _ = events.send(DispatchEvent::Reconnected);
+                }
+                Err(error) => {
+                    let _ = events.send(DispatchEvent::CommandFailed(error.to_string()));
+                    let _ = events.send(DispatchEvent::ReconnectFailed(error.to_string()));
+                    continue;
+                }
+            }
+        }
+        let Some(active) = &mut client else {
+            continue;
+        };
+        if let Err(error) = forward_command(active, command, events) {
+            let _ = events.send(DispatchEvent::CommandFailed(error.to_string()));
+            let _ = events.send(DispatchEvent::Reconnecting);
+            match active.reconnect(None, startup_timeout) {
+                Ok(()) => {
+                    let _ = events.send(DispatchEvent::Reconnected);
+                }
+                Err(reconnect_error) => {
+                    let _ =
+                        events.send(DispatchEvent::ReconnectFailed(reconnect_error.to_string()));
+                    client = None;
+                }
+            }
+        }
+    }
+}
+
+fn forward_command(
+    client: &mut AgentConnectionClient,
+    command: CommandEnvelope,
+    events: &mpsc::Sender<DispatchEvent>,
+) -> Result<(), TuiConnectionError> {
+    let result = client.execute(command, |message| {
+        let _ = events.send(DispatchEvent::Message(Box::new(message)));
+    })?;
+    let _ = events.send(DispatchEvent::Message(Box::new(
+        WireMessage::CommandResult(result),
+    )));
+    Ok(())
 }
 
 fn open_transport(
@@ -425,6 +624,7 @@ fn sibling_binary(program: &OsString, name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::net::TcpListener;
+    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
 
     use keith_agent_types::{
@@ -488,6 +688,35 @@ mod tests {
         }
     }
 
+    fn negotiate_local_client(
+        stream: keith_connection::LocalStream,
+    ) -> FramedTransport<keith_connection::LocalStream> {
+        let mut transport = FramedTransport::new(stream, WireFormat::Json);
+        let WireMessage::ClientHello(hello) = transport.receive().unwrap() else {
+            panic!("client hello required");
+        };
+        let server = negotiate(
+            &hello,
+            CURRENT_PROTOCOL_VERSION,
+            EntityId::new(),
+            &hello.supported_features,
+        )
+        .unwrap();
+        transport.send(&WireMessage::ServerHello(server)).unwrap();
+        transport
+    }
+
+    fn complete_command(transport: &mut impl AgentTransport, command_id: CommandId) {
+        transport
+            .send(&WireMessage::CommandResult(CommandResultEnvelope {
+                protocol: CURRENT_PROTOCOL_VERSION,
+                command_id,
+                completed_at: UtcTimestamp::UNIX_EPOCH,
+                result: CommandResult::Data(Box::new(ResponsePayload::Sessions(Vec::new()))),
+            }))
+            .unwrap();
+    }
+
     #[test]
     fn local_attach_and_reconnect_run_the_real_protocol_twice() {
         let directory = tempfile::tempdir().unwrap();
@@ -528,6 +757,94 @@ mod tests {
         client.reconnect(None, Duration::from_secs(1)).unwrap();
         client.execute(list_command(client_id), |_| {}).unwrap();
         drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn dispatcher_keeps_input_responsive_and_sends_cancel_while_a_command_is_in_flight() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.sock");
+        let listener = keith_connection::bind_permissioned_local(&path).unwrap();
+        let (primary_received_sender, primary_received_receiver) = mpsc::channel();
+        let (cancel_received_sender, cancel_received_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let owner_stream = keith_connection::accept_local(&listener).unwrap();
+            let owner = negotiate_local_client(owner_stream);
+
+            let worker_stream = keith_connection::accept_local(&listener).unwrap();
+            let primary = thread::spawn(move || {
+                let mut transport = negotiate_local_client(worker_stream);
+                let WireMessage::Command(command) = transport.receive().unwrap() else {
+                    panic!("primary command required");
+                };
+                primary_received_sender.send(()).unwrap();
+                release_receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+                complete_command(&mut transport, command.command_id);
+            });
+
+            let cancel_stream = keith_connection::accept_local(&listener).unwrap();
+            let mut cancel_transport = negotiate_local_client(cancel_stream);
+            let WireMessage::Command(command) = cancel_transport.receive().unwrap() else {
+                panic!("cancel command required");
+            };
+            assert!(matches!(command.command, ClientCommand::Cancel(_)));
+            cancel_received_sender.send(()).unwrap();
+            complete_command(&mut cancel_transport, command.command_id);
+            primary.join().unwrap();
+            drop(owner);
+        });
+
+        let client_id = ClientId::new();
+        let owner = AgentConnectionClient::connect(
+            ConnectionMode::Attach { socket_path: path },
+            client_id.clone(),
+            None,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let mut dispatcher = AgentCommandDispatcher::new(owner, Duration::from_secs(1));
+        let started = Instant::now();
+        dispatcher
+            .dispatch(list_command(client_id.clone()))
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(250));
+        primary_received_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        let session_id = keith_agent_types::SessionId::new();
+        let cancel = CommandEnvelope {
+            protocol: CURRENT_PROTOCOL_VERSION,
+            command_id: CommandId::new(),
+            client_id,
+            sent_at: UtcTimestamp::UNIX_EPOCH,
+            session_id: Some(session_id.clone()),
+            command: ClientCommand::Cancel(keith_protocol::CancelTarget::Session(session_id)),
+        };
+        let started = Instant::now();
+        dispatcher.dispatch(cancel).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(250));
+        cancel_received_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        release_sender.send(()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut completed = 0;
+        while completed < 2 && Instant::now() < deadline {
+            if let Some(DispatchEvent::Message(message)) = dispatcher.try_next()
+                && matches!(*message, WireMessage::CommandResult(_))
+            {
+                completed += 1;
+            } else {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(completed, 2);
+        drop(dispatcher);
         server.join().unwrap();
     }
 

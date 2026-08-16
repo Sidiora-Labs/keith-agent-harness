@@ -83,6 +83,7 @@ pub struct TuiApp {
     pub quit: bool,
     pub scroll_from_end: usize,
     pub last_prompt: Option<String>,
+    in_flight_commands: usize,
     pending_commands: VecDeque<ClientCommand>,
     logs: VecDeque<String>,
 }
@@ -103,6 +104,7 @@ impl TuiApp {
             quit: false,
             scroll_from_end: 0,
             last_prompt: None,
+            in_flight_commands: 0,
             pending_commands: VecDeque::new(),
             logs: VecDeque::new(),
         }
@@ -114,6 +116,39 @@ impl TuiApp {
 
     pub fn pending_len(&self) -> usize {
         self.pending_commands.len()
+    }
+
+    pub const fn in_flight_len(&self) -> usize {
+        self.in_flight_commands
+    }
+
+    pub fn command_dispatched(&mut self) {
+        self.in_flight_commands = self.in_flight_commands.saturating_add(1);
+    }
+
+    pub fn command_finished(&mut self) {
+        self.in_flight_commands = self.in_flight_commands.saturating_sub(1);
+    }
+
+    pub fn report_command_failure(&mut self, error: impl Into<String>) {
+        self.log(format!("Command transport failed: {}", error.into()));
+    }
+
+    pub fn report_reconnecting(&mut self) {
+        self.connected = false;
+        self.reconnecting = true;
+    }
+
+    pub fn report_reconnected(&mut self) {
+        self.connected = true;
+        self.reconnecting = false;
+        self.log("Reconnected");
+    }
+
+    pub fn report_reconnect_failure(&mut self, error: impl Into<String>) {
+        self.connected = false;
+        self.reconnecting = false;
+        self.log(format!("Reconnect failed: {}", error.into()));
     }
 
     pub fn next_command(&mut self) -> Option<ClientCommand> {
@@ -335,6 +370,7 @@ impl TuiApp {
             KeyCode::Char('x') => {
                 if let Some(session_id) = self.attached_session.clone() {
                     self.enqueue(ClientCommand::Cancel(CancelTarget::Session(session_id)));
+                    self.log("Cancellation requested for the active turn");
                 }
                 AppAction::Redraw
             }
@@ -882,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_cancel_retry_branch_resume_and_navigation_remain_protocol_commands() {
+    fn queue_retry_branch_resume_and_navigation_remain_protocol_commands() {
         let mut app = TuiApp::new(Accessibility::default());
         let session_id = SessionId::new();
         app.attach(session_id.clone());

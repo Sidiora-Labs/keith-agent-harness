@@ -1,11 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, MutexGuard};
 
-use keith_agent_types::{CURRENT_SCHEMA_VERSION, EntityId, Revision, UtcTimestamp};
+use keith_agent_types::{
+    CURRENT_SCHEMA_VERSION, EntityId, Revision, UtcTimestamp, canonical_json_bytes,
+};
 use keith_state_store_core::{
-    AtomicStateRepository, RecordMutation, ResourceRepository, VersionedRecord, WritePrecondition,
+    AtomicStateRepository, ClassifiedRepositoryError, RecordMutation, ResourceRepository,
+    VersionedRecord, WritePrecondition,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     AcquireRequest, ExhaustionBehavior, ReclaimedResource, ResourceError, ResourceKind,
@@ -42,6 +46,7 @@ struct Pending {
 
 type AccountChange = ((ResourceScope, ResourceKind), Account);
 type AccountBatch = (Vec<AccountChange>, Vec<RecordMutation>);
+const MAX_CONFLICT_RETRIES: usize = 8;
 
 #[derive(Default)]
 struct State {
@@ -67,38 +72,7 @@ where
     ///
     /// Returns an error when durable records are corrupt or unavailable.
     pub fn open(repository: R, policy: ResourcePolicy) -> Result<Self, ResourceError> {
-        let mut state = State::default();
-        for record in repository
-            .list_resource_records()
-            .map_err(repository_error)?
-        {
-            match decode(record)? {
-                StoredResource::Account(account) => {
-                    if state
-                        .accounts
-                        .insert((account.scope.clone(), account.resource), account)
-                        .is_some()
-                    {
-                        return Err(ResourceError::Invalid(
-                            "duplicate durable resource account".into(),
-                        ));
-                    }
-                }
-                StoredResource::Pending(pending) => {
-                    let id = pending.request.id.clone();
-                    if state.pending.insert(id, pending).is_some() {
-                        return Err(ResourceError::Invalid(
-                            "duplicate durable pending request".into(),
-                        ));
-                    }
-                }
-                StoredResource::Lease(lease) => {
-                    if state.leases.insert(lease.id.clone(), lease).is_some() {
-                        return Err(ResourceError::Invalid("duplicate durable lease".into()));
-                    }
-                }
-            }
-        }
+        let state = load_state(&repository)?;
         Ok(Self {
             repository,
             policy,
@@ -114,6 +88,7 @@ where
     pub fn submit(&self, request: AcquireRequest) -> Result<(), ResourceError> {
         validate_acquire(&request)?;
         let mut state = self.lock()?;
+        self.refresh_durable_state(&mut state)?;
         if state.pending.contains_key(&request.id)
             || state
                 .leases
@@ -135,7 +110,7 @@ where
                 request.submitted_at,
                 WritePrecondition::Missing,
             )?])
-            .map_err(repository_error)?;
+            .map_err(|error| classified_repository_error(&error))?;
         state.pending.insert(request.id.clone(), pending);
         Ok(())
     }
@@ -156,6 +131,7 @@ where
             ));
         }
         let mut state = self.lock()?;
+        self.refresh_durable_state(&mut state)?;
         let mut outcomes = Vec::new();
         let mut attempted = BTreeSet::new();
         while outcomes.len() < max_decisions {
@@ -205,6 +181,65 @@ where
         Ok(outcomes)
     }
 
+    /// Grants or rejects one specific pending request without consuming work submitted by another
+    /// scheduler process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request is missing or accounting cannot be committed atomically.
+    pub fn schedule_request(
+        &self,
+        request_id: &EntityId,
+        now: UtcTimestamp,
+    ) -> Result<ScheduleOutcome, ResourceError> {
+        let mut state = self.lock()?;
+        for attempt in 0..=MAX_CONFLICT_RETRIES {
+            self.refresh_durable_state(&mut state)?;
+            let pending = state
+                .pending
+                .get(request_id)
+                .cloned()
+                .ok_or_else(|| ResourceError::Missing(request_id.clone()))?;
+            if let Some((scope, behavior)) = exhausted(
+                &state,
+                &self.policy,
+                &pending.request.path,
+                pending.request.resource,
+                pending.request.units,
+                true,
+            )? {
+                return match behavior {
+                    ExhaustionBehavior::Pause => Ok(ScheduleOutcome::Paused {
+                        request_id: request_id.clone(),
+                        scope,
+                        resource: pending.request.resource,
+                    }),
+                    ExhaustionBehavior::Fail => match self.delete_pending(&mut state, &pending) {
+                        Ok(()) => Ok(ScheduleOutcome::Failed {
+                            request_id: request_id.clone(),
+                            scope,
+                            resource: pending.request.resource,
+                        }),
+                        Err(ResourceError::RepositoryConflict(_))
+                            if attempt < MAX_CONFLICT_RETRIES =>
+                        {
+                            continue;
+                        }
+                        Err(error) => Err(error),
+                    },
+                };
+            }
+            match self.grant(&mut state, &pending, now) {
+                Ok(lease) => return Ok(ScheduleOutcome::Granted(lease)),
+                Err(ResourceError::RepositoryConflict(_)) if attempt < MAX_CONFLICT_RETRIES => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(ResourceError::Invalid(
+            "resource admission conflict retry bound was exhausted".into(),
+        ))
+    }
+
     /// Releases an active lease and makes capacity available to other trees.
     ///
     /// # Errors
@@ -212,12 +247,22 @@ where
     /// Returns an error for missing leases or persistence failure.
     pub fn release(&self, lease_id: &EntityId, now: UtcTimestamp) -> Result<(), ResourceError> {
         let mut state = self.lock()?;
-        let lease = state
-            .leases
-            .get(lease_id)
-            .cloned()
-            .ok_or_else(|| ResourceError::Missing(lease_id.clone()))?;
-        self.release_locked(&mut state, &lease, now)
+        for attempt in 0..=MAX_CONFLICT_RETRIES {
+            self.refresh_durable_state(&mut state)?;
+            let lease = state
+                .leases
+                .get(lease_id)
+                .cloned()
+                .ok_or_else(|| ResourceError::Missing(lease_id.clone()))?;
+            match self.release_locked(&mut state, &lease, now) {
+                Ok(()) => return Ok(()),
+                Err(ResourceError::RepositoryConflict(_)) if attempt < MAX_CONFLICT_RETRIES => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(ResourceError::Invalid(
+            "resource release conflict retry bound was exhausted".into(),
+        ))
     }
 
     /// Refreshes a reclaimable lease without changing its accounting.
@@ -231,34 +276,43 @@ where
         now: UtcTimestamp,
     ) -> Result<ResourceLease, ResourceError> {
         let mut state = self.lock()?;
-        let lease = state
-            .leases
-            .get(lease_id)
-            .cloned()
-            .ok_or_else(|| ResourceError::Missing(lease_id.clone()))?;
-        if now < lease.heartbeat_at {
-            return Err(ResourceError::Invalid(
-                "lease heartbeat cannot move backwards".into(),
-            ));
-        }
-        let mut updated = lease.clone();
-        updated.heartbeat_at = now;
-        updated.expires_at = checked_timestamp(now, updated.request.idle_timeout_ms)?;
-        updated.revision = updated
-            .revision
-            .checked_next()
-            .ok_or_else(|| ResourceError::Invalid("lease revision exhausted".into()))?;
-        self.repository
-            .transact(&[put_mutation(
+        for attempt in 0..=MAX_CONFLICT_RETRIES {
+            self.refresh_durable_state(&mut state)?;
+            let lease = state
+                .leases
+                .get(lease_id)
+                .cloned()
+                .ok_or_else(|| ResourceError::Missing(lease_id.clone()))?;
+            if now < lease.heartbeat_at {
+                return Err(ResourceError::Invalid(
+                    "lease heartbeat cannot move backwards".into(),
+                ));
+            }
+            let mut updated = lease.clone();
+            updated.heartbeat_at = now;
+            updated.expires_at = checked_timestamp(now, updated.request.idle_timeout_ms)?;
+            updated.revision = updated
+                .revision
+                .checked_next()
+                .ok_or_else(|| ResourceError::Invalid("lease revision exhausted".into()))?;
+            match self.repository.transact(&[put_mutation(
                 updated.id.clone(),
                 StoredResource::Lease(updated.clone()),
                 updated.revision,
                 now,
                 WritePrecondition::Exact(lease.revision),
-            )?])
-            .map_err(repository_error)?;
-        state.leases.insert(updated.id.clone(), updated.clone());
-        Ok(updated)
+            )?]) {
+                Ok(_) => {
+                    state.leases.insert(updated.id.clone(), updated.clone());
+                    return Ok(updated);
+                }
+                Err(error) if error.is_conflict() && attempt < MAX_CONFLICT_RETRIES => {}
+                Err(error) => return Err(repository_error(error)),
+            }
+        }
+        Err(ResourceError::Invalid(
+            "resource heartbeat conflict retry bound was exhausted".into(),
+        ))
     }
 
     /// Reclaims each expired class independently while returning its durable recovery pointer.
@@ -306,32 +360,41 @@ where
             ));
         }
         let mut state = self.lock()?;
-        if let Some((scope, behavior)) = exhausted(
-            &state,
-            &self.policy,
-            &delta.path,
-            delta.resource,
-            delta.units,
-            false,
-        )? {
-            return Ok(match behavior {
-                ExhaustionBehavior::Pause => UsageOutcome::Paused {
-                    scope,
-                    resource: delta.resource,
-                },
-                ExhaustionBehavior::Fail => UsageOutcome::Failed {
-                    scope,
-                    resource: delta.resource,
-                },
-            });
+        for attempt in 0..=MAX_CONFLICT_RETRIES {
+            self.refresh_durable_state(&mut state)?;
+            if let Some((scope, behavior)) = exhausted(
+                &state,
+                &self.policy,
+                &delta.path,
+                delta.resource,
+                delta.units,
+                false,
+            )? {
+                return Ok(match behavior {
+                    ExhaustionBehavior::Pause => UsageOutcome::Paused {
+                        scope,
+                        resource: delta.resource,
+                    },
+                    ExhaustionBehavior::Fail => UsageOutcome::Failed {
+                        scope,
+                        resource: delta.resource,
+                    },
+                });
+            }
+            let (updates, mutations) =
+                account_updates(&state, &delta.path, delta.resource, delta.units, false, now)?;
+            match self.repository.transact(&mutations) {
+                Ok(_) => {
+                    apply_accounts(&mut state, updates);
+                    return Ok(UsageOutcome::Recorded);
+                }
+                Err(error) if error.is_conflict() && attempt < MAX_CONFLICT_RETRIES => {}
+                Err(error) => return Err(repository_error(error)),
+            }
         }
-        let (updates, mutations) =
-            account_updates(&state, &delta.path, delta.resource, delta.units, false, now)?;
-        self.repository
-            .transact(&mutations)
-            .map_err(repository_error)?;
-        apply_accounts(&mut state, updates);
-        Ok(UsageOutcome::Recorded)
+        Err(ResourceError::Invalid(
+            "resource accounting conflict retry bound was exhausted".into(),
+        ))
     }
 
     /// Returns redacted, authoritative accounting projections.
@@ -419,7 +482,7 @@ where
         });
         self.repository
             .transact(&mutations)
-            .map_err(repository_error)?;
+            .map_err(|error| classified_repository_error(&error))?;
         apply_accounts(state, updates);
         state.pending.remove(&pending.request.id);
         state.leases.insert(lease.id.clone(), lease.clone());
@@ -433,7 +496,7 @@ where
                 id: pending.request.id.clone(),
                 precondition: WritePrecondition::Exact(pending.revision),
             }])
-            .map_err(repository_error)?;
+            .map_err(|error| classified_repository_error(&error))?;
         state.pending.remove(&pending.request.id);
         Ok(())
     }
@@ -477,7 +540,7 @@ where
         });
         self.repository
             .transact(&mutations)
-            .map_err(repository_error)?;
+            .map_err(|error| classified_repository_error(&error))?;
         apply_accounts(state, account_changes);
         state.leases.remove(&lease.id);
         Ok(())
@@ -486,6 +549,53 @@ where
     fn lock(&self) -> Result<MutexGuard<'_, State>, ResourceError> {
         self.state.lock().map_err(|_| ResourceError::LockPoisoned)
     }
+
+    fn refresh_durable_state(&self, state: &mut State) -> Result<(), ResourceError> {
+        let last_tree = std::mem::take(&mut state.last_tree);
+        let mut refreshed = load_state(&self.repository)?;
+        refreshed.last_tree = last_tree;
+        *state = refreshed;
+        Ok(())
+    }
+}
+
+fn load_state<R>(repository: &R) -> Result<State, ResourceError>
+where
+    R: ResourceRepository,
+{
+    let mut state = State::default();
+    for record in repository
+        .list_resource_records()
+        .map_err(repository_error)?
+    {
+        match decode(record)? {
+            StoredResource::Account(account) => {
+                if state
+                    .accounts
+                    .insert((account.scope.clone(), account.resource), account)
+                    .is_some()
+                {
+                    return Err(ResourceError::Invalid(
+                        "duplicate durable resource account".into(),
+                    ));
+                }
+            }
+            StoredResource::Pending(pending) => {
+                let id = pending.request.id.clone();
+                if state.pending.insert(id, pending).is_some() {
+                    return Err(ResourceError::Invalid(
+                        "duplicate durable pending request".into(),
+                    ));
+                }
+            }
+            StoredResource::Lease(lease) => {
+                if state.leases.insert(lease.id.clone(), lease).is_some() {
+                    return Err(ResourceError::Invalid("duplicate durable lease".into()));
+                }
+            }
+        }
+    }
+    Ok(state)
 }
 
 fn validate_acquire(request: &AcquireRequest) -> Result<(), ResourceError> {
@@ -584,7 +694,7 @@ fn account_updates(
         let key = (scope.clone(), resource);
         let existing = state.accounts.get(&key);
         let mut account = existing.cloned().unwrap_or(Account {
-            id: EntityId::new(),
+            id: account_id(scope, resource)?,
             scope: scope.clone(),
             resource,
             consumed: 0,
@@ -623,6 +733,16 @@ fn account_updates(
         updates.push((key, account));
     }
     Ok((updates, mutations))
+}
+
+fn account_id(scope: &ResourceScope, resource: ResourceKind) -> Result<EntityId, ResourceError> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"keith-resource-account-v1\0");
+    hasher.update(canonical_json_bytes(&(scope, resource))?);
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Ok(EntityId::from_u128(u128::from_be_bytes(bytes)))
 }
 
 fn apply_accounts(state: &mut State, updates: Vec<((ResourceScope, ResourceKind), Account)>) {
@@ -725,9 +845,18 @@ fn repository_error(error: impl std::error::Error) -> ResourceError {
     ResourceError::Repository(error.to_string())
 }
 
+fn classified_repository_error(error: &impl ClassifiedRepositoryError) -> ResourceError {
+    if error.is_conflict() {
+        ResourceError::RepositoryConflict(error.to_string())
+    } else {
+        ResourceError::Repository(error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::{Arc, Barrier};
 
     use keith_agent_types::{ActionId, GoalId, ProfileId, RootTreeId, SessionId};
     use keith_state_store::EmbeddedStore;
@@ -1224,6 +1353,154 @@ mod tests {
                     && projection.consumed == 1
             }));
         }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn independent_governors_reconcile_shared_usage_and_admission_accounts() {
+        let directory = TempDir::new().unwrap();
+        let database = directory.path().join("state.sqlite");
+        let profile = ProfileId::new();
+        let first_path = path(&profile, &RootTreeId::new(), &SessionId::new());
+        let second_path = path(&profile, &RootTreeId::new(), &SessionId::new());
+        let first_admission_path = first_path.clone();
+        let second_admission_path = second_path.clone();
+        let first = Arc::new(
+            ResourceGovernor::open(EmbeddedStore::open(&database, None).unwrap(), policy([]))
+                .unwrap(),
+        );
+        let second = Arc::new(
+            ResourceGovernor::open(EmbeddedStore::open(&database, None).unwrap(), policy([]))
+                .unwrap(),
+        );
+        let barrier = Arc::new(Barrier::new(2));
+        let first_barrier = Arc::clone(&barrier);
+        let second_barrier = Arc::clone(&barrier);
+        let first_governor = Arc::clone(&first);
+        let second_governor = Arc::clone(&second);
+        std::thread::scope(|scope| {
+            let first_result = scope.spawn(move || {
+                first_barrier.wait();
+                for offset in 0..16 {
+                    assert_eq!(
+                        first_governor
+                            .record_usage(
+                                &UsageDelta {
+                                    path: first_path.clone(),
+                                    resource: ResourceKind::Tokens,
+                                    units: 1,
+                                },
+                                UtcTimestamp::from_unix_millis(offset),
+                            )
+                            .unwrap(),
+                        UsageOutcome::Recorded
+                    );
+                }
+            });
+            let second_result = scope.spawn(move || {
+                second_barrier.wait();
+                for offset in 16..32 {
+                    assert_eq!(
+                        second_governor
+                            .record_usage(
+                                &UsageDelta {
+                                    path: second_path.clone(),
+                                    resource: ResourceKind::Tokens,
+                                    units: 1,
+                                },
+                                UtcTimestamp::from_unix_millis(offset),
+                            )
+                            .unwrap(),
+                        UsageOutcome::Recorded
+                    );
+                }
+            });
+            first_result.join().unwrap();
+            second_result.join().unwrap();
+        });
+        let recovered =
+            ResourceGovernor::open(EmbeddedStore::open(&database, None).unwrap(), policy([]))
+                .unwrap();
+        let projections = recovered.projections().unwrap();
+        let profile_label = ResourceScope::Profile(profile).safe_label();
+        assert!(projections.iter().any(|projection| {
+            projection.scope == ResourceScope::Installation.safe_label()
+                && projection.resource == ResourceKind::Tokens
+                && projection.consumed == 32
+        }));
+        assert!(projections.iter().any(|projection| {
+            projection.scope == profile_label
+                && projection.resource == ResourceKind::Tokens
+                && projection.consumed == 32
+        }));
+
+        let first_request = request(
+            first_admission_path,
+            ResourceKind::ActiveSessions,
+            WorkPriority::Interactive,
+            32,
+        );
+        let second_request = request(
+            second_admission_path,
+            ResourceKind::ActiveSessions,
+            WorkPriority::Interactive,
+            33,
+        );
+        first.submit(first_request.clone()).unwrap();
+        second.submit(second_request.clone()).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let first_governor = Arc::clone(&first);
+        let second_governor = Arc::clone(&second);
+        let first_barrier = Arc::clone(&barrier);
+        let second_barrier = Arc::clone(&barrier);
+        let (first_lease, second_lease) = std::thread::scope(|scope| {
+            let first_result = scope.spawn(move || {
+                first_barrier.wait();
+                first_governor
+                    .schedule_request(&first_request.id, UtcTimestamp::from_unix_millis(34))
+                    .unwrap()
+            });
+            let second_result = scope.spawn(move || {
+                second_barrier.wait();
+                second_governor
+                    .schedule_request(&second_request.id, UtcTimestamp::from_unix_millis(34))
+                    .unwrap()
+            });
+            let ScheduleOutcome::Granted(first_lease) = first_result.join().unwrap() else {
+                panic!("first admission was not granted");
+            };
+            let ScheduleOutcome::Granted(second_lease) = second_result.join().unwrap() else {
+                panic!("second admission was not granted");
+            };
+            (first_lease, second_lease)
+        });
+        let barrier = Arc::new(Barrier::new(2));
+        std::thread::scope(|scope| {
+            let first_barrier = Arc::clone(&barrier);
+            let second_barrier = Arc::clone(&barrier);
+            let first_result = scope.spawn(move || {
+                first_barrier.wait();
+                first
+                    .release(&first_lease.id, UtcTimestamp::from_unix_millis(35))
+                    .unwrap();
+            });
+            let second_result = scope.spawn(move || {
+                second_barrier.wait();
+                second
+                    .release(&second_lease.id, UtcTimestamp::from_unix_millis(35))
+                    .unwrap();
+            });
+            first_result.join().unwrap();
+            second_result.join().unwrap();
+        });
+        let recovered =
+            ResourceGovernor::open(EmbeddedStore::open(&database, None).unwrap(), policy([]))
+                .unwrap();
+        assert!(recovered.projections().unwrap().iter().any(|projection| {
+            projection.scope == ResourceScope::Installation.safe_label()
+                && projection.resource == ResourceKind::ActiveSessions
+                && projection.active == 0
+        }));
     }
 
     #[test]
