@@ -138,6 +138,12 @@ pub enum MemoryBridgeOperation {
         evidence_ids: Vec<EntityId>,
         token_budget: u64,
     },
+    Recall {
+        query: String,
+        max_depth: u16,
+        max_scouts: u32,
+        token_budget: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

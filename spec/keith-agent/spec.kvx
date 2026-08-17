@@ -1006,7 +1006,7 @@ touches = ["crates/memory/Cargo.toml", "crates/memory/src/*.rs"]
 
 [task.7.8]
 title  = "Lazy revision-bound MemoryWorld kernel capability"
-status = "in_progress"
+status = "done"
 wave   = 15
 do_1   = "Add a typed memory bridge capability and Python MemoryWorld surface for catalog, search, timeline, expand, compare, evidence, and capsule planning"
 do_2   = "Bind every view to profile, session, archive revision, sensitivity policy, result byte limits, and cancellation while keeping the archive host-owned"
@@ -1019,7 +1019,7 @@ touches = ["crates/kernel-protocol/src/lib.rs", "crates/kernel-broker/src/lib.rs
 
 [task.7.9]
 title  = "Bounded read-only recursive memory scouts and recall capsules"
-status = "pending"
+status = "in_progress"
 wave   = 16
 do_1   = "Define memory-scout purpose, immutable scope manifest, structured findings, recall lifecycle, capsule schema, and validation contract"
 do_2   = "Run scouts through bounded dedicated recursion with memory-only read authority, deterministic partitioning, cancellation, deduplication, and crash-safe replay"

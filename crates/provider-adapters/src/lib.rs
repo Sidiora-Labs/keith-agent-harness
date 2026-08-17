@@ -2114,6 +2114,7 @@ mod tests {
         let context = keith_provider_core::RequestContext::synthetic(&system, &messages);
         ModelRequest {
             request_id: EntityId::new(),
+            purpose: keith_provider_core::ModelRequestPurpose::Primary,
             model: "model-a".into(),
             system,
             messages,

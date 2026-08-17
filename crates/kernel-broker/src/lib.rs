@@ -171,6 +171,7 @@ class MemoryWorld:
             "compare": "memory.compare(left_node, right_node)",
             "evidence": "memory.evidence(evidence_ids)",
             "plan_capsule": "memory.plan_capsule(query, evidence_ids=None, token_budget=4000)",
+            "recall": "memory.recall(query, max_depth=3, max_scouts=16, token_budget=8000)",
             "refresh": "memory.refresh() after a memory_revision_changed error",
         }
     def _call(self, operation, sensitivity="personal", max_bytes=24576):
@@ -208,6 +209,8 @@ class MemoryWorld:
         return self._call({"operation": "evidence", "evidence_ids": list(evidence_ids)}, sensitivity, max_bytes)
     def plan_capsule(self, query, evidence_ids=None, token_budget=4000, sensitivity="personal", max_bytes=24576):
         return self._call({"operation": "plan_capsule", "query": query, "evidence_ids": list(evidence_ids or []), "token_budget": token_budget}, sensitivity, max_bytes)
+    def recall(self, query, max_depth=3, max_scouts=16, token_budget=8000, sensitivity="personal", max_bytes=49152):
+        return self._call({"operation": "recall", "query": query, "max_depth": max_depth, "max_scouts": max_scouts, "token_budget": token_budget}, sensitivity, max_bytes)
 
 rlm = RlmBridge()
 memory = MemoryWorld()

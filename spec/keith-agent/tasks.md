@@ -259,14 +259,14 @@
     - Expose bounded catalog, search, timeline, expand, compare, and exact-evidence operations with stable citations and coverage metadata
     - Run source-authority, rebuild equivalence, correction dominance, deletion cleanup, prompt-injection, corruption, and cross-profile isolation tests
     - _Requirements: 25.1-25.6, 26.1-26.6, 44.1-44.5, 52.1-52.3, 53.1-53.2, 53.9-53.10_
-  - [-] 7.8 Lazy revision-bound MemoryWorld kernel capability
+  - [x] 7.8 Lazy revision-bound MemoryWorld kernel capability
     - Add a typed memory bridge capability and Python MemoryWorld surface for catalog, search, timeline, expand, compare, evidence, and capsule planning
     - Bind every view to profile, session, archive revision, sensitivity policy, result byte limits, and cancellation while keeping the archive host-owned
     - Keep MemoryWorld handles and archive contents out of kernel snapshots and reconnect compatible handles after restore only when their revision and scope remain valid
     - Return structured bounded results with exact evidence IDs and never expose memory operations as provider user messages
     - Run kernel restart, incompatible revision, deletion, sensitivity, output bound, cancellation, profile denial, and snapshot-remnant tests
     - _Requirements: 17.1-17.6, 44.1-44.5, 52.1-52.3, 53.3, 53.8-53.10_
-  - [ ] 7.9 Bounded read-only recursive memory scouts and recall capsules
+  - [-] 7.9 Bounded read-only recursive memory scouts and recall capsules
     - Define memory-scout purpose, immutable scope manifest, structured findings, recall lifecycle, capsule schema, and validation contract
     - Run scouts through bounded dedicated recursion with memory-only read authority, deterministic partitioning, cancellation, deduplication, and crash-safe replay
     - Validate source IDs, digests, revision, scope, claims, contradictions, coverage, and budgets before producing exactly one paired recall result

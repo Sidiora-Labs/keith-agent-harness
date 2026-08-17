@@ -902,6 +902,15 @@ pub enum MemoryKind {
     DailySummary,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryRecallLink {
+    pub query_identity: String,
+    pub archive_revision: u64,
+    pub source_entries: Vec<EntryId>,
+    pub result_id: EntityId,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sensitivity {

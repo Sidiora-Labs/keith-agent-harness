@@ -305,6 +305,18 @@ pub enum ToolBehavior {
     StateChanging,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRequestPurpose {
+    #[default]
+    Primary,
+    Classification,
+    Summarization,
+    Review,
+    Vision,
+    MemoryScout,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolDefinition {
@@ -318,6 +330,8 @@ pub struct ToolDefinition {
 #[serde(deny_unknown_fields)]
 pub struct ModelRequest {
     pub request_id: EntityId,
+    #[serde(default)]
+    pub purpose: ModelRequestPurpose,
     pub model: String,
     pub system: Vec<ContentBlock>,
     pub messages: Vec<Message>,
@@ -734,6 +748,7 @@ mod tests {
         let context = RequestContext::synthetic(&system, &messages);
         ModelRequest {
             request_id: EntityId::new(),
+            purpose: ModelRequestPurpose::Primary,
             model: "model-a".into(),
             system,
             messages,

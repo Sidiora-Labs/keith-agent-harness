@@ -521,6 +521,7 @@ mod tests {
         let context = keith_provider_core::RequestContext::synthetic(&system, &messages);
         ModelRequest {
             request_id: keith_agent_types::EntityId::new(),
+            purpose: keith_provider_core::ModelRequestPurpose::Primary,
             model: "route-overwrites-this".into(),
             system,
             messages,

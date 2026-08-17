@@ -1,12 +1,17 @@
 #![forbid(unsafe_code)]
 
 mod observatory;
+mod recall;
 
 pub use observatory::{
     AtlasCatalog, AtlasComparison, AtlasCoverage, AtlasEdge, AtlasNode, AtlasNodeKind,
     AtlasRelation, AtlasSearchRequest, AtlasSearchResult, AtlasTimelineRequest, EvidenceAuthority,
     EvidenceFacet, EvidenceFacetKind, EvidenceRecord, EvidenceSourceKind, EvidenceValidity,
     MemoryObservatory, ObservatoryError, ObservatoryHealth, ObservatoryLimits, ObservatoryMutation,
+};
+pub use recall::{
+    MemoryScoutFinding, RECALL_SELECTOR_VERSION, RecallCapsule, RecallClaim, RecallContradiction,
+    RecallCoverage, RecallError, RecallRequest, RecallService,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -119,6 +124,8 @@ pub enum MemoryError {
     Workspace(#[from] keith_workspace::PersonalWorkspaceError),
     #[error("memory observatory failed: {0}")]
     Observatory(#[from] ObservatoryError),
+    #[error("memory recall failed: {0}")]
+    Recall(String),
     #[error("memory clock failed: {0}")]
     Clock(String),
     #[error("memory ledger belongs to another profile or unsupported schema")]
@@ -144,6 +151,7 @@ pub struct MemoryService {
     policy: MemoryPolicy,
     ledger: Mutex<MemoryLedger>,
     observatory: MemoryObservatory,
+    recall: RecallService,
 }
 
 impl MemoryService {
@@ -178,11 +186,14 @@ impl MemoryService {
             now,
         )?;
         observatory.sync_memory_records(ledger.records.values(), now)?;
+        let recall = RecallService::open(&workspace.layout().root, profile_id)
+            .map_err(|error| MemoryError::Recall(error.to_string()))?;
         Ok(Self {
             workspace,
             policy,
             ledger: Mutex::new(ledger),
             observatory,
+            recall,
         })
     }
 
@@ -341,6 +352,11 @@ impl MemoryService {
     /// Returns the strongest sensitivity the service may expose automatically.
     pub const fn max_automatic_sensitivity(&self) -> Sensitivity {
         self.policy.max_automatic_sensitivity
+    }
+
+    /// Returns the bounded deliberate-recall service for this profile.
+    pub const fn recall(&self) -> &RecallService {
+        &self.recall
     }
 
     /// Projects committed session evidence without making the atlas authoritative.

@@ -105,8 +105,8 @@ use keith_provider_catalog::{
 use keith_provider_core::{
     CancellationToken, ContentBlock as ProviderContentBlock, ContextProvenance, ContextRecord,
     Message as ProviderMessage, MessageRole as ProviderMessageRole, ModelEvent, ModelRequest,
-    ModelVisibility, PersistPolicy, ProviderError, ProviderErrorKind, RequestContext, StopReason,
-    StreamControl, Usage, approximate_token_count,
+    ModelRequestPurpose, ModelVisibility, PersistPolicy, ProviderError, ProviderErrorKind,
+    RequestContext, StopReason, StreamControl, Usage, approximate_token_count,
 };
 use keith_resource_governor::{
     AcquireRequest, ExhaustionBehavior, ResourceCeiling, ResourceGovernor, ResourceKind,
@@ -139,7 +139,7 @@ use keith_state_store_core::{
 };
 use keith_subagents::{
     ChildCancellation, ChildCoordinator, ChildLimits, ChildMessageKind, ChildMessageSender,
-    ChildRetention, ChildSpec, ChildStatus, ChildWorkspaceMode, ParentAuthority,
+    ChildRetention, ChildSpec, ChildStatus, ChildWorkspaceMode, MemoryScoutLimits, ParentAuthority,
 };
 use keith_telemetry::{
     FailureClass as TelemetryFailureClass, MetricContext, MetricName, MetricSample, TelemetryHub,
@@ -803,10 +803,12 @@ impl RuntimeBridge {
             requested
         };
         let body = memory_operation(
-            observatory,
+            &memory,
+            &context.session_id,
             &request.operation,
             revision,
             sensitivity,
+            request.max_result_bytes as usize,
             cancellation,
         )?;
         check_bridge_cancellation(cancellation)?;
@@ -878,14 +880,18 @@ const fn sensitivity_name(sensitivity: Sensitivity) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn memory_operation(
-    observatory: &keith_memory::MemoryObservatory,
+    memory: &MemoryService,
+    calling_session_id: &SessionId,
     operation: &MemoryBridgeOperation,
     revision: u64,
     sensitivity: Sensitivity,
+    max_result_bytes: usize,
     cancellation: &CancellationToken,
 ) -> Result<serde_json::Value, BridgeFailure> {
     check_bridge_cancellation(cancellation)?;
+    let observatory = memory.observatory();
     match operation {
         MemoryBridgeOperation::Catalog => {
             let catalog = observatory
@@ -970,6 +976,50 @@ fn memory_operation(
             revision,
             sensitivity,
         ),
+        MemoryBridgeOperation::Recall {
+            query,
+            max_depth,
+            max_scouts,
+            token_budget,
+        } => {
+            if !(1..=4).contains(max_depth)
+                || !(1..=32).contains(max_scouts)
+                || !(128..=16_000).contains(token_budget)
+            {
+                return Err(BridgeFailure {
+                    code: "memory_recall_limit".into(),
+                    message: "recall depth, scout count, or token budget exceeds host limits"
+                        .into(),
+                });
+            }
+            let limits = MemoryScoutLimits {
+                max_depth: *max_depth,
+                max_children: u16::try_from((*max_scouts).min(4)).unwrap_or(4),
+                max_total_scouts: *max_scouts,
+                max_concurrency: u16::try_from((*max_scouts).min(4)).unwrap_or(4),
+                max_tokens: *token_budget,
+                max_result_bytes,
+                ..MemoryScoutLimits::default()
+            };
+            let now = UtcTimestamp::now().map_err(|error| bridge_failure("clock", error))?;
+            let request = memory
+                .recall()
+                .prepare(
+                    observatory,
+                    calling_session_id,
+                    query,
+                    sensitivity,
+                    limits,
+                    cancellation,
+                    now,
+                )
+                .map_err(|error| bridge_failure("memory_recall", error))?;
+            let capsule = memory
+                .recall()
+                .execute(observatory, &request, cancellation, now)
+                .map_err(|error| bridge_failure("memory_recall", error))?;
+            Ok(serde_json::json!({"kind": "recall_capsule", "capsule": capsule}))
+        }
     }
 }
 
@@ -5774,6 +5824,7 @@ impl LocalRuntime {
         };
         Ok(ModelRequest {
             request_id: EntityId::new(),
+            purpose: ModelRequestPurpose::Primary,
             model: profile.profile.model_route.model.clone(),
             system,
             messages: history.messages,
@@ -9521,6 +9572,31 @@ mod tests {
                 UtcTimestamp::from_unix_millis(now.unix_millis() + 1),
             )
             .unwrap();
+        let recall_operation = BridgeOperation::Memory {
+            request: MemoryBridgeRequest {
+                expected_revision: Some(next_revision),
+                max_result_bytes: 48 * 1_024,
+                max_sensitivity: MemorySensitivity::Personal,
+                operation: MemoryBridgeOperation::Recall {
+                    query: "routing".into(),
+                    max_depth: 3,
+                    max_scouts: 8,
+                    token_budget: 4_000,
+                },
+            },
+        };
+        let recall = runtime
+            .system_modules
+            .kernel_bridge
+            .handle(&context, &recall_operation, &CancellationToken::default())
+            .unwrap();
+        assert_eq!(recall["result"]["kind"], "recall_capsule");
+        assert!(
+            !recall["result"]["capsule"]["claims"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         let stale = runtime
             .system_modules
             .kernel_bridge
