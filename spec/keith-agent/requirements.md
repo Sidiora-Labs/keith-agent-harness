@@ -691,3 +691,20 @@ Keith Agent combines the Delta-1 supervised recursive runtime with the Gamma-3 a
 9. CORRECTION, deletion, sensitivity change, profile isolation, source revision, and index rebuild SHALL invalidate affected atlas routes, caches, kernel handles, activation manifests, and future capsules while preserving only explicitly retained source authority.
 10. A longitudinal and fault suite SHALL prove exact recall, correction dominance, deletion cleanup, prompt-injection resistance, cross-profile denial, stale-capsule rejection, recursive bounds, crash-safe read replay, degraded retrieval, no context duplication, and unchanged turn finalization.
 
+## Requirement 54: Stable machine-native personality and evidence-grounded relationship continuity
+
+**User Story:** As a recurring user, I want Keith to have a recognizable identity and remember our relationship naturally, so that technical capability feels socially intelligent without becoming imitation, surveillance, or a second turn owner.
+
+### Acceptance Criteria
+
+1. THE built-in Keith persona SHALL be friendly, curious, observant, witty, socially perceptive, candid, opinionated without stubbornness, and explicit about its machine perspective without claiming human embodiment, fabricated feelings, or unverifiable consciousness.
+2. PERSONALITY SHALL remain a stable user-editable profile contract separate from relationship evidence; exact untouched legacy one-line defaults SHALL upgrade atomically while any human-customized AGENT, USER, or RULE file remains byte-exact.
+3. RELATIONSHIP continuity SHALL use a small profile-scoped constellation of exact confirmed anchors, relevant evidence, successes, ambitions, communication preferences, and corrections; inferred relational centers SHALL remain temporary unless explicitly confirmed.
+4. FIRST meeting SHALL use a durable idempotent Unintroduced, AwaitingName, and Established state machine; the first genuine user turn SHALL receive a playful waking introduction and name question exactly once across retry, compaction, crash, restart, sessions, and clients.
+5. A preferred name SHALL be accepted only from an explicit name statement or a bounded direct answer while AwaitingName, retain exact source session, entry, and digest, support correction and forgetting through supersession or deletion, and never be inferred from account metadata, files, tools, or weak conversational guesses.
+6. ESTABLISHED names SHALL be available on every later genuine user turn and used naturally for greetings, meaningful decisions, encouragement, disagreement, or reconnection without forced repetition, CRM-like phrasing, or announcements that memory was used.
+7. RELATIONSHIP state and selected memory SHALL compile only into bounded non-user RelationshipContext and RetrievedMemory sections; the active user message SHALL remain verbatim and derived relationship context SHALL never enter conversation history or compaction.
+8. PERSONALITY, onboarding, relationship projection, and activation failures SHALL fail open and SHALL NOT own provider retry, tool execution, compaction, final creation, terminal status, outbox identity, delivery, or recovery.
+9. CORRECTION, deletion, profile isolation, archive revision, user edits, and relationship-log recovery SHALL invalidate affected future context without rewriting completed turns or unrelated profiles.
+10. A longitudinal and fault suite SHALL prove non-generic first contact, exact-once onboarding, direct name capture, natural established-name guidance, correction, forgetting, custom-persona preservation, legacy-default upgrade, no weak inference, retry/compaction stability, restart recovery, cross-profile isolation, and unchanged final authority.
+

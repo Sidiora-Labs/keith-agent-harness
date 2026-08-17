@@ -15,7 +15,7 @@
 feature      = "keith-agent"
 title        = "Keith Agent — Rust-native supervised recursion, readable personal memory, multi-channel presence, and durable autonomy"
 status       = "planning"
-spec_version = "1.1.0"
+spec_version = "1.2.0"
 intro        = "Keith Agent combines the Delta-1 supervised recursive runtime with the Gamma-3 assistant and distribution layer in one Rust-native architecture. One daemon supervises one worker per root session tree; every root and durable child uses AgentSession; prompts, schedules, channel messages, child results, steering, and autonomous continuation share one action inbox. Human-readable profiles, memory, knowledge, and skills remain user-owned, while event-driven awareness, attention, commitments, waiting, planning, review, channels, and reversible refinement create continuity without simulated consciousness. Rust owns every platform boundary; Python, shells, browsers, compilers, and other runtimes are optional restricted guest workloads. No task is complete from source presence, a rendered interface, an endpoint response, or a model claim: current packaged binaries and real process paths must satisfy the referenced acceptance criteria."
 
 [design]
@@ -572,6 +572,20 @@ ac_8  = "RECALL, atlas, scout, kernel-view, reflection, cache, and projection fa
 ac_9  = "CORRECTION, deletion, sensitivity change, profile isolation, source revision, and index rebuild SHALL invalidate affected atlas routes, caches, kernel handles, activation manifests, and future capsules while preserving only explicitly retained source authority."
 ac_10 = "A longitudinal and fault suite SHALL prove exact recall, correction dominance, deletion cleanup, prompt-injection resistance, cross-profile denial, stale-capsule rejection, recursive bounds, crash-safe read replay, degraded retrieval, no context duplication, and unchanged turn finalization."
 
+[req.54]
+title = "Stable machine-native personality and evidence-grounded relationship continuity"
+story = "As a recurring user, I want Keith to have a recognizable identity and remember our relationship naturally, so that technical capability feels socially intelligent without becoming imitation, surveillance, or a second turn owner."
+ac_1  = "THE built-in Keith persona SHALL be friendly, curious, observant, witty, socially perceptive, candid, opinionated without stubbornness, and explicit about its machine perspective without claiming human embodiment, fabricated feelings, or unverifiable consciousness."
+ac_2  = "PERSONALITY SHALL remain a stable user-editable profile contract separate from relationship evidence; exact untouched legacy one-line defaults SHALL upgrade atomically while any human-customized AGENT, USER, or RULE file remains byte-exact."
+ac_3  = "RELATIONSHIP continuity SHALL use a small profile-scoped constellation of exact confirmed anchors, relevant evidence, successes, ambitions, communication preferences, and corrections; inferred relational centers SHALL remain temporary unless explicitly confirmed."
+ac_4  = "FIRST meeting SHALL use a durable idempotent Unintroduced, AwaitingName, and Established state machine; the first genuine user turn SHALL receive a playful waking introduction and name question exactly once across retry, compaction, crash, restart, sessions, and clients."
+ac_5  = "A preferred name SHALL be accepted only from an explicit name statement or a bounded direct answer while AwaitingName, retain exact source session, entry, and digest, support correction and forgetting through supersession or deletion, and never be inferred from account metadata, files, tools, or weak conversational guesses."
+ac_6  = "ESTABLISHED names SHALL be available on every later genuine user turn and used naturally for greetings, meaningful decisions, encouragement, disagreement, or reconnection without forced repetition, CRM-like phrasing, or announcements that memory was used."
+ac_7  = "RELATIONSHIP state and selected memory SHALL compile only into bounded non-user RelationshipContext and RetrievedMemory sections; the active user message SHALL remain verbatim and derived relationship context SHALL never enter conversation history or compaction."
+ac_8  = "PERSONALITY, onboarding, relationship projection, and activation failures SHALL fail open and SHALL NOT own provider retry, tool execution, compaction, final creation, terminal status, outbox identity, delivery, or recovery."
+ac_9  = "CORRECTION, deletion, profile isolation, archive revision, user edits, and relationship-log recovery SHALL invalidate affected future context without rewriting completed turns or unrelated profiles."
+ac_10 = "A longitudinal and fault suite SHALL prove non-generic first contact, exact-once onboarding, direct name capture, natural established-name guidance, correction, forgetting, custom-persona preservation, legacy-default upgrade, no weak inference, retry/compaction stability, restart recovery, cross-profile isolation, and unchanged final authority."
+
 # ================================ TASKS ==================================
 
 [tasks]
@@ -1032,7 +1046,7 @@ touches = ["crates/subagents/src/*.rs", "crates/memory/src/*.rs", "crates/local-
 
 [task.7.10]
 title  = "Bounded reflex activation and removal of whole-memory prompt injection"
-status = "in_progress"
+status = "done"
 wave   = 17
 do_1   = "Add explicit RetrievedMemory provenance and frozen activation manifests carrying selector version, archive revision, evidence IDs, digests, coverage, and token price"
 do_2   = "Select confirmed anchors, active work, relevant evidence, and corrections within deterministic per-kind and total budgets before provider sampling"
@@ -1042,6 +1056,32 @@ do_5   = "Run longitudinal relevance, false-familiarity, correction, deletion, n
 reqs   = ["7.1-7.7", "9.1-9.6", "10.1-10.7", "25.1-25.6", "26.1-26.6", "44.1-44.5", "52.1-52.8", "53.6-53.10"]
 requires = ["7.9"]
 touches = ["crates/provider-core/src/lib.rs", "crates/local-runtime/src/lib.rs", "crates/memory/src/*.rs", "crates/session-store/src/lib.rs"]
+
+[task.7.11]
+title  = "Stable machine-native Keith persona and safe legacy-default upgrade"
+status = "in_progress"
+wave   = 18
+do_1   = "Replace the generic built-in AGENT, USER, and RULE defaults with Keith's stable machine-aware, friendly, curious, witty, socially perceptive behavioral contract"
+do_2   = "Teach the persona to use bounded memory evidence as a temporary relational constellation without mirroring the user, inventing psychology, announcing recall, or forcing familiarity"
+do_3   = "Atomically upgrade only exact untouched legacy one-line defaults during profile open while preserving every customized file byte-for-byte"
+do_4   = "Keep the persona user-editable, live-reloadable, profile-scoped, and independent from turn authority and memory-derived relationship state"
+do_5   = "Test new profile creation, exact legacy migration, customized-file preservation, restart idempotence, and actual model-request personality content"
+reqs   = ["23.1-23.5", "24.1-24.6", "43.1-43.6", "51.4", "52.1-52.3", "54.1-54.3", "54.8-54.10"]
+requires = ["7.10"]
+touches = ["crates/local-runtime/src/lib.rs"]
+
+[task.7.12]
+title  = "Durable relationship state, first meeting, preferred name, and typed context"
+status = "pending"
+wave   = 19
+do_1   = "Implement a profile-scoped hash-chained relationship ledger and the Unintroduced, AwaitingName, and Established projection with truncated-tail recovery"
+do_2   = "Start first meeting exactly once for a genuine user entry, capture only explicit or directly solicited names, and retain exact source session, entry, and digest"
+do_3   = "Project preferred-name confirmation, correction, and forgetting into the evidence vault with supersession/deletion and no weak or account-metadata inference"
+do_4   = "Compile bounded RelationshipContext separately from RetrievedMemory, freeze it across the same provider step, and omit it from summarization, history, compaction, and controller turns"
+do_5   = "Run exact-once, retry, compaction, crash/restart, correction, deletion, weak-inference, cross-profile, context-provenance, fail-open, and final-authority regressions"
+reqs   = ["7.1-7.7", "10.1-10.7", "23.1-23.5", "25.4-25.6", "42.1-42.6", "44.1-44.5", "52.1-52.8", "53.1-53.10", "54.3-54.10"]
+requires = ["7.11"]
+touches = ["crates/memory/src/*.rs", "crates/provider-core/src/lib.rs", "crates/local-runtime/src/lib.rs"]
 
 [task.8]
 section = "Phase 8 — Scheduler, Commitments, Awareness, Attention, and Presence"

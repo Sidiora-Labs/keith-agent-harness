@@ -273,13 +273,27 @@
     - Prevent scouts from writing memory, mutating workspaces, messaging users, delivering finals, or inheriting ordinary profile tools
     - Run nested recall, unsupported claim, stale source, cross-profile, recursive explosion, cancellation, crash, timeout, and ordinary-turn liveness tests
     - _Requirements: 10.1-10.7, 13.1-13.6, 21.1-21.6, 41.1-41.6, 42.1-42.6, 52.3-52.8, 53.4-53.6, 53.8-53.10_
-  - [-] 7.10 Bounded reflex activation and removal of whole-memory prompt injection
+  - [x] 7.10 Bounded reflex activation and removal of whole-memory prompt injection
     - Add explicit RetrievedMemory provenance and frozen activation manifests carrying selector version, archive revision, evidence IDs, digests, coverage, and token price
     - Select confirmed anchors, active work, relevant evidence, and corrections within deterministic per-kind and total budgets before provider sampling
     - Remove whole MEMORY.md injection and arbitrary first-record activation; deduplicate by source identity and content digest and keep operational/recovery state exact-key only
     - Freeze activation across the same provider step, rebuild only after authoritative surface change, and keep compaction, retries, active user ingress, finalization, and delivery independent
     - Run longitudinal relevance, false-familiarity, correction, deletion, no-embedding fallback, stale activation, repeated compaction, provider retry, memory failure, and final-authority regression suites
     - _Requirements: 7.1-7.7, 9.1-9.6, 10.1-10.7, 25.1-25.6, 26.1-26.6, 44.1-44.5, 52.1-52.8, 53.6-53.10_
+  - [-] 7.11 Stable machine-native Keith persona and safe legacy-default upgrade
+    - Replace the generic built-in AGENT, USER, and RULE defaults with Keith's stable machine-aware, friendly, curious, witty, socially perceptive behavioral contract
+    - Teach the persona to use bounded memory evidence as a temporary relational constellation without mirroring the user, inventing psychology, announcing recall, or forcing familiarity
+    - Atomically upgrade only exact untouched legacy one-line defaults during profile open while preserving every customized file byte-for-byte
+    - Keep the persona user-editable, live-reloadable, profile-scoped, and independent from turn authority and memory-derived relationship state
+    - Test new profile creation, exact legacy migration, customized-file preservation, restart idempotence, and actual model-request personality content
+    - _Requirements: 23.1-23.5, 24.1-24.6, 43.1-43.6, 51.4, 52.1-52.3, 54.1-54.3, 54.8-54.10_
+  - [ ] 7.12 Durable relationship state, first meeting, preferred name, and typed context
+    - Implement a profile-scoped hash-chained relationship ledger and the Unintroduced, AwaitingName, and Established projection with truncated-tail recovery
+    - Start first meeting exactly once for a genuine user entry, capture only explicit or directly solicited names, and retain exact source session, entry, and digest
+    - Project preferred-name confirmation, correction, and forgetting into the evidence vault with supersession/deletion and no weak or account-metadata inference
+    - Compile bounded RelationshipContext separately from RetrievedMemory, freeze it across the same provider step, and omit it from summarization, history, compaction, and controller turns
+    - Run exact-once, retry, compaction, crash/restart, correction, deletion, weak-inference, cross-profile, context-provenance, fail-open, and final-authority regressions
+    - _Requirements: 7.1-7.7, 10.1-10.7, 23.1-23.5, 25.4-25.6, 42.1-42.6, 44.1-44.5, 52.1-52.8, 53.1-53.10, 54.3-54.10_
 
 ## Phase 8 — Scheduler, Commitments, Awareness, Attention, and Presence
 
@@ -572,8 +586,8 @@
     { "id": 15, "tasks": ["7.8", "8.3", "9.1", "10.1", "10.2"] },
     { "id": 16, "tasks": ["7.9", "8.4", "8.5", "9.2"] },
     { "id": 17, "tasks": ["7.10", "9.3", "9.4", "11.1"] },
-    { "id": 18, "tasks": ["10.3", "11.2", "11.3"] },
-    { "id": 19, "tasks": ["10.4", "11.4"] },
+    { "id": 18, "tasks": ["7.11", "10.3", "11.2", "11.3"] },
+    { "id": 19, "tasks": ["7.12", "10.4", "11.4"] },
     { "id": 20, "tasks": ["11.5", "12.1", "12.4"] },
     { "id": 21, "tasks": ["12.2", "12.3", "13.1"] },
     { "id": 22, "tasks": ["12.5", "13.2"] },
