@@ -3,6 +3,7 @@
 mod activation;
 mod observatory;
 mod recall;
+mod relationship;
 
 pub use activation::{
     ACTIVATION_SELECTOR_VERSION, ActivationError, ActivationPolicy, ActivationRequest,
@@ -18,6 +19,10 @@ pub use observatory::{
 pub use recall::{
     MemoryScoutFinding, RECALL_SELECTOR_VERSION, RecallCapsule, RecallClaim, RecallContradiction,
     RecallCoverage, RecallError, RecallRequest, RecallService,
+};
+pub use relationship::{
+    PreferredName, RelationshipError, RelationshipService, RelationshipStage,
+    RelationshipTurnContext,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -132,6 +137,8 @@ pub enum MemoryError {
     Observatory(#[from] ObservatoryError),
     #[error("memory recall failed: {0}")]
     Recall(String),
+    #[error("relationship memory failed: {0}")]
+    Relationship(#[from] RelationshipError),
     #[error("memory clock failed: {0}")]
     Clock(String),
     #[error("memory ledger belongs to another profile or unsupported schema")]
@@ -158,6 +165,7 @@ pub struct MemoryService {
     ledger: Mutex<MemoryLedger>,
     observatory: MemoryObservatory,
     recall: RecallService,
+    relationship: Option<RelationshipService>,
 }
 
 impl MemoryService {
@@ -194,12 +202,17 @@ impl MemoryService {
         observatory.sync_memory_records(ledger.records.values(), now)?;
         let recall = RecallService::open(&workspace.layout().root, profile_id)
             .map_err(|error| MemoryError::Recall(error.to_string()))?;
+        let relationship = RelationshipService::open(&workspace.layout().root, profile_id).ok();
+        if let Some(relationship) = &relationship {
+            let _ = relationship.sync_evidence(&observatory, now);
+        }
         Ok(Self {
             workspace,
             policy,
             ledger: Mutex::new(ledger),
             observatory,
             recall,
+            relationship,
         })
     }
 
@@ -363,6 +376,42 @@ impl MemoryService {
     /// Returns the bounded deliberate-recall service for this profile.
     pub const fn recall(&self) -> &RecallService {
         &self.recall
+    }
+
+    /// Advances relationship onboarding for one exact user-ingress source.
+    ///
+    /// The caller may treat errors as optional-context failures. A successfully appended
+    /// relationship transition remains durable even if its evidence projection must retry later.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-user/corrupt entry or relationship-log persistence failure.
+    pub fn prepare_relationship_turn(
+        &self,
+        session_id: &SessionId,
+        entry: &keith_session_store::SessionEntry,
+        user_text: &str,
+        now: UtcTimestamp,
+    ) -> Result<RelationshipTurnContext, MemoryError> {
+        entry
+            .verify()
+            .map_err(|_| MemoryError::Relationship(RelationshipError::Invalid))?;
+        if !matches!(entry.payload, SessionEntryPayload::UserMessage { .. }) {
+            return Err(MemoryError::Relationship(RelationshipError::Invalid));
+        }
+        let relationship = self
+            .relationship
+            .as_ref()
+            .ok_or(MemoryError::Relationship(RelationshipError::Invalid))?;
+        let context =
+            relationship.prepare_turn(session_id, &entry.id, &entry.checksum, user_text, now)?;
+        let _ = relationship.sync_evidence(&self.observatory, now);
+        Ok(context)
+    }
+
+    /// Returns the profile-scoped durable relationship state service.
+    pub const fn relationship(&self) -> Option<&RelationshipService> {
+        self.relationship.as_ref()
     }
 
     /// Projects committed session evidence without making the atlas authoritative.
@@ -1141,5 +1190,57 @@ mod tests {
             .nth(1)
             .unwrap_or("");
         assert!(managed.len() <= 80);
+    }
+
+    #[test]
+    fn corrupt_relationship_state_fails_open_without_disabling_memory() {
+        let directory = tempdir().unwrap();
+        let workspace_root = directory.path().join("workspace");
+        let profile_id = ProfileId::new();
+        let workspace = PersonalWorkspace::open(
+            &workspace_root,
+            keith_workspace::PersonalWorkspaceLimits::default(),
+            UtcTimestamp::UNIX_EPOCH,
+        )
+        .unwrap();
+        fs::create_dir_all(workspace_root.join(".keith")).unwrap();
+        fs::write(
+            workspace_root.join(".keith/relationship-events.jsonl"),
+            b"{\"complete_but_invalid\":true}\n",
+        )
+        .unwrap();
+
+        let service = MemoryService::open(workspace, &profile_id, MemoryPolicy::default()).unwrap();
+        assert!(service.relationship().is_none());
+        assert_eq!(service.observatory().revision().unwrap(), 0);
+        let entry = keith_session_store::SessionEntry::new(
+            EntryId::new(),
+            None,
+            UtcTimestamp::UNIX_EPOCH,
+            SessionEntryPayload::UserMessage {
+                message: StoredMessage {
+                    role: keith_session_store::MessageRole::User,
+                    content: vec![keith_session_store::ContentBlock::Text {
+                        text: "hello".into(),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+            },
+        )
+        .unwrap();
+        assert!(
+            service
+                .prepare_relationship_turn(
+                    &SessionId::new(),
+                    &entry,
+                    "hello",
+                    UtcTimestamp::UNIX_EPOCH,
+                )
+                .is_err()
+        );
+        service
+            .ingest_session_entries(&SessionId::new(), &[entry], UtcTimestamp::UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(service.observatory().revision().unwrap(), 1);
     }
 }

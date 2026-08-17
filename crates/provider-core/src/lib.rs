@@ -69,6 +69,7 @@ pub enum ContextProvenance {
     ActiveGoal,
     DurableMemory,
     RetrievedMemory,
+    RelationshipContext,
     RetrievedKnowledge,
     CompactionSummary,
     UserIngress,
@@ -791,6 +792,10 @@ mod tests {
             ("compaction_summary", ContextProvenance::CompactionSummary),
             ("durable_memory", ContextProvenance::DurableMemory),
             ("retrieved_memory", ContextProvenance::RetrievedMemory),
+            (
+                "relationship_context",
+                ContextProvenance::RelationshipContext,
+            ),
             ("retrieved_knowledge", ContextProvenance::RetrievedKnowledge),
             ("system_policy", ContextProvenance::SystemPolicy),
             ("controller_guidance", ContextProvenance::ControllerGuidance),

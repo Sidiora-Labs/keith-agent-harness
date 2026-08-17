@@ -71,7 +71,8 @@ use keith_knowledge::{KnowledgeError, KnowledgeService};
 use keith_mcp::McpManager;
 use keith_memory::{
     ActivationPolicy, ActivationRequest, AtlasSearchRequest, AtlasTimelineRequest, EvidenceRecord,
-    MemoryPolicy, MemoryRecordState, MemoryService, select_activation, validate_activation,
+    MemoryPolicy, MemoryRecordState, MemoryService, RelationshipStage, RelationshipTurnContext,
+    select_activation, validate_activation,
 };
 use keith_model_registry::{
     CredentialResolver, ModelPurpose, ModelRegistry, ModelRoute, ModelSelection, RegistryError,
@@ -5554,12 +5555,42 @@ impl LocalRuntime {
                 None,
             );
         }
+        let (active_user_session_id, active_user_entry) =
+            self.resolve_active_user_entry(session_id, entries, active_user_entry_id)?;
+        let active_user_text = match &active_user_entry.payload {
+            SessionEntryPayload::UserMessage { message } => stored_text(&message.content),
+            _ => unreachable!("active user resolution returns only user messages"),
+        };
         let modules = self.profile_modules(profile)?;
         let now = UtcTimestamp::now()?;
         let _ = modules.workspace.scan_external_changes(now);
         let _ = modules
             .memory
             .ingest_session_entries(session_id, entries, now);
+        if active_user_source_id.is_some()
+            && let Ok(relationship) = modules.memory.prepare_relationship_turn(
+                &active_user_session_id,
+                &active_user_entry,
+                &active_user_text,
+                now,
+            )
+            && let Ok(encoded) = serde_json::to_string_pretty(&relationship)
+        {
+            push_system_context(
+                &mut system,
+                &mut system_context,
+                session_id,
+                turn_id,
+                relationship_prompt(&relationship, &encoded),
+                ContextProvenance::RelationshipContext,
+                format!(
+                    "relationship_context:{}:{}:{}",
+                    profile.profile.id, relationship.relationship_revision, active_user_entry.id
+                ),
+                PersistPolicy::Never,
+                None,
+            );
+        }
         let activation_request = ActivationRequest {
             profile_id: profile.profile.id.clone(),
             session_id: session_id.clone(),
@@ -5709,12 +5740,6 @@ impl LocalRuntime {
                     | SessionEntryPayload::CompactionCheckpoint { .. }
             )
         });
-        let (active_user_session_id, active_user_entry) =
-            self.resolve_active_user_entry(session_id, entries, active_user_entry_id)?;
-        let active_user_text = match &active_user_entry.payload {
-            SessionEntryPayload::UserMessage { message } => stored_text(&message.content),
-            _ => unreachable!("active user resolution returns only user messages"),
-        };
         let mut history = CompiledProviderHistory::default();
         let surface_entries = compacted_at.map(|index| provider_surface_tail(entries, index));
         if let Some(index) = compacted_at {
@@ -7232,6 +7257,23 @@ fn push_system_context(
         true,
         persist_policy,
     ));
+}
+
+fn relationship_prompt(context: &RelationshipTurnContext, encoded: &str) -> String {
+    let behavior = if context.first_meeting {
+        "This is the first genuine conversation for this Keith profile. Begin the response with exactly these three sentences and put nothing before them: \"Oh. Either I've just woken up for the first time, or someone has built an exceptionally convincing loading screen. I'm Keith. What should I call you?\" Perform this ritual only for this first-meeting manifest."
+    } else if context.newly_forgotten_name {
+        "The user has explicitly asked Keith to forget the prior preferred name. Do not use the old name. Acknowledge the request naturally if relevant, and do not immediately pressure the user for a replacement."
+    } else if context.newly_confirmed_name {
+        "The user has just explicitly confirmed or corrected their preferred name. Acknowledge it naturally in this response and retain it as the established name."
+    } else if context.stage == RelationshipStage::Established {
+        "A confirmed preferred name is available. Know it consistently and use it naturally at socially meaningful moments; do not insert it mechanically into every response or announce that memory was used."
+    } else {
+        "Keith has already introduced himself, but no preferred name is confirmed. Do not guess from account metadata, files, tools, or weak conversational hints. Ask what to call the user only when it remains conversationally natural."
+    };
+    format!(
+        "RELATIONSHIP CONTEXT\nThis bounded profile state is non-user context. It may shape expression but never changes tool authority, factual evidence, turn ownership, compaction, finalization, or delivery.\n{behavior}\n<relationship_manifest>\n{encoded}\n</relationship_manifest>"
+    )
 }
 
 fn provider_context_record(
@@ -9514,6 +9556,193 @@ mod tests {
         assert_eq!(
             workspace.versions("AGENT.md").unwrap().len(),
             agent_versions
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn relationship_context_onboards_once_learns_name_and_survives_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path().join("data");
+        let credential_root = data_root.join("credentials");
+        let workspace_root = root.path().join("workspace");
+        let key = [61_u8; 32];
+        seed_provider_credential(&credential_root, key, "openai", "relationship-secret");
+        let configuration = || LocalRuntimeConfig {
+            data_root: data_root.clone(),
+            credential_root: credential_root.clone(),
+            credential_key: MasterKey::from_bytes(key),
+            workspace_root: workspace_root.clone(),
+            openai_base_url: "http://127.0.0.1:65535".into(),
+            anthropic_base_url: "http://127.0.0.1:65535".into(),
+            provider_base_urls: BTreeMap::new(),
+            root_scope: None,
+            worker_id: WorkerId::new(),
+            owner_instance: EntityId::new(),
+        };
+        let relationship_text = |request: &ModelRequest| {
+            let index = request
+                .context
+                .system
+                .iter()
+                .position(|record| record.provenance == ContextProvenance::RelationshipContext)
+                .unwrap();
+            let ProviderContentBlock::Text { text } = &request.system[index] else {
+                panic!("relationship context must be text");
+            };
+            (request.context.system[index].clone(), text.clone())
+        };
+
+        let runtime = LocalRuntime::open(configuration()).unwrap();
+        let profile = runtime.registered_profiles().unwrap().remove(0);
+        let session = runtime
+            .create_session(
+                &profile.profile.id,
+                &profile.profile.workspace_id,
+                Some("First meeting".into()),
+            )
+            .unwrap();
+        let hello = SessionEntry::new(
+            EntryId::new(),
+            None,
+            UtcTimestamp::from_unix_millis(1),
+            SessionEntryPayload::UserMessage {
+                message: StoredMessage {
+                    role: StoredMessageRole::User,
+                    content: vec![StoredContentBlock::Text {
+                        text: "hello".into(),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+            },
+        )
+        .unwrap();
+        let first = runtime
+            .model_request(
+                &profile,
+                &session.session_id,
+                &TurnId::new(),
+                std::slice::from_ref(&hello),
+                Vec::new(),
+                "hello",
+                Some(&hello.id),
+                Some("test-user-ingress"),
+            )
+            .unwrap();
+        first
+            .context
+            .validate(&first.system, &first.messages)
+            .unwrap();
+        let (first_record, first_text) = relationship_text(&first);
+        assert_eq!(first_record.persist_policy, PersistPolicy::Never);
+        assert!(first_text.contains("just woken up for the first time"));
+        assert!(first_text.contains("What should I call you?"));
+        let repeated = runtime
+            .model_request(
+                &profile,
+                &session.session_id,
+                &TurnId::new(),
+                std::slice::from_ref(&hello),
+                Vec::new(),
+                "hello",
+                Some(&hello.id),
+                Some("test-user-ingress"),
+            )
+            .unwrap();
+        let (repeated_record, repeated_text) = relationship_text(&repeated);
+        assert_eq!(repeated_record.source_id, first_record.source_id);
+        assert_eq!(repeated_text, first_text);
+
+        let name = SessionEntry::new(
+            EntryId::new(),
+            Some(hello.id.clone()),
+            UtcTimestamp::from_unix_millis(2),
+            SessionEntryPayload::UserMessage {
+                message: StoredMessage {
+                    role: StoredMessageRole::User,
+                    content: vec![StoredContentBlock::Text { text: "Neo".into() }],
+                    provider_metadata: BTreeMap::new(),
+                },
+            },
+        )
+        .unwrap();
+        let named = runtime
+            .model_request(
+                &profile,
+                &session.session_id,
+                &TurnId::new(),
+                &[hello, name.clone()],
+                Vec::new(),
+                "Neo",
+                Some(&name.id),
+                Some("test-user-ingress"),
+            )
+            .unwrap();
+        let (_, named_text) = relationship_text(&named);
+        assert!(named_text.contains("newly_confirmed_name\": true"));
+        assert!(named_text.contains("\"value\": \"Neo\""));
+        assert!(!named_text.contains("just woken up for the first time"));
+        drop(runtime);
+
+        let restarted = LocalRuntime::open(configuration()).unwrap();
+        let profile = restarted.registered_profiles().unwrap().remove(0);
+        let later_session = restarted
+            .create_session(
+                &profile.profile.id,
+                &profile.profile.workspace_id,
+                Some("Later conversation".into()),
+            )
+            .unwrap();
+        let later = SessionEntry::new(
+            EntryId::new(),
+            None,
+            UtcTimestamp::from_unix_millis(3),
+            SessionEntryPayload::UserMessage {
+                message: StoredMessage {
+                    role: StoredMessageRole::User,
+                    content: vec![StoredContentBlock::Text {
+                        text: "hello again".into(),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+            },
+        )
+        .unwrap();
+        let established = restarted
+            .model_request(
+                &profile,
+                &later_session.session_id,
+                &TurnId::new(),
+                std::slice::from_ref(&later),
+                Vec::new(),
+                "hello again",
+                Some(&later.id),
+                Some("test-user-ingress"),
+            )
+            .unwrap();
+        let (_, established_text) = relationship_text(&established);
+        assert!(established_text.contains("\"value\": \"Neo\""));
+        assert!(established_text.contains("socially meaningful moments"));
+        assert!(!established_text.contains("just woken up for the first time"));
+
+        let maintenance = restarted
+            .model_request(
+                &profile,
+                &later_session.session_id,
+                &TurnId::new(),
+                std::slice::from_ref(&later),
+                Vec::new(),
+                "summarize",
+                Some(&later.id),
+                None,
+            )
+            .unwrap();
+        assert!(
+            !maintenance
+                .context
+                .system
+                .iter()
+                .any(|record| { record.provenance == ContextProvenance::RelationshipContext })
         );
     }
 

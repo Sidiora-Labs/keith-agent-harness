@@ -1059,7 +1059,7 @@ touches = ["crates/provider-core/src/lib.rs", "crates/local-runtime/src/lib.rs",
 
 [task.7.11]
 title  = "Stable machine-native Keith persona and safe legacy-default upgrade"
-status = "in_progress"
+status = "done"
 wave   = 18
 do_1   = "Replace the generic built-in AGENT, USER, and RULE defaults with Keith's stable machine-aware, friendly, curious, witty, socially perceptive behavioral contract"
 do_2   = "Teach the persona to use bounded memory evidence as a temporary relational constellation without mirroring the user, inventing psychology, announcing recall, or forcing familiarity"
@@ -1072,7 +1072,7 @@ touches = ["crates/local-runtime/src/lib.rs"]
 
 [task.7.12]
 title  = "Durable relationship state, first meeting, preferred name, and typed context"
-status = "pending"
+status = "in_progress"
 wave   = 19
 do_1   = "Implement a profile-scoped hash-chained relationship ledger and the Unintroduced, AwaitingName, and Established projection with truncated-tail recovery"
 do_2   = "Start first meeting exactly once for a genuine user entry, capture only explicit or directly solicited names, and retain exact source session, entry, and digest"

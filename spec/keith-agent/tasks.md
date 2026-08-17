@@ -280,14 +280,14 @@
     - Freeze activation across the same provider step, rebuild only after authoritative surface change, and keep compaction, retries, active user ingress, finalization, and delivery independent
     - Run longitudinal relevance, false-familiarity, correction, deletion, no-embedding fallback, stale activation, repeated compaction, provider retry, memory failure, and final-authority regression suites
     - _Requirements: 7.1-7.7, 9.1-9.6, 10.1-10.7, 25.1-25.6, 26.1-26.6, 44.1-44.5, 52.1-52.8, 53.6-53.10_
-  - [-] 7.11 Stable machine-native Keith persona and safe legacy-default upgrade
+  - [x] 7.11 Stable machine-native Keith persona and safe legacy-default upgrade
     - Replace the generic built-in AGENT, USER, and RULE defaults with Keith's stable machine-aware, friendly, curious, witty, socially perceptive behavioral contract
     - Teach the persona to use bounded memory evidence as a temporary relational constellation without mirroring the user, inventing psychology, announcing recall, or forcing familiarity
     - Atomically upgrade only exact untouched legacy one-line defaults during profile open while preserving every customized file byte-for-byte
     - Keep the persona user-editable, live-reloadable, profile-scoped, and independent from turn authority and memory-derived relationship state
     - Test new profile creation, exact legacy migration, customized-file preservation, restart idempotence, and actual model-request personality content
     - _Requirements: 23.1-23.5, 24.1-24.6, 43.1-43.6, 51.4, 52.1-52.3, 54.1-54.3, 54.8-54.10_
-  - [ ] 7.12 Durable relationship state, first meeting, preferred name, and typed context
+  - [-] 7.12 Durable relationship state, first meeting, preferred name, and typed context
     - Implement a profile-scoped hash-chained relationship ledger and the Unintroduced, AwaitingName, and Established projection with truncated-tail recovery
     - Start first meeting exactly once for a genuine user entry, capture only explicit or directly solicited names, and retain exact source session, entry, and digest
     - Project preferred-name confirmation, correction, and forgetting into the evidence vault with supersession/deletion and no weak or account-metadata inference
