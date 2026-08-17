@@ -25,9 +25,9 @@ use keith_connection::{
 };
 use keith_protocol::{
     AgentActivityKind, AgentActivityOutcome, AgentActivityProjection, ClientCommand, CommandError,
-    CommandResult, CommandResultEnvelope, DaemonEvent, EventEnvelope, Feature, ResponsePayload,
-    SessionFilter, SessionSnapshot, SessionState, SessionSummary, ToolProjection, WireFormat,
-    WireMessage, negotiate,
+    CommandResult, CommandResultEnvelope, DaemonEvent, EventEnvelope, Feature, MessageProjection,
+    ResponsePayload, SessionFilter, SessionSnapshot, SessionState, SessionSummary, ToolProjection,
+    WireFormat, WireMessage, negotiate,
 };
 use keith_runtime_api::{
     RuntimeAgentOutcome, RuntimeEvent, RuntimeEventKind, RuntimeRequest, RuntimeResponse,
@@ -616,6 +616,7 @@ impl DaemonCore {
         result
     }
 
+    #[allow(clippy::too_many_lines)]
     fn serve_shared_connection(
         shared: &Mutex<&mut Self>,
         stream: LocalStream,
@@ -726,15 +727,6 @@ impl DaemonCore {
             transport.send(&WireMessage::CommandResult(result))?;
         }
         Ok(())
-    }
-
-    fn handle_command(
-        &mut self,
-        connected_client_id: &keith_agent_types::ClientId,
-        negotiated: keith_agent_types::ProtocolVersion,
-        command: keith_protocol::CommandEnvelope,
-    ) -> (CommandResultEnvelope, Vec<keith_protocol::EventEnvelope>) {
-        self.handle_command_streaming(connected_client_id, negotiated, command, &mut |_| {})
     }
 
     fn handle_command_streaming(
@@ -1399,6 +1391,17 @@ fn runtime_daemon_event(event: RuntimeEvent) -> DaemonEvent {
             state: if is_error { "failed" } else { "succeeded" }.into(),
             terminal: true,
         }),
+        RuntimeEventKind::AssistantFinalCommitted {
+            message_id,
+            final_id,
+            text,
+        } => DaemonEvent::MessageCommitted(MessageProjection {
+            message_id,
+            final_id: Some(final_id),
+            role: keith_protocol::MessageRole::Assistant,
+            text,
+            committed: true,
+        }),
         kind => DaemonEvent::AgentActivity(AgentActivityProjection {
             session_id,
             turn_id,
@@ -1430,6 +1433,7 @@ fn runtime_daemon_event(event: RuntimeEvent) -> DaemonEvent {
                     },
                 },
                 RuntimeEventKind::AssistantDelta { .. }
+                | RuntimeEventKind::AssistantFinalCommitted { .. }
                 | RuntimeEventKind::ToolStarted { .. }
                 | RuntimeEventKind::ToolCompleted { .. } => unreachable!(),
             },

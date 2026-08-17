@@ -571,6 +571,7 @@ fn apply_event_payload(snapshot: &mut SessionSnapshot, event: &DaemonEvent) {
             } else {
                 snapshot.messages.push(MessageProjection {
                     message_id: message_id.clone(),
+                    final_id: None,
                     role: MessageRole::Assistant,
                     text: text.clone(),
                     committed: false,
@@ -1224,6 +1225,7 @@ mod tests {
         let initial = session_snapshot();
         let message = MessageProjection {
             message_id: MessageId::new(),
+            final_id: None,
             role: MessageRole::Assistant,
             text: "done".into(),
             committed: true,
@@ -1344,6 +1346,7 @@ mod tests {
                 sequence,
                 DaemonEvent::MessageCommitted(MessageProjection {
                     message_id: MessageId::new(),
+                    final_id: None,
                     role: MessageRole::Assistant,
                     text: format!("message {index}"),
                     committed: true,

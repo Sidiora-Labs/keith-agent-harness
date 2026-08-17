@@ -67,6 +67,15 @@ def bridge(operation):
 
 class RlmBridge:
     """Typed, host-authorized operations exposed to the persistent guest."""
+    def help(self):
+        return {
+            "run": "rlm.run(objective: str)",
+            "send_message": "rlm.send_message(session_id: str, text: str)",
+            "update_goal": "rlm.update_goal(goal_id: str, state: str, summary: str | None = None)",
+            "call_mcp": "rlm.call_mcp(server_id: str, tool_name: str, arguments: dict | None = None); do not pass raw MCP methods such as tools/list",
+            "compact": "rlm.compact(target_tokens: int = 32000)",
+            "create_artifact": "rlm.create_artifact(text: str, media_type: str = 'text/plain')",
+        }
     def __call__(self, objective):
         return self.run(objective)
     def run(self, objective):
@@ -76,7 +85,15 @@ class RlmBridge:
     def update_goal(self, goal_id, state, summary=None):
         return bridge({"kind": "update_goal", "goal_id": goal_id, "state": state, "summary": summary})
     def call_mcp(self, server, tool, arguments=None):
-        return bridge({"kind": "call_mcp", "server": server, "tool": tool, "arguments": arguments or {}})
+        if not isinstance(server, str) or not server or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in server):
+            raise TypeError("server must be a configured lowercase MCP server id")
+        if not isinstance(tool, str) or not tool or len(tool.encode("utf-8")) > 128 or any(ord(c) < 32 for c in tool):
+            raise TypeError("tool must be a non-empty MCP tool name of at most 128 bytes")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise TypeError("arguments must be a Python dict representing a JSON object")
+        return bridge({"kind": "call_mcp", "server": server, "tool": tool, "arguments": arguments})
     def compact(self, target_tokens=32000):
         return bridge({"kind": "compact", "target_tokens": target_tokens})
     def create_artifact(self, text, media_type="text/plain"):
@@ -198,7 +215,7 @@ impl Default for KernelLimits {
     fn default() -> Self {
         Self {
             memory_bytes: 512 * 1024 * 1024,
-            cpu_seconds: 30,
+            cpu_seconds: 30 * 60,
             max_processes: 8,
             max_output_bytes: 8 * 1024 * 1024,
             max_inline_output_bytes: 32 * 1024,
@@ -894,6 +911,17 @@ impl KernelBroker {
             .cloned()
             .collect::<Vec<_>>();
         ids.iter().map(|id| self.inspect(id)).collect()
+    }
+
+    /// Reports whether the broker-owned guest process is still alive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the kernel is missing or its process state is inaccessible.
+    pub fn is_running(&self, id: &KernelId) -> Result<bool, KernelError> {
+        let process = self.process(id)?;
+        let mut io = process.io.lock().map_err(|_| KernelError::LockPoisoned)?;
+        Ok(io.child.try_wait()?.is_none())
     }
 
     /// Evicts kernels whose idle or total lifetime bound has elapsed.

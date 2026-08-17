@@ -17,6 +17,7 @@ pub fn benchmark(snapshot: &SessionSnapshot, iterations: usize) -> Result<Measur
     for index in 0..10_000_u64 {
         long.messages.push(MessageProjection {
             message_id: MessageId::new(),
+            final_id: None,
             role: if index % 2 == 0 {
                 MessageRole::User
             } else {

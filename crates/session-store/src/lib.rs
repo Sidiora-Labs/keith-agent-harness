@@ -107,6 +107,8 @@ pub struct SessionManifest {
     pub workspace_id: WorkspaceId,
     pub created_at: UtcTimestamp,
     pub active_leaf: Option<EntryId>,
+    #[serde(default)]
+    pub compaction_generation: u64,
     pub label: Option<String>,
     #[serde(default)]
     pub profile_snapshot: Option<ProfileSnapshotMetadata>,
@@ -126,6 +128,7 @@ impl From<NewSession> for SessionManifest {
             workspace_id: value.workspace_id,
             created_at: value.created_at,
             active_leaf: None,
+            compaction_generation: 0,
             label: value.label,
             profile_snapshot: value.profile_snapshot,
             branch_labels: BTreeMap::new(),
@@ -189,7 +192,61 @@ pub enum TurnTerminalStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "detail")]
+pub enum TurnObligationState {
+    Accepted,
+    Running {
+        step: u32,
+    },
+    FinalizationPending {
+        candidate_id: Option<EntryId>,
+    },
+    Finalized {
+        final_id: EntryId,
+        terminal_id: EntryId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepBoundaryState {
+    Started,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionTrigger {
+    Pressure,
+    ProviderOverflow,
+    Manual,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionFailureStage {
+    Selection,
+    Summary,
+    Changed,
+    Commit,
+    Persistence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "outcome", content = "detail")]
+pub enum CompactionOutcome {
+    Success,
+    Failed {
+        stage: CompactionFailureStage,
+        error: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct AuthoritativeTurnSnapshot {
     pub session_id: SessionId,
     pub turn_id: TurnId,
@@ -221,6 +278,13 @@ pub enum SessionEntryPayload {
         turn_id: TurnId,
         message: StoredMessage,
     },
+    AssistantFinalCandidate {
+        turn_id: TurnId,
+        message: StoredMessage,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_input_tokens: u64,
+    },
     AssistantFinal {
         turn_id: TurnId,
         message: StoredMessage,
@@ -229,6 +293,19 @@ pub enum SessionEntryPayload {
         turn_id: TurnId,
         source_id: String,
         text: String,
+    },
+    TurnObligation {
+        action_id: ActionId,
+        turn_id: TurnId,
+        user_entry_id: EntryId,
+        state: TurnObligationState,
+    },
+    StepBoundary {
+        turn_id: TurnId,
+        step: u32,
+        provider_request_id: EntityId,
+        state: StepBoundaryState,
+        detail: Option<String>,
     },
     ToolCall {
         call_id: ToolCallId,
@@ -275,6 +352,45 @@ pub enum SessionEntryPayload {
     Compaction {
         summary: String,
         compacted_through: EntryId,
+    },
+    CompactionStarted {
+        compaction_id: EntityId,
+        base_leaf: EntryId,
+        range_start: EntryId,
+        range_end: EntryId,
+        source_entries: Vec<EntryId>,
+        surface_generation: u64,
+        trigger: CompactionTrigger,
+    },
+    CompactionSummary {
+        compaction_id: EntityId,
+        summary: String,
+        raw_provider_output: String,
+        source_entries: Vec<EntryId>,
+        provider: Option<String>,
+        model: Option<String>,
+        max_output_tokens: u32,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_input_tokens: u64,
+        estimated_source_tokens: u64,
+        estimated_summary_tokens: u64,
+    },
+    CompactionCheckpoint {
+        compaction_id: EntityId,
+        summary_id: EntryId,
+        source_entries: Vec<EntryId>,
+        compacted_through: EntryId,
+        summary: String,
+    },
+    CompactionEnded {
+        compaction_id: EntityId,
+        outcome: CompactionOutcome,
+    },
+    MaintenanceFailure {
+        turn_id: Option<TurnId>,
+        subsystem: String,
+        detail: String,
     },
     BranchSummary {
         summary: String,
@@ -438,6 +554,8 @@ impl SessionIndex {
         manifest: &SessionManifest,
         estimated_tokens: u64,
         policy: CompactionPolicy,
+        protected_user_entry_id: Option<&EntryId>,
+        trigger: CompactionTrigger,
     ) -> Result<Option<CompactionRequest>, SessionStoreError> {
         validate_compaction_policy(policy)?;
         if estimated_tokens < policy.trigger_tokens {
@@ -447,20 +565,82 @@ impl SessionIndex {
             return Ok(None);
         };
         let ancestry = self.ancestry(selected_leaf)?;
-        let previous_index = ancestry
+        let ended_compactions = ancestry
             .iter()
-            .rposition(|entry| matches!(entry.payload, SessionEntryPayload::Compaction { .. }));
+            .filter_map(|entry| match &entry.payload {
+                SessionEntryPayload::CompactionEnded { compaction_id, .. } => {
+                    Some(compaction_id.clone())
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if ancestry.iter().any(|entry| {
+            matches!(
+                &entry.payload,
+                SessionEntryPayload::CompactionStarted { compaction_id, .. }
+                    if !ended_compactions.contains(compaction_id)
+            )
+        }) {
+            return Err(SessionStoreError::CompactionBusy);
+        }
+        let previous_index = ancestry.iter().rposition(|entry| {
+            matches!(
+                entry.payload,
+                SessionEntryPayload::Compaction { .. }
+                    | SessionEntryPayload::CompactionEnded {
+                        outcome: CompactionOutcome::Success,
+                        ..
+                    }
+            )
+        });
         let range_index = previous_index.map_or(0, |index| index + 1);
-        let Some(range_start) = ancestry.get(range_index) else {
+        let protected_index = protected_user_entry_id
+            .and_then(|id| ancestry.iter().position(|entry| &entry.id == id))
+            .unwrap_or(ancestry.len());
+        if range_index >= protected_index {
+            return Ok(None);
+        }
+        let mut retained_tokens = 0_u64;
+        let mut cutoff = protected_index;
+        while cutoff > range_index && retained_tokens < policy.target_tokens {
+            cutoff -= 1;
+            retained_tokens =
+                retained_tokens.saturating_add(entry_estimated_tokens(&ancestry[cutoff]));
+        }
+        let end_index = ancestry[range_index..cutoff]
+            .iter()
+            .rposition(|entry| matches!(entry.payload, SessionEntryPayload::TerminalTurn { .. }))
+            .map(|offset| range_index + offset);
+        let Some(end_index) = end_index else {
             return Ok(None);
         };
+        let range_start = &ancestry[range_index];
+        let range_end = &ancestry[end_index];
+        let source_entries = ancestry[range_index..=end_index]
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        validate_balanced_compaction_range(&ancestry[range_index..=end_index])?;
+        let estimated_source_tokens = ancestry[range_index..=end_index]
+            .iter()
+            .fold(0_u64, |total, entry| {
+                total.saturating_add(entry_estimated_tokens(entry))
+            });
+        if estimated_source_tokens <= 1 {
+            return Ok(None);
+        }
         Ok(Some(CompactionRequest {
             id: EntityId::new(),
             session_id: manifest.session_id.clone(),
             selected_leaf: selected_leaf.clone(),
+            started_entry_id: None,
             range_start: range_start.id.clone(),
-            range_end: selected_leaf.clone(),
+            range_end: range_end.id.clone(),
+            source_entries,
             previous_boundary: previous_index.map(|index| ancestry[index].id.clone()),
+            surface_generation: manifest.compaction_generation,
+            trigger,
+            estimated_source_tokens,
             target_tokens: policy.target_tokens,
             max_summary_bytes: policy.max_summary_bytes,
             max_candidates: policy.max_candidates,
@@ -504,16 +684,43 @@ impl SessionIndex {
                     compaction_summary = Some(summary.clone());
                     boundary_index = Some(index);
                 }
+                SessionEntryPayload::CompactionCheckpoint {
+                    summary,
+                    compacted_through,
+                    source_entries,
+                    ..
+                } => {
+                    if source_entries.last() != Some(compacted_through)
+                        || !source_entries.iter().all(|source| {
+                            ancestry[..index]
+                                .iter()
+                                .any(|candidate| candidate.id == *source)
+                        })
+                    {
+                        return Err(SessionStoreError::InvalidCompaction(
+                            "compaction checkpoint sources are not on the selected ancestry".into(),
+                        ));
+                    }
+                    compaction_summary = Some(summary.clone());
+                    boundary_index = Some(index);
+                }
                 SessionEntryPayload::UserMessage { .. }
                 | SessionEntryPayload::AssistantMessage { .. }
                 | SessionEntryPayload::AssistantActivity { .. }
+                | SessionEntryPayload::AssistantFinalCandidate { .. }
                 | SessionEntryPayload::AssistantFinal { .. }
                 | SessionEntryPayload::ControllerGuidance { .. }
+                | SessionEntryPayload::TurnObligation { .. }
+                | SessionEntryPayload::StepBoundary { .. }
                 | SessionEntryPayload::ToolCall { .. }
                 | SessionEntryPayload::ToolResult { .. }
                 | SessionEntryPayload::TurnDeliveryOutbox { .. }
                 | SessionEntryPayload::TerminalTurn { .. }
                 | SessionEntryPayload::AuthoritativeSnapshot { .. }
+                | SessionEntryPayload::CompactionStarted { .. }
+                | SessionEntryPayload::CompactionSummary { .. }
+                | SessionEntryPayload::CompactionEnded { .. }
+                | SessionEntryPayload::MaintenanceFailure { .. }
                 | SessionEntryPayload::BranchSummary { .. }
                 | SessionEntryPayload::GoalChanged { .. }
                 | SessionEntryPayload::PlanChanged { .. }
@@ -525,7 +732,7 @@ impl SessionIndex {
         }
         let entries = boundary_index.map_or_else(
             || ancestry.clone(),
-            |index| ancestry.iter().skip(index + 1).cloned().collect(),
+            |index| reconstructed_surface_tail(&ancestry, index),
         );
         Ok(ReconstructedContext {
             selected_leaf: leaf.clone(),
@@ -668,9 +875,14 @@ pub struct CompactionRequest {
     pub id: EntityId,
     pub session_id: SessionId,
     pub selected_leaf: EntryId,
+    pub started_entry_id: Option<EntryId>,
     pub range_start: EntryId,
     pub range_end: EntryId,
+    pub source_entries: Vec<EntryId>,
     pub previous_boundary: Option<EntryId>,
+    pub surface_generation: u64,
+    pub trigger: CompactionTrigger,
+    pub estimated_source_tokens: u64,
     pub target_tokens: u64,
     pub max_summary_bytes: usize,
     pub max_candidates: usize,
@@ -732,6 +944,13 @@ pub struct CommitmentDraft {
 pub struct CompactionOutput {
     pub request_id: EntityId,
     pub session_summary: String,
+    pub raw_provider_output: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub max_output_tokens: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
     pub memory_candidates: Vec<MemoryCandidateDraft>,
     pub daily_entry: Option<String>,
     pub open_commitments: Vec<CommitmentDraft>,
@@ -802,6 +1021,8 @@ pub enum SessionStoreError {
     InvalidTerminalTurn(String),
     #[error("compaction selected leaf changed before commit")]
     StaleCompaction,
+    #[error("session has an unmatched compaction start")]
+    CompactionBusy,
     #[error("profile snapshot is invalid: {0}")]
     InvalidProfileSnapshot(String),
     #[error("profile snapshot changed before the deliberate update")]
@@ -966,6 +1187,7 @@ impl SessionStore {
                     }
                 })?)?;
                 file.sync_all()?;
+                reconcile_manifest_tail(&directory, &inspection.index)?;
                 return Ok(RecoveryReport {
                     entries: inspection.index.len(),
                     discarded_tail_bytes: discarded,
@@ -980,6 +1202,7 @@ impl SessionStore {
             atomic_write_json(&directory, QUARANTINE_FILE, &quarantine)?;
             return Err(SessionStoreError::Quarantined(session_id.clone()));
         }
+        reconcile_manifest_tail(&directory, &inspection.index)?;
         Ok(RecoveryReport {
             entries: inspection.index.len(),
             discarded_tail_bytes: 0,
@@ -1109,6 +1332,7 @@ impl SessionStore {
                 workspace_id: legacy.workspace_id,
                 created_at: legacy.created_at,
                 active_leaf: legacy.active_leaf,
+                compaction_generation: 0,
                 label: legacy.label,
                 profile_snapshot: None,
                 branch_labels: legacy.branch_labels,
@@ -1197,6 +1421,49 @@ impl SessionStore {
     }
 }
 
+fn reconcile_manifest_tail(
+    directory: &Path,
+    index: &SessionIndex,
+) -> Result<(), SessionStoreError> {
+    let mut manifest = read_manifest(directory)?;
+    let mut leaf = manifest.active_leaf.clone();
+    let mut generation = manifest.compaction_generation;
+    loop {
+        let children = index.children.get(&leaf).map_or(&[][..], Vec::as_slice);
+        if children.len() != 1 {
+            break;
+        }
+        let child = children[0].clone();
+        if let Some(entry) = index.entries.get(&child)
+            && let SessionEntryPayload::CompactionEnded {
+                compaction_id,
+                outcome: CompactionOutcome::Success,
+            } = &entry.payload
+            && let Some(surface_generation) =
+                index
+                    .entries
+                    .values()
+                    .find_map(|candidate| match &candidate.payload {
+                        SessionEntryPayload::CompactionStarted {
+                            compaction_id: started_id,
+                            surface_generation,
+                            ..
+                        } if started_id == compaction_id => Some(*surface_generation),
+                        _ => None,
+                    })
+        {
+            generation = generation.max(surface_generation.saturating_add(1));
+        }
+        leaf = Some(child);
+    }
+    if leaf != manifest.active_leaf || generation != manifest.compaction_generation {
+        manifest.active_leaf = leaf;
+        manifest.compaction_generation = generation;
+        write_manifest(directory, &manifest)?;
+    }
+    Ok(())
+}
+
 pub struct SessionWriter {
     directory: PathBuf,
     manifest: SessionManifest,
@@ -1211,6 +1478,126 @@ impl SessionWriter {
 
     pub fn identity(&self) -> &WriterIdentity {
         &self.identity
+    }
+
+    /// Durably records the obligation created by accepted ingress work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ingress entry is missing or the turn was already accepted differently.
+    pub fn accept_turn(
+        &mut self,
+        timestamp: UtcTimestamp,
+        action_id: ActionId,
+        turn_id: TurnId,
+        user_entry_id: EntryId,
+    ) -> Result<SessionEntry, SessionStoreError> {
+        self.ensure_writable()?;
+        let index = parse_complete_history(&self.directory.join(HISTORY_FILE))?;
+        let ingress_entry = index
+            .entries
+            .get(&user_entry_id)
+            .ok_or_else(|| SessionStoreError::MissingEntry(user_entry_id.clone()))?;
+        if !matches!(
+            ingress_entry.payload,
+            SessionEntryPayload::UserMessage { .. }
+                | SessionEntryPayload::ControllerGuidance { .. }
+        ) {
+            return Err(SessionStoreError::InvalidTerminalTurn(
+                "turn obligation does not reference accepted ingress".into(),
+            ));
+        }
+        if let Some(existing) = index.entries.values().find(|entry| {
+            matches!(
+                &entry.payload,
+                SessionEntryPayload::TurnObligation {
+                    turn_id: existing_turn,
+                    ..
+                } if existing_turn == &turn_id
+            )
+        }) {
+            if matches!(
+                &existing.payload,
+                SessionEntryPayload::TurnObligation {
+                    action_id: existing_action,
+                    user_entry_id: existing_user,
+                    ..
+                } if existing_action == &action_id && existing_user == &user_entry_id
+            ) {
+                return Ok(existing.clone());
+            }
+            return Err(SessionStoreError::InvalidTerminalTurn(
+                "turn obligation conflicts with an existing accepted turn".into(),
+            ));
+        }
+        self.append(
+            self.manifest.active_leaf.clone(),
+            timestamp,
+            SessionEntryPayload::TurnObligation {
+                action_id,
+                turn_id,
+                user_entry_id,
+                state: TurnObligationState::Accepted,
+            },
+        )
+    }
+
+    /// Persists a complete provider-authored final candidate before completion is projected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for incomplete content or a conflicting candidate for the same turn.
+    pub fn append_final_candidate(
+        &mut self,
+        timestamp: UtcTimestamp,
+        turn_id: TurnId,
+        message: StoredMessage,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_input_tokens: u64,
+    ) -> Result<SessionEntry, SessionStoreError> {
+        self.ensure_writable()?;
+        validate_assistant_candidate(&message)?;
+        let index = parse_complete_history(&self.directory.join(HISTORY_FILE))?;
+        if let Some(existing) = index.entries.values().find(|entry| {
+            matches!(
+                &entry.payload,
+                SessionEntryPayload::AssistantFinalCandidate {
+                    turn_id: existing_turn,
+                    ..
+                } if existing_turn == &turn_id
+            )
+        }) {
+            if matches!(
+                &existing.payload,
+                SessionEntryPayload::AssistantFinalCandidate {
+                    message: existing_message,
+                    input_tokens: existing_input,
+                    output_tokens: existing_output,
+                    cached_input_tokens: existing_cached,
+                    ..
+                } if existing_message == &message
+                    && *existing_input == input_tokens
+                    && *existing_output == output_tokens
+                    && *existing_cached == cached_input_tokens
+            ) {
+                return Ok(existing.clone());
+            }
+            return Err(SessionStoreError::InvalidTerminalTurn(
+                "turn has conflicting final candidates".into(),
+            ));
+        }
+        self.append(
+            self.manifest.active_leaf.clone(),
+            timestamp,
+            SessionEntryPayload::AssistantFinalCandidate {
+                turn_id,
+                message,
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+            },
+        )
     }
 
     /// # Errors
@@ -1262,10 +1649,10 @@ impl SessionWriter {
     pub fn append_finalized_turn(
         &mut self,
         timestamp: UtcTimestamp,
-        turn_id: TurnId,
-        message: StoredMessage,
-        status: TurnTerminalStatus,
-        execution_succeeded: bool,
+        turn_id: &TurnId,
+        fallback_message: StoredMessage,
+        fallback_status: TurnTerminalStatus,
+        fallback_execution_succeeded: bool,
         artifacts_persisted: bool,
         action_id: Option<ActionId>,
         artifact_ids: Vec<ArtifactId>,
@@ -1274,15 +1661,42 @@ impl SessionWriter {
         self.ensure_writable()?;
         let history_path = self.directory.join(HISTORY_FILE);
         let mut index = parse_history_for_finalization(&history_path)?;
-        if let Some(terminal) = index.entries.values().find(|entry| {
-            matches!(
-                &entry.payload,
-                SessionEntryPayload::TerminalTurn {
-                    turn_id: existing,
+        let candidate = index
+            .entries
+            .values()
+            .find_map(|entry| match &entry.payload {
+                SessionEntryPayload::AssistantFinalCandidate {
+                    turn_id: candidate_turn,
+                    message,
                     ..
-                } if existing == &turn_id
+                } if candidate_turn == turn_id => Some((entry.id.clone(), message.clone())),
+                _ => None,
+            });
+        let (message, status, execution_succeeded, detail) = if let Some((_, message)) = &candidate
+        {
+            (message.clone(), TurnTerminalStatus::Completed, true, None)
+        } else {
+            (
+                fallback_message,
+                fallback_status,
+                fallback_execution_succeeded,
+                detail,
             )
-        }).cloned() {
+        };
+        if let Some(terminal) = index
+            .entries
+            .values()
+            .find(|entry| {
+                matches!(
+                    &entry.payload,
+                    SessionEntryPayload::TerminalTurn {
+                        turn_id: existing,
+                        ..
+                    } if existing == turn_id
+                )
+            })
+            .cloned()
+        {
             let SessionEntryPayload::TerminalTurn {
                 final_id,
                 delivery_outbox_id,
@@ -1300,8 +1714,9 @@ impl SessionWriter {
                 &final_entry.payload,
                 SessionEntryPayload::AssistantFinal {
                     turn_id: final_turn,
-                    ..
-                } if final_turn == &turn_id
+                    message,
+                } if final_turn == turn_id
+                    && candidate.as_ref().is_none_or(|(_, candidate_message)| candidate_message == message)
             ) {
                 return Err(SessionStoreError::InvalidTerminalTurn(
                     "terminal final_id does not reference its turn's assistant final".into(),
@@ -1322,7 +1737,7 @@ impl SessionWriter {
                     turn_id: outbox_turn,
                     final_id: outbox_final,
                     ..
-                } if outbox_turn == &turn_id && outbox_final == final_id
+                } if outbox_turn == turn_id && outbox_final == final_id
             ) {
                 return Err(SessionStoreError::InvalidTerminalTurn(
                     "terminal outbox does not reference its turn and assistant final".into(),
@@ -1390,11 +1805,20 @@ impl SessionWriter {
                 SessionEntryPayload::AssistantFinal {
                     turn_id: existing,
                     ..
-                } if existing == &turn_id
+                } if existing == turn_id
             )
         });
         let mut pending = Vec::new();
         let final_entry = if let Some(existing) = existing_final {
+            if !matches!(
+                &existing.payload,
+                SessionEntryPayload::AssistantFinal { message: existing_message, .. }
+                    if candidate.as_ref().is_none_or(|(_, candidate_message)| candidate_message == existing_message)
+            ) {
+                return Err(SessionStoreError::InvalidTerminalTurn(
+                    "stored final does not match the durable provider candidate".into(),
+                ));
+            }
             existing.clone()
         } else {
             let entry = SessionEntry::new(
@@ -1417,7 +1841,7 @@ impl SessionWriter {
                     turn_id: existing,
                     final_id,
                     ..
-                } if existing == &turn_id && final_id == &final_entry.id
+                } if existing == turn_id && final_id == &final_entry.id
             )
         });
         let outbox_entry = if let Some(existing) = existing_outbox {
@@ -1439,10 +1863,11 @@ impl SessionWriter {
             entry
         };
         let authoritative_snapshot_id = EntryId::new();
+        let finalized_obligation_id = EntryId::new();
         let terminal_id = EntryId::new();
         let terminal_entry = SessionEntry::new(
-            terminal_id,
-            Some(authoritative_snapshot_id.clone()),
+            terminal_id.clone(),
+            Some(finalized_obligation_id.clone()),
             timestamp,
             SessionEntryPayload::TerminalTurn {
                 turn_id: turn_id.clone(),
@@ -1458,7 +1883,7 @@ impl SessionWriter {
             },
         )?;
         let authoritative_snapshot_entry = SessionEntry::new(
-            authoritative_snapshot_id,
+            authoritative_snapshot_id.clone(),
             Some(outbox_entry.id.clone()),
             timestamp,
             SessionEntryPayload::AuthoritativeSnapshot {
@@ -1472,6 +1897,46 @@ impl SessionWriter {
         )?;
         index.insert(authoritative_snapshot_entry.clone())?;
         pending.push(authoritative_snapshot_entry);
+        if let Some((accepted_action_id, user_entry_id)) =
+            index
+                .entries
+                .values()
+                .find_map(|entry| match &entry.payload {
+                    SessionEntryPayload::TurnObligation {
+                        action_id,
+                        turn_id: obligation_turn,
+                        user_entry_id,
+                        state:
+                            TurnObligationState::Accepted
+                            | TurnObligationState::Running { .. }
+                            | TurnObligationState::FinalizationPending { .. },
+                    } if obligation_turn == turn_id => {
+                        Some((action_id.clone(), user_entry_id.clone()))
+                    }
+                    _ => None,
+                })
+        {
+            let obligation = SessionEntry::new(
+                finalized_obligation_id,
+                Some(authoritative_snapshot_id.clone()),
+                timestamp,
+                SessionEntryPayload::TurnObligation {
+                    action_id: accepted_action_id,
+                    turn_id: turn_id.clone(),
+                    user_entry_id,
+                    state: TurnObligationState::Finalized {
+                        final_id: final_entry.id.clone(),
+                        terminal_id: terminal_id.clone(),
+                    },
+                },
+            )?;
+            index.insert(obligation.clone())?;
+            pending.push(obligation);
+        } else {
+            return Err(SessionStoreError::InvalidTerminalTurn(
+                "finalization requires a durable turn obligation".into(),
+            ));
+        }
         index.insert(terminal_entry.clone())?;
         pending.push(terminal_entry.clone());
         let mut bytes = Vec::new();
@@ -1496,12 +1961,88 @@ impl SessionWriter {
         &self,
         estimated_tokens: u64,
         policy: CompactionPolicy,
+        protected_user_entry_id: Option<&EntryId>,
+        trigger: CompactionTrigger,
     ) -> Result<Option<CompactionRequest>, SessionStoreError> {
         self.ensure_writable()?;
         parse_complete_history(&self.directory.join(HISTORY_FILE))?.compaction_request(
             &self.manifest,
             estimated_tokens,
             policy,
+            protected_user_entry_id,
+            trigger,
+        )
+    }
+
+    /// Durably opens a compaction transaction and returns the locked request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected surface changed before the lock was appended.
+    pub fn begin_compaction(
+        &mut self,
+        mut request: CompactionRequest,
+        timestamp: UtcTimestamp,
+    ) -> Result<CompactionRequest, SessionStoreError> {
+        self.ensure_writable()?;
+        if request.session_id != self.manifest.session_id
+            || request.started_entry_id.is_some()
+            || request.surface_generation != self.manifest.compaction_generation
+            || self.manifest.active_leaf.as_ref() != Some(&request.selected_leaf)
+        {
+            return Err(SessionStoreError::StaleCompaction);
+        }
+        let index = parse_complete_history(&self.directory.join(HISTORY_FILE))?;
+        validate_compaction_selection(&request, &index)?;
+        let started = self.append(
+            Some(request.selected_leaf.clone()),
+            timestamp,
+            SessionEntryPayload::CompactionStarted {
+                compaction_id: request.id.clone(),
+                base_leaf: request.selected_leaf.clone(),
+                range_start: request.range_start.clone(),
+                range_end: request.range_end.clone(),
+                source_entries: request.source_entries.clone(),
+                surface_generation: request.surface_generation,
+                trigger: request.trigger,
+            },
+        )?;
+        request.started_entry_id = Some(started.id);
+        Ok(request)
+    }
+
+    /// Closes an opened compaction as failed without advancing the surface generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the opened transaction is no longer the active leaf.
+    pub fn fail_compaction(
+        &mut self,
+        request: &CompactionRequest,
+        stage: CompactionFailureStage,
+        error: impl Into<String>,
+        timestamp: UtcTimestamp,
+    ) -> Result<SessionEntry, SessionStoreError> {
+        self.ensure_writable()?;
+        let started = request
+            .started_entry_id
+            .as_ref()
+            .ok_or(SessionStoreError::StaleCompaction)?;
+        if self.manifest.active_leaf.as_ref() != Some(started)
+            || self.manifest.compaction_generation != request.surface_generation
+        {
+            return Err(SessionStoreError::StaleCompaction);
+        }
+        self.append(
+            Some(started.clone()),
+            timestamp,
+            SessionEntryPayload::CompactionEnded {
+                compaction_id: request.id.clone(),
+                outcome: CompactionOutcome::Failed {
+                    stage,
+                    error: bounded_failure_detail(error.into()),
+                },
+            },
         )
     }
 
@@ -1515,21 +2056,81 @@ impl SessionWriter {
         timestamp: UtcTimestamp,
     ) -> Result<CompactionEmission, SessionStoreError> {
         self.ensure_writable()?;
+        let started = request
+            .started_entry_id
+            .as_ref()
+            .ok_or(SessionStoreError::StaleCompaction)?;
         if request.session_id != self.manifest.session_id
-            || self.manifest.active_leaf.as_ref() != Some(&request.selected_leaf)
+            || self.manifest.active_leaf.as_ref() != Some(started)
+            || self.manifest.compaction_generation != request.surface_generation
         {
             return Err(SessionStoreError::StaleCompaction);
         }
-        let index = parse_complete_history(&self.directory.join(HISTORY_FILE))?;
+        let history_path = self.directory.join(HISTORY_FILE);
+        let mut index = parse_complete_history(&history_path)?;
         validate_compaction_output(request, &output, &index)?;
-        let boundary = self.append(
-            Some(request.selected_leaf.clone()),
+        let estimated_summary_tokens = estimated_text_tokens(&output.session_summary);
+        let summary_entry = SessionEntry::new(
+            EntryId::new(),
+            Some(started.clone()),
             timestamp,
-            SessionEntryPayload::Compaction {
-                summary: output.session_summary,
-                compacted_through: request.range_end.clone(),
+            SessionEntryPayload::CompactionSummary {
+                compaction_id: request.id.clone(),
+                summary: output.session_summary.clone(),
+                raw_provider_output: output.raw_provider_output.clone(),
+                source_entries: request.source_entries.clone(),
+                provider: output.provider.clone(),
+                model: output.model.clone(),
+                max_output_tokens: output.max_output_tokens,
+                input_tokens: output.input_tokens,
+                output_tokens: output.output_tokens,
+                cached_input_tokens: output.cached_input_tokens,
+                estimated_source_tokens: request.estimated_source_tokens,
+                estimated_summary_tokens,
             },
         )?;
+        index.insert(summary_entry.clone())?;
+        let boundary = SessionEntry::new(
+            EntryId::new(),
+            Some(summary_entry.id.clone()),
+            timestamp,
+            SessionEntryPayload::CompactionCheckpoint {
+                compaction_id: request.id.clone(),
+                summary_id: summary_entry.id.clone(),
+                source_entries: request.source_entries.clone(),
+                compacted_through: request.range_end.clone(),
+                summary: output.session_summary,
+            },
+        )?;
+        index.insert(boundary.clone())?;
+        let ended = SessionEntry::new(
+            EntryId::new(),
+            Some(boundary.id.clone()),
+            timestamp,
+            SessionEntryPayload::CompactionEnded {
+                compaction_id: request.id.clone(),
+                outcome: CompactionOutcome::Success,
+            },
+        )?;
+        index.insert(ended.clone())?;
+        let mut bytes = Vec::new();
+        for entry in [&summary_entry, &boundary, &ended] {
+            bytes.extend(canonical_json_bytes(entry)?);
+            bytes.push(b'\n');
+        }
+        let mut history = OpenOptions::new().append(true).open(&history_path)?;
+        history.write_all(&bytes)?;
+        history.sync_all()?;
+        let mut next_manifest = self.manifest.clone();
+        next_manifest.active_leaf = Some(ended.id);
+        next_manifest.compaction_generation = next_manifest
+            .compaction_generation
+            .checked_add(1)
+            .ok_or_else(|| {
+                SessionStoreError::InvalidCompaction("surface generation overflow".into())
+            })?;
+        write_manifest(&self.directory, &next_manifest)?;
+        self.manifest = next_manifest;
         Ok(CompactionEmission {
             boundary,
             memory_candidates: output.memory_candidates,
@@ -1836,16 +2437,20 @@ fn validate_compaction_output(
     output: &CompactionOutput,
     index: &SessionIndex,
 ) -> Result<(), SessionStoreError> {
+    validate_compaction_selection(request, index)?;
     if output.request_id != request.id {
         return Err(SessionStoreError::InvalidCompaction(
             "structured output belongs to another request".into(),
         ));
     }
+    let estimated_summary_tokens = estimated_text_tokens(&output.session_summary);
     if output.session_summary.trim().is_empty()
         || output.session_summary.len() > request.max_summary_bytes
+        || output.raw_provider_output.trim().is_empty()
+        || estimated_summary_tokens >= request.estimated_source_tokens
     {
         return Err(SessionStoreError::InvalidCompaction(
-            "session summary is empty or oversized".into(),
+            "session summary is empty, oversized, missing raw output, or does not shrink the selected span".into(),
         ));
     }
     let candidate_count = output
@@ -1871,7 +2476,7 @@ fn validate_compaction_output(
         .ok_or_else(|| {
             SessionStoreError::InvalidCompaction("range end is outside selected ancestry".into())
         })?;
-    if start > end || request.range_end != request.selected_leaf {
+    if start > end {
         return Err(SessionStoreError::InvalidCompaction(
             "selected compaction range is inconsistent".into(),
         ));
@@ -1909,6 +2514,166 @@ fn validate_compaction_output(
         ));
     }
     Ok(())
+}
+
+fn validate_compaction_selection(
+    request: &CompactionRequest,
+    index: &SessionIndex,
+) -> Result<(), SessionStoreError> {
+    let ancestry = index.ancestry(&request.selected_leaf)?;
+    let start = ancestry
+        .iter()
+        .position(|entry| entry.id == request.range_start)
+        .ok_or_else(|| {
+            SessionStoreError::InvalidCompaction("range start is outside selected ancestry".into())
+        })?;
+    let end = ancestry
+        .iter()
+        .position(|entry| entry.id == request.range_end)
+        .ok_or_else(|| {
+            SessionStoreError::InvalidCompaction("range end is outside selected ancestry".into())
+        })?;
+    if start > end
+        || request.previous_boundary.as_ref()
+            != start.checked_sub(1).map(|previous| &ancestry[previous].id)
+    {
+        return Err(SessionStoreError::InvalidCompaction(
+            "selected range does not follow its declared prior boundary".into(),
+        ));
+    }
+    let actual_sources = ancestry[start..=end]
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    if actual_sources != request.source_entries {
+        return Err(SessionStoreError::StaleCompaction);
+    }
+    validate_balanced_compaction_range(&ancestry[start..=end])?;
+    let estimated = ancestry[start..=end].iter().fold(0_u64, |total, entry| {
+        total.saturating_add(entry_estimated_tokens(entry))
+    });
+    if estimated != request.estimated_source_tokens {
+        return Err(SessionStoreError::StaleCompaction);
+    }
+    Ok(())
+}
+
+fn validate_balanced_compaction_range(entries: &[SessionEntry]) -> Result<(), SessionStoreError> {
+    if !matches!(
+        entries.last().map(|entry| &entry.payload),
+        Some(SessionEntryPayload::TerminalTurn { .. })
+    ) {
+        return Err(SessionStoreError::InvalidCompaction(
+            "compaction range must end at a terminal turn boundary".into(),
+        ));
+    }
+    let calls = entries
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            SessionEntryPayload::ToolCall { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let results = entries
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            SessionEntryPayload::ToolResult { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if calls != results {
+        return Err(SessionStoreError::InvalidCompaction(
+            "compaction range splits a tool-call/tool-result pair".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn entry_estimated_tokens(entry: &SessionEntry) -> u64 {
+    canonical_json_bytes(entry)
+        .ok()
+        .and_then(|bytes| u64::try_from(bytes.len().saturating_add(3) / 4).ok())
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn reconstructed_surface_tail(
+    ancestry: &[SessionEntry],
+    boundary_index: usize,
+) -> Vec<SessionEntry> {
+    let SessionEntryPayload::CompactionCheckpoint {
+        compaction_id,
+        compacted_through,
+        ..
+    } = &ancestry[boundary_index].payload
+    else {
+        return ancestry.iter().skip(boundary_index + 1).cloned().collect();
+    };
+    let compacted_end = ancestry[..boundary_index]
+        .iter()
+        .position(|entry| &entry.id == compacted_through)
+        .unwrap_or(boundary_index);
+    let started = ancestry[compacted_end.saturating_add(1)..boundary_index]
+        .iter()
+        .position(|entry| {
+            matches!(
+                &entry.payload,
+                SessionEntryPayload::CompactionStarted {
+                    compaction_id: started_id,
+                    ..
+                } if started_id == compaction_id
+            )
+        })
+        .map_or(boundary_index, |offset| compacted_end + 1 + offset);
+    ancestry[compacted_end.saturating_add(1)..started]
+        .iter()
+        .chain(ancestry.iter().skip(boundary_index + 1))
+        .filter(|entry| {
+            !matches!(
+                entry.payload,
+                SessionEntryPayload::CompactionStarted { .. }
+                    | SessionEntryPayload::CompactionSummary { .. }
+                    | SessionEntryPayload::CompactionEnded { .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+fn estimated_text_tokens(text: &str) -> u64 {
+    u64::try_from(text.len().saturating_add(3) / 4)
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
+
+fn bounded_failure_detail(mut detail: String) -> String {
+    const MAX_BYTES: usize = 4 * 1_024;
+    if detail.len() <= MAX_BYTES {
+        return detail;
+    }
+    let mut end = MAX_BYTES;
+    while end > 0 && !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    detail.truncate(end);
+    detail
+}
+
+fn validate_assistant_candidate(message: &StoredMessage) -> Result<(), SessionStoreError> {
+    let substantive = message.role == MessageRole::Assistant
+        && message.content.iter().any(|block| match block {
+            ContentBlock::Text { text } | ContentBlock::Reasoning { text, .. } => {
+                !text.trim().is_empty()
+            }
+            ContentBlock::Artifact { .. } | ContentBlock::Resource { .. } => true,
+        });
+    if substantive {
+        Ok(())
+    } else {
+        Err(SessionStoreError::InvalidTerminalTurn(
+            "assistant final candidate is incomplete or empty".into(),
+        ))
+    }
 }
 
 fn validate_candidate_text(text: &str, max_bytes: usize) -> Result<(), SessionStoreError> {
@@ -2070,6 +2835,13 @@ mod tests {
         CompactionOutput {
             request_id: request.id.clone(),
             session_summary: summary.into(),
+            raw_provider_output: summary.into(),
+            provider: Some("test-provider".into()),
+            model: Some("test-model".into()),
+            max_output_tokens: 128,
+            input_tokens: 100,
+            output_tokens: 10,
+            cached_input_tokens: 0,
             memory_candidates: vec![MemoryCandidateDraft {
                 id: EntityId::new(),
                 kind: MemoryKind::ProjectContext,
@@ -2086,6 +2858,67 @@ mod tests {
             }],
             unresolved_items: vec!["confirm the result".into()],
         }
+    }
+
+    fn append_completed_turn(
+        writer: &mut SessionWriter,
+        text: &str,
+        millis: i64,
+    ) -> (SessionEntry, SessionEntry) {
+        let timestamp = UtcTimestamp::from_unix_millis(millis);
+        let user = writer
+            .append(
+                writer.manifest().active_leaf.clone(),
+                timestamp,
+                message(text),
+            )
+            .unwrap();
+        let action_id = ActionId::new();
+        let turn_id = TurnId::new();
+        writer
+            .accept_turn(
+                timestamp,
+                action_id.clone(),
+                turn_id.clone(),
+                user.id.clone(),
+            )
+            .unwrap();
+        writer
+            .append_final_candidate(
+                timestamp,
+                turn_id.clone(),
+                StoredMessage {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: format!("answer for {text}"),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+                10,
+                5,
+                0,
+            )
+            .unwrap();
+        let (_, terminal) = writer
+            .append_finalized_turn(
+                timestamp,
+                &turn_id,
+                StoredMessage {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "unused fallback".into(),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+                TurnTerminalStatus::Failed,
+                false,
+                true,
+                Some(action_id),
+                Vec::new(),
+                None,
+            )
+            .unwrap();
+        (user, terminal)
     }
 
     #[test]
@@ -2128,13 +2961,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn terminal_finalization_is_exactly_once_and_references_its_final() {
         let directory = tempdir().unwrap();
         let store = SessionStore::open(directory.path()).unwrap();
         let session_id = SessionId::new();
         store.create(new_session(session_id.clone())).unwrap();
         let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
-        writer
+        let accepted = writer
             .append(
                 None,
                 UtcTimestamp::UNIX_EPOCH,
@@ -2142,6 +2976,15 @@ mod tests {
             )
             .unwrap();
         let turn_id = TurnId::new();
+        let action_id = ActionId::new();
+        writer
+            .accept_turn(
+                UtcTimestamp::UNIX_EPOCH,
+                action_id.clone(),
+                turn_id.clone(),
+                accepted.id,
+            )
+            .unwrap();
         let final_message = StoredMessage {
             role: MessageRole::Assistant,
             content: vec![ContentBlock::Text {
@@ -2152,12 +2995,12 @@ mod tests {
         let first = writer
             .append_finalized_turn(
                 UtcTimestamp::UNIX_EPOCH,
-                turn_id.clone(),
+                &turn_id,
                 final_message.clone(),
                 TurnTerminalStatus::Completed,
                 true,
                 true,
-                None,
+                Some(action_id.clone()),
                 Vec::new(),
                 None,
             )
@@ -2165,12 +3008,12 @@ mod tests {
         let replay = writer
             .append_finalized_turn(
                 UtcTimestamp::UNIX_EPOCH,
-                turn_id.clone(),
+                &turn_id,
                 final_message,
                 TurnTerminalStatus::Completed,
                 true,
                 true,
-                None,
+                Some(action_id),
                 Vec::new(),
                 None,
             )
@@ -2228,6 +3071,90 @@ mod tests {
     }
 
     #[test]
+    fn durable_provider_candidate_cannot_be_replaced_by_later_maintenance_failure() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+        let accepted = writer
+            .append(None, UtcTimestamp::UNIX_EPOCH, message("accepted work"))
+            .unwrap();
+        let action_id = ActionId::new();
+        let turn_id = TurnId::new();
+        writer
+            .accept_turn(
+                UtcTimestamp::UNIX_EPOCH,
+                action_id.clone(),
+                turn_id.clone(),
+                accepted.id,
+            )
+            .unwrap();
+        writer
+            .append_final_candidate(
+                UtcTimestamp::from_unix_millis(1),
+                turn_id.clone(),
+                StoredMessage {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "the complete provider answer".into(),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+                100,
+                20,
+                0,
+            )
+            .unwrap();
+        writer
+            .append(
+                writer.manifest().active_leaf.clone(),
+                UtcTimestamp::from_unix_millis(2),
+                SessionEntryPayload::MaintenanceFailure {
+                    turn_id: Some(turn_id.clone()),
+                    subsystem: "memory_projection".into(),
+                    detail: "projection failed after the candidate committed".into(),
+                },
+            )
+            .unwrap();
+        let (final_entry, terminal) = writer
+            .append_finalized_turn(
+                UtcTimestamp::from_unix_millis(3),
+                &turn_id,
+                StoredMessage {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "replacement failure text".into(),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+                TurnTerminalStatus::Failed,
+                false,
+                false,
+                Some(action_id),
+                Vec::new(),
+                Some("late failure".into()),
+            )
+            .unwrap();
+        assert!(matches!(
+            final_entry.payload,
+            SessionEntryPayload::AssistantFinal { message, .. }
+                if message.content == vec![ContentBlock::Text {
+                    text: "the complete provider answer".into()
+                }]
+        ));
+        assert!(matches!(
+            terminal.payload,
+            SessionEntryPayload::TerminalTurn {
+                status: TurnTerminalStatus::Completed,
+                execution_succeeded: true,
+                detail: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn legacy_successful_tool_result_serialization_does_not_gain_a_failure_field() {
         let payload = SessionEntryPayload::ToolResult {
             call_id: ToolCallId::new(),
@@ -2262,6 +3189,15 @@ mod tests {
             )
             .unwrap();
         let turn_id = TurnId::new();
+        let action_id = ActionId::new();
+        let obligation = writer
+            .accept_turn(
+                UtcTimestamp::UNIX_EPOCH,
+                action_id.clone(),
+                turn_id.clone(),
+                accepted.id,
+            )
+            .unwrap();
         let final_message = StoredMessage {
             role: MessageRole::Assistant,
             content: vec![ContentBlock::Text {
@@ -2271,7 +3207,7 @@ mod tests {
         };
         let final_entry = SessionEntry::new(
             EntryId::new(),
-            Some(accepted.id),
+            Some(obligation.id),
             UtcTimestamp::UNIX_EPOCH,
             SessionEntryPayload::AssistantFinal {
                 turn_id: turn_id.clone(),
@@ -2305,12 +3241,12 @@ mod tests {
         writer
             .append_finalized_turn(
                 UtcTimestamp::UNIX_EPOCH,
-                turn_id.clone(),
+                &turn_id,
                 final_message,
                 TurnTerminalStatus::Failed,
                 false,
                 true,
-                None,
+                Some(action_id),
                 Vec::new(),
                 Some("recovered after interrupted finalization".into()),
             )
@@ -2363,7 +3299,7 @@ mod tests {
         let store = SessionStore::open(directory.path()).unwrap();
         let session_id = SessionId::new();
         store.create(new_session(session_id.clone())).unwrap();
-        let (accepted_id, turn_id, final_message, terminal_id) = {
+        let (accepted_id, action_id, turn_id, final_message, terminal_id) = {
             let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
             let accepted = writer
                 .append(
@@ -2373,6 +3309,15 @@ mod tests {
                 )
                 .unwrap();
             let turn_id = TurnId::new();
+            let action_id = ActionId::new();
+            let obligation = writer
+                .accept_turn(
+                    UtcTimestamp::UNIX_EPOCH,
+                    action_id.clone(),
+                    turn_id.clone(),
+                    accepted.id,
+                )
+                .unwrap();
             let final_message = StoredMessage {
                 role: MessageRole::Assistant,
                 content: vec![ContentBlock::Text {
@@ -2383,17 +3328,23 @@ mod tests {
             let (_, terminal) = writer
                 .append_finalized_turn(
                     UtcTimestamp::UNIX_EPOCH,
-                    turn_id.clone(),
+                    &turn_id,
                     final_message.clone(),
                     TurnTerminalStatus::Completed,
                     true,
                     true,
-                    None,
+                    Some(action_id.clone()),
                     Vec::new(),
                     None,
                 )
                 .unwrap();
-            (accepted.id, turn_id, final_message, terminal.id)
+            (
+                obligation.id,
+                action_id,
+                turn_id,
+                final_message,
+                terminal.id,
+            )
         };
         let session_directory = store.session_directory(&session_id).unwrap();
         let mut stale = read_manifest(&session_directory).unwrap();
@@ -2404,12 +3355,12 @@ mod tests {
         writer
             .append_finalized_turn(
                 UtcTimestamp::UNIX_EPOCH,
-                turn_id,
+                &turn_id,
                 final_message,
                 TurnTerminalStatus::Completed,
                 true,
                 true,
-                None,
+                Some(action_id),
                 Vec::new(),
                 None,
             )
@@ -2554,36 +3505,45 @@ mod tests {
                 },
             )
             .unwrap();
-        let message_entry = writer
-            .append(
-                Some(model.id),
-                UtcTimestamp::from_unix_millis(1),
-                message("long context"),
-            )
-            .unwrap();
+        let (message_entry, _) = append_completed_turn(&mut writer, "long context", 1);
+        let (retained_user, _) = append_completed_turn(&mut writer, "retained context", 2);
         let policy = CompactionPolicy {
             trigger_tokens: 100,
             target_tokens: 40,
             ..CompactionPolicy::default()
         };
-        assert!(writer.request_compaction(99, policy).unwrap().is_none());
-        let request = writer.request_compaction(100, policy).unwrap().unwrap();
+        assert!(
+            writer
+                .request_compaction(99, policy, None, CompactionTrigger::Pressure)
+                .unwrap()
+                .is_none()
+        );
+        let request = writer
+            .request_compaction(100, policy, None, CompactionTrigger::Pressure)
+            .unwrap()
+            .unwrap();
+        assert!(request.source_entries.contains(&model.id));
+        assert!(!request.source_entries.contains(&retained_user.id));
+        let request = writer
+            .begin_compaction(request, UtcTimestamp::from_unix_millis(3))
+            .unwrap();
         let emission = writer
             .commit_compaction(
                 &request,
                 compaction_output(&request, &message_entry.id, "first summary"),
-                UtcTimestamp::from_unix_millis(2),
+                UtcTimestamp::from_unix_millis(4),
             )
             .unwrap();
         assert_eq!(emission.memory_candidates.len(), 1);
-        assert_eq!(
+        assert_eq!(writer.manifest().compaction_generation, 1);
+        assert_ne!(
             writer.manifest().active_leaf,
             Some(emission.boundary.id.clone())
         );
         let continuation = writer
             .append(
-                Some(emission.boundary.id),
-                UtcTimestamp::from_unix_millis(3),
+                writer.manifest().active_leaf.clone(),
+                UtcTimestamp::from_unix_millis(5),
                 message("after boundary"),
             )
             .unwrap();
@@ -2594,8 +3554,84 @@ mod tests {
             .unwrap();
         assert_eq!(context.compaction_summary.as_deref(), Some("first summary"));
         assert_eq!(context.model, Some(("provider-a".into(), "model-a".into())));
-        assert_eq!(context.entries.len(), 1);
-        assert_eq!(context.entries[0].id, continuation.id);
+        assert!(
+            context
+                .entries
+                .iter()
+                .any(|entry| entry.id == retained_user.id)
+        );
+        assert!(
+            context
+                .entries
+                .iter()
+                .any(|entry| entry.id == continuation.id)
+        );
+        assert!(
+            !context
+                .entries
+                .iter()
+                .any(|entry| entry.id == message_entry.id)
+        );
+    }
+
+    #[test]
+    fn recovery_republishes_a_fsynced_compaction_body_after_manifest_crash() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let (started, committed_leaf) = {
+            let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+            let (source, _) = append_completed_turn(&mut writer, "source turn", 0);
+            append_completed_turn(&mut writer, "retained turn", 1);
+            let request = writer
+                .request_compaction(
+                    100_000,
+                    CompactionPolicy {
+                        target_tokens: 1,
+                        ..CompactionPolicy::default()
+                    },
+                    None,
+                    CompactionTrigger::Pressure,
+                )
+                .unwrap()
+                .unwrap();
+            let request = writer
+                .begin_compaction(request, UtcTimestamp::from_unix_millis(2))
+                .unwrap();
+            let started = request.started_entry_id.clone().unwrap();
+            assert!(matches!(
+                writer.request_compaction(
+                    100_000,
+                    CompactionPolicy {
+                        target_tokens: 1,
+                        ..CompactionPolicy::default()
+                    },
+                    None,
+                    CompactionTrigger::Pressure,
+                ),
+                Err(SessionStoreError::CompactionBusy)
+            ));
+            writer
+                .commit_compaction(
+                    &request,
+                    compaction_output(&request, &source.id, "durable summary"),
+                    UtcTimestamp::from_unix_millis(3),
+                )
+                .unwrap();
+            (started, writer.manifest().active_leaf.clone().unwrap())
+        };
+        let session_directory = store.session_directory(&session_id).unwrap();
+        let mut stale = read_manifest(&session_directory).unwrap();
+        stale.active_leaf = Some(started);
+        stale.compaction_generation = 0;
+        write_manifest(&session_directory, &stale).unwrap();
+        store
+            .recover(&session_id, UtcTimestamp::from_unix_millis(4))
+            .unwrap();
+        let recovered = store.manifest(&session_id).unwrap();
+        assert_eq!(recovered.active_leaf, Some(committed_leaf));
+        assert_eq!(recovered.compaction_generation, 1);
     }
 
     #[test]
@@ -2605,43 +3641,68 @@ mod tests {
         let session_id = SessionId::new();
         store.create(new_session(session_id.clone())).unwrap();
         let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
-        let root = writer
-            .append(None, UtcTimestamp::UNIX_EPOCH, message("root"))
-            .unwrap();
-        let left = writer
-            .append(
-                Some(root.id.clone()),
-                UtcTimestamp::from_unix_millis(1),
-                message("left"),
-            )
-            .unwrap();
+        let (source, _) = append_completed_turn(&mut writer, "source turn", 0);
+        append_completed_turn(&mut writer, "retained turn", 1);
         let request = writer
-            .request_compaction(100_000, CompactionPolicy::default())
+            .request_compaction(
+                100_000,
+                CompactionPolicy {
+                    target_tokens: 1,
+                    ..CompactionPolicy::default()
+                },
+                None,
+                CompactionTrigger::Pressure,
+            )
             .unwrap()
             .unwrap();
-        let mut invalid = compaction_output(&request, &left.id, "");
+        let request = writer
+            .begin_compaction(request, UtcTimestamp::from_unix_millis(2))
+            .unwrap();
+        let mut invalid = compaction_output(&request, &source.id, "");
         invalid.session_summary.clear();
         assert!(matches!(
-            writer.commit_compaction(&request, invalid, UtcTimestamp::from_unix_millis(2)),
+            writer.commit_compaction(&request, invalid, UtcTimestamp::from_unix_millis(3)),
             Err(SessionStoreError::InvalidCompaction(_))
         ));
-        assert_eq!(writer.manifest().active_leaf, Some(left.id.clone()));
-        let right = writer
+        assert_eq!(writer.manifest().compaction_generation, 0);
+        writer
+            .fail_compaction(
+                &request,
+                CompactionFailureStage::Summary,
+                "invalid summary",
+                UtcTimestamp::from_unix_millis(4),
+            )
+            .unwrap();
+        let stale = writer
+            .request_compaction(
+                100_000,
+                CompactionPolicy {
+                    target_tokens: 1,
+                    ..CompactionPolicy::default()
+                },
+                None,
+                CompactionTrigger::Pressure,
+            )
+            .unwrap()
+            .unwrap();
+        writer
             .append(
-                Some(root.id),
-                UtcTimestamp::from_unix_millis(3),
-                message("right"),
+                writer.manifest().active_leaf.clone(),
+                UtcTimestamp::from_unix_millis(5),
+                message("surface changed"),
             )
             .unwrap();
         assert!(matches!(
-            writer.commit_compaction(
-                &request,
-                compaction_output(&request, &left.id, "stale"),
-                UtcTimestamp::from_unix_millis(4),
-            ),
+            writer.begin_compaction(stale, UtcTimestamp::from_unix_millis(6)),
             Err(SessionStoreError::StaleCompaction)
         ));
-        assert_eq!(writer.manifest().active_leaf, Some(right.id));
+        assert_eq!(writer.manifest().compaction_generation, 0);
+        assert!(writer.active_ancestry().unwrap().iter().all(|entry| {
+            !matches!(
+                entry.payload,
+                SessionEntryPayload::CompactionCheckpoint { .. }
+            )
+        }));
     }
 
     #[test]
@@ -2651,28 +3712,40 @@ mod tests {
         let session_id = SessionId::new();
         store.create(new_session(session_id.clone())).unwrap();
         let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
-        let leaf = writer
-            .append(None, UtcTimestamp::UNIX_EPOCH, message("leaf"))
-            .unwrap();
+        let (source, _) = append_completed_turn(&mut writer, "source turn", 0);
+        append_completed_turn(&mut writer, "retained turn", 1);
         let request = writer
-            .request_compaction(100_000, CompactionPolicy::default())
+            .request_compaction(
+                100_000,
+                CompactionPolicy {
+                    target_tokens: 1,
+                    ..CompactionPolicy::default()
+                },
+                None,
+                CompactionTrigger::Pressure,
+            )
             .unwrap()
             .unwrap();
+        let request = writer
+            .begin_compaction(request, UtcTimestamp::from_unix_millis(2))
+            .unwrap();
+        let started = request.started_entry_id.clone().unwrap();
         fs::remove_file(writer.directory.join(HISTORY_FILE)).unwrap();
         assert!(
             writer
                 .commit_compaction(
                     &request,
-                    compaction_output(&request, &leaf.id, "summary"),
-                    UtcTimestamp::from_unix_millis(1),
+                    compaction_output(&request, &source.id, "summary"),
+                    UtcTimestamp::from_unix_millis(3),
                 )
                 .is_err()
         );
-        assert_eq!(writer.manifest().active_leaf, Some(leaf.id.clone()));
+        assert_eq!(writer.manifest().active_leaf, Some(started.clone()));
         assert_eq!(
             store.manifest(&session_id).unwrap().active_leaf,
-            Some(leaf.id)
+            Some(started)
         );
+        assert_eq!(writer.manifest().compaction_generation, 0);
     }
 
     #[test]
@@ -2682,40 +3755,55 @@ mod tests {
         let session_id = SessionId::new();
         store.create(new_session(session_id.clone())).unwrap();
         let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
-        let mut leaf = writer
-            .append(None, UtcTimestamp::UNIX_EPOCH, message("start"))
-            .unwrap();
         for round in 0..3 {
+            let (source, _) =
+                append_completed_turn(&mut writer, &format!("source turn {round}"), round * 10);
+            append_completed_turn(
+                &mut writer,
+                &format!("retained turn {round}"),
+                round * 10 + 1,
+            );
             let request = writer
-                .request_compaction(100_000, CompactionPolicy::default())
+                .request_compaction(
+                    100_000,
+                    CompactionPolicy {
+                        target_tokens: 1,
+                        ..CompactionPolicy::default()
+                    },
+                    None,
+                    CompactionTrigger::Pressure,
+                )
                 .unwrap()
                 .unwrap();
-            assert_eq!(request.range_end, leaf.id);
-            let emission = writer
+            assert!(request.source_entries.contains(&source.id));
+            let request = writer
+                .begin_compaction(request, UtcTimestamp::from_unix_millis(round * 10 + 2))
+                .unwrap();
+            writer
                 .commit_compaction(
                     &request,
-                    compaction_output(&request, &leaf.id, &format!("summary {round}")),
-                    UtcTimestamp::from_unix_millis(round * 2 + 1),
-                )
-                .unwrap();
-            leaf = writer
-                .append(
-                    Some(emission.boundary.id),
-                    UtcTimestamp::from_unix_millis(round * 2 + 2),
-                    message("continuation"),
+                    compaction_output(&request, &source.id, &format!("summary {round}")),
+                    UtcTimestamp::from_unix_millis(round * 10 + 3),
                 )
                 .unwrap();
         }
         let index = store.load_index(&session_id).unwrap();
-        let context = index.reconstruct_context(&leaf.id).unwrap();
+        let leaf = writer.manifest().active_leaf.clone().unwrap();
+        let context = index.reconstruct_context(&leaf).unwrap();
         assert_eq!(context.compaction_summary.as_deref(), Some("summary 2"));
-        assert_eq!(context.entries.len(), 1);
         assert_eq!(
             index
-                .children_of(Some(&leaf.parent_id.clone().unwrap()))
-                .len(),
-            1
+                .ancestry(&leaf)
+                .unwrap()
+                .iter()
+                .filter(|entry| matches!(
+                    entry.payload,
+                    SessionEntryPayload::CompactionCheckpoint { .. }
+                ))
+                .count(),
+            3
         );
+        assert_eq!(writer.manifest().compaction_generation, 3);
     }
 
     proptest! {

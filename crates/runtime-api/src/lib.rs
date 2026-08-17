@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use keith_agent_types::{
-    ArtifactId, ClientId, Generation, MessageId, ProfileId, RootTreeId, SessionId, ToolCallId,
-    TurnId, UtcTimestamp,
+    ArtifactId, ClientId, EntryId, Generation, MessageId, ProfileId, RootTreeId, SessionId,
+    ToolCallId, TurnId, UtcTimestamp,
 };
 use keith_protocol::{
     ClientCommand, CommandResult, CreateSession, ModelSelection, ProfileSummary, SessionSnapshot,
@@ -92,6 +92,11 @@ pub enum RuntimeEventKind {
     AssistantCompleted {
         message_id: MessageId,
         complete: bool,
+    },
+    AssistantFinalCommitted {
+        message_id: MessageId,
+        final_id: EntryId,
+        text: String,
     },
     ToolStarted {
         call_id: ToolCallId,

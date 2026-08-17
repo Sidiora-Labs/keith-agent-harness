@@ -214,7 +214,7 @@ impl OpenAiProvider {
                 .send(&body)
         }
         .map_err(map_http_error)?;
-        check_status(response.status().as_u16())?;
+        let response = check_provider_response(response, self.runtime.config.max_response_bytes)?;
         emit(
             sink,
             cancellation,
@@ -352,7 +352,7 @@ impl OpenAiResponsesProvider {
             http_request = http_request.header("chatgpt-account-id", &codex_account_id(secret)?);
         }
         let response = http_request.send(&body).map_err(map_http_error)?;
-        check_status(response.status().as_u16())?;
+        let response = check_provider_response(response, self.runtime.config.max_response_bytes)?;
         parse_openai_responses_stream(
             response,
             request,
@@ -446,7 +446,7 @@ impl AmazonBedrockProvider {
     ) -> Result<Usage, ProviderError> {
         let model = percent_encode_path_segment(&request.model);
         let path = format!("/model/{model}/converse");
-        let mut response = self
+        let response = self
             .runtime
             .agent
             .post(self.runtime.url(&path))
@@ -458,7 +458,8 @@ impl AmazonBedrockProvider {
             .header("accept", "application/json")
             .send(&bedrock_request(request)?)
             .map_err(map_http_error)?;
-        check_status(response.status().as_u16())?;
+        let mut response =
+            check_provider_response(response, self.runtime.config.max_response_bytes)?;
         emit(
             sink,
             cancellation,
@@ -690,7 +691,7 @@ impl AnthropicProvider {
             http_request.header(credential_header, secret).send(&body)
         }
         .map_err(map_http_error)?;
-        check_status(response.status().as_u16())?;
+        let response = check_provider_response(response, self.runtime.config.max_response_bytes)?;
         emit(
             sink,
             cancellation,
@@ -1388,12 +1389,9 @@ fn parse_openai_responses_stream(
                 finished = true;
             }
             "response.failed" | "error" => {
-                return Err(ProviderError::new(
-                    ProviderErrorKind::Unavailable,
-                    value["response"]["error"]["message"]
-                        .as_str()
-                        .or_else(|| value["error"]["message"].as_str())
-                        .unwrap_or("Responses provider stream failed"),
+                return Err(normalized_stream_error(
+                    &value,
+                    "Responses provider stream failed",
                 ));
             }
             _ => {}
@@ -1506,6 +1504,9 @@ fn handle_openai_event(
         return Ok(false);
     }
     let value: Value = serde_json::from_str(data).map_err(malformed)?;
+    if value.get("error").is_some() {
+        return Err(normalized_stream_error(&value, "provider stream failed"));
+    }
     if let Some(raw_usage) = value.get("usage").filter(|value| !value.is_null()) {
         *usage = usage_from_openai(raw_usage);
         emit(sink, cancellation, ModelEvent::Usage { usage: *usage })?;
@@ -1641,12 +1642,7 @@ fn handle_anthropic_event(
             }
         }
         "error" => {
-            return Err(ProviderError::new(
-                ProviderErrorKind::Unavailable,
-                value["error"]["message"]
-                    .as_str()
-                    .unwrap_or("provider stream failed"),
-            ));
+            return Err(normalized_stream_error(&value, "provider stream failed"));
         }
         _ => {}
     }
@@ -1919,6 +1915,61 @@ fn check_status(status: u16) -> Result<(), ProviderError> {
     }
 }
 
+fn check_provider_response(
+    mut response: Response<ureq::Body>,
+    max_bytes: u64,
+) -> Result<Response<ureq::Body>, ProviderError> {
+    let status = response.status().as_u16();
+    if (200..300).contains(&status) {
+        return Ok(response);
+    }
+    let body = read_bounded(&mut response, max_bytes).unwrap_or_default();
+    if let Ok(value) = serde_json::from_slice::<Value>(&body) {
+        let mut normalized = normalized_stream_error(&value, "provider request failed");
+        if normalized.kind == ProviderErrorKind::ContextOverflow {
+            normalized.provider_status = Some(status);
+            normalized.message =
+                "provider reported that the request exceeded its context window".into();
+            return Err(normalized);
+        }
+    }
+    Err(classify_http_status(
+        status,
+        format!("provider returned HTTP status {status}"),
+    ))
+}
+
+fn normalized_stream_error(value: &Value, fallback: &str) -> ProviderError {
+    let error = value
+        .get("error")
+        .or_else(|| value["response"].get("error"));
+    let code = error
+        .and_then(|error| error.get("code").or_else(|| error.get("type")))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let message = error
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or(fallback);
+    let normalized_code = code.to_ascii_lowercase();
+    let normalized_message = message.to_ascii_lowercase();
+    let kind = if matches!(
+        normalized_code.as_str(),
+        "context_length_exceeded"
+            | "context_window_exceeded"
+            | "prompt_too_long"
+            | "max_context_length"
+    ) || normalized_message.contains("context window")
+        || normalized_message.contains("context length")
+        || normalized_message.contains("too many input tokens")
+    {
+        ProviderErrorKind::ContextOverflow
+    } else {
+        ProviderErrorKind::Unavailable
+    };
+    ProviderError::new(kind, message)
+}
+
 fn map_http_error(error: HttpError) -> ProviderError {
     match error {
         HttpError::StatusCode(status) => {
@@ -2077,6 +2128,28 @@ mod tests {
             reasoning_effort: None,
             context,
         }
+    }
+
+    #[test]
+    fn openai_http_context_error_is_typed_before_retry_routing() {
+        let body = r#"{"error":{"code":"context_length_exceeded","message":"maximum context length exceeded"}}"#;
+        let server = TestServer::start(vec![format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )]);
+        let provider =
+            OpenAiProvider::new(ProviderHttpConfig::new(&server.base_url).unwrap()).unwrap();
+        let error = provider
+            .stream(
+                &request(),
+                &ProviderCredential::new("test-key").unwrap(),
+                &CancellationToken::default(),
+                &mut |_event| Ok(StreamControl::Continue),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ContextOverflow);
+        assert_eq!(error.provider_status, Some(400));
+        assert!(!error.allows_retry_or_fallback());
     }
 
     #[test]

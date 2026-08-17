@@ -275,6 +275,7 @@ fn serve_protocol_connection(
                     Sequence::new(2),
                     DaemonEvent::MessageCommitted(MessageProjection {
                         message_id,
+                        final_id: None,
                         role: MessageRole::Assistant,
                         text: "streamed response".into(),
                         committed: true,

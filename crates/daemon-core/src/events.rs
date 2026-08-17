@@ -365,13 +365,13 @@ fn apply_event(
             } else {
                 snapshot.messages.push(MessageProjection {
                     message_id: message_id.clone(),
+                    final_id: None,
                     role: MessageRole::Assistant,
                     text: text.clone(),
                     committed: false,
                 });
             }
         }
-        DaemonEvent::AgentActivity(_) => {}
         DaemonEvent::MessageCommitted(message) => {
             upsert(&mut snapshot.messages, message.clone(), |item| {
                 item.message_id.clone()
@@ -444,7 +444,8 @@ fn apply_event(
         DaemonEvent::ConfirmationResolved { confirmation_id } => snapshot
             .confirmations
             .retain(|item| item.confirmation_id != *confirmation_id),
-        DaemonEvent::CommandAccepted { .. }
+        DaemonEvent::AgentActivity(_)
+        | DaemonEvent::CommandAccepted { .. }
         | DaemonEvent::CommandRejected(_)
         | DaemonEvent::Warning(_)
         | DaemonEvent::Error(_) => {}
@@ -583,6 +584,7 @@ mod tests {
     fn committed(index: usize) -> DaemonEvent {
         DaemonEvent::MessageCommitted(MessageProjection {
             message_id: MessageId::new(),
+            final_id: None,
             role: MessageRole::Assistant,
             text: format!("message {index}"),
             committed: true,
@@ -668,6 +670,7 @@ mod tests {
         let mut replacement = snapshot(root, generation);
         replacement.messages.push(MessageProjection {
             message_id: MessageId::new(),
+            final_id: None,
             role: MessageRole::Assistant,
             text: "completed turn".into(),
             committed: true,

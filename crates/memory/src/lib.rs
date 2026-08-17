@@ -177,6 +177,9 @@ impl MemoryService {
         let compacted_through = match &emission.boundary.payload {
             SessionEntryPayload::Compaction {
                 compacted_through, ..
+            }
+            | SessionEntryPayload::CompactionCheckpoint {
+                compacted_through, ..
             } => compacted_through.clone(),
             _ => return Err(MemoryError::InvalidEmission),
         };
@@ -694,15 +697,17 @@ fn persist_ledger(root: &Path, ledger: &MemoryLedger) -> Result<(), MemoryError>
 
 #[cfg(test)]
 mod tests {
-    use keith_agent_types::{Generation, RootTreeId, WorkerId, WorkspaceId};
+    use keith_agent_types::{ActionId, Generation, RootTreeId, TurnId, WorkerId, WorkspaceId};
     use keith_session_store::{
-        CommitmentDraft, CompactionOutput, CompactionPolicy, MemoryCandidateDraft, NewSession,
-        SessionKind, SessionStore, StoredMessage, WriterIdentity,
+        CommitmentDraft, CompactionOutput, CompactionPolicy, CompactionTrigger,
+        MemoryCandidateDraft, NewSession, SessionKind, SessionStore, StoredMessage,
+        TurnTerminalStatus, WriterIdentity,
     };
     use tempfile::tempdir;
 
     use super::*;
 
+    #[allow(clippy::too_many_lines)]
     fn committed_emission(root: &Path, profile_id: ProfileId) -> (SessionId, CompactionEmission) {
         let store = SessionStore::open(root).unwrap();
         let session_id = SessionId::new();
@@ -745,20 +750,121 @@ mod tests {
                 },
             )
             .unwrap();
+        let first_turn = TurnId::new();
+        let first_action = ActionId::new();
+        writer
+            .accept_turn(
+                UtcTimestamp::UNIX_EPOCH,
+                first_action.clone(),
+                first_turn.clone(),
+                entry.id.clone(),
+            )
+            .unwrap();
+        writer
+            .append_final_candidate(
+                UtcTimestamp::UNIX_EPOCH,
+                first_turn.clone(),
+                StoredMessage {
+                    role: keith_session_store::MessageRole::Assistant,
+                    content: vec![keith_session_store::ContentBlock::Text {
+                        text: "First answer".into(),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+                10,
+                2,
+                0,
+            )
+            .unwrap();
+        writer
+            .append_finalized_turn(
+                UtcTimestamp::UNIX_EPOCH,
+                &first_turn,
+                StoredMessage {
+                    role: keith_session_store::MessageRole::Assistant,
+                    content: vec![keith_session_store::ContentBlock::Text {
+                        text: "unused fallback".into(),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+                TurnTerminalStatus::Failed,
+                false,
+                true,
+                Some(first_action),
+                Vec::new(),
+                None,
+            )
+            .unwrap();
+        let second_user = writer
+            .append(
+                writer.manifest().active_leaf.clone(),
+                UtcTimestamp::from_unix_millis(1),
+                SessionEntryPayload::UserMessage {
+                    message: StoredMessage {
+                        role: keith_session_store::MessageRole::User,
+                        content: vec![keith_session_store::ContentBlock::Text {
+                            text: "Continue with the implementation".into(),
+                        }],
+                        provider_metadata: BTreeMap::new(),
+                    },
+                },
+            )
+            .unwrap();
+        let second_turn = TurnId::new();
+        let second_action = ActionId::new();
+        writer
+            .accept_turn(
+                UtcTimestamp::from_unix_millis(1),
+                second_action.clone(),
+                second_turn.clone(),
+                second_user.id,
+            )
+            .unwrap();
+        writer
+            .append_finalized_turn(
+                UtcTimestamp::from_unix_millis(1),
+                &second_turn,
+                StoredMessage {
+                    role: keith_session_store::MessageRole::Assistant,
+                    content: vec![keith_session_store::ContentBlock::Text {
+                        text: "Second answer".into(),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+                TurnTerminalStatus::Completed,
+                true,
+                true,
+                Some(second_action),
+                Vec::new(),
+                None,
+            )
+            .unwrap();
         let request = writer
             .request_compaction(
-                10,
+                10_000,
                 CompactionPolicy {
                     trigger_tokens: 2,
                     target_tokens: 1,
                     ..CompactionPolicy::default()
                 },
+                None,
+                CompactionTrigger::Pressure,
             )
             .unwrap()
+            .unwrap();
+        let request = writer
+            .begin_compaction(request, UtcTimestamp::from_unix_millis(2))
             .unwrap();
         let output = CompactionOutput {
             request_id: request.id.clone(),
             session_summary: "summary".into(),
+            raw_provider_output: "summary".into(),
+            provider: Some("test-provider".into()),
+            model: Some("test-model".into()),
+            max_output_tokens: 128,
+            input_tokens: 100,
+            output_tokens: 10,
+            cached_input_tokens: 0,
             memory_candidates: vec![
                 MemoryCandidateDraft {
                     id: EntityId::new(),
@@ -786,7 +892,7 @@ mod tests {
             unresolved_items: vec!["Verify restart behavior".into()],
         };
         let emission = writer
-            .commit_compaction(&request, output, UtcTimestamp::from_unix_millis(1))
+            .commit_compaction(&request, output, UtcTimestamp::from_unix_millis(3))
             .unwrap();
         (session_id, emission)
     }

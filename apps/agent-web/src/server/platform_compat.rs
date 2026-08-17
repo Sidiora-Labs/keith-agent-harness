@@ -11,7 +11,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream;
 use keith_agent_types::{ProfileId, SessionId};
-use keith_protocol::ClientCommand;
+use keith_protocol::{ClientCommand, WireMessage};
 use ring::hmac;
 use serde::Deserialize;
 use serde_json::json;
@@ -284,6 +284,17 @@ pub(super) async fn command(
         }
     };
     let bridge = state.bridge.clone();
+    if headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|media_type| media_type.trim().starts_with("text/event-stream"))
+        })
+    {
+        return stream_command(bridge, profile, request, permit);
+    }
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let mut client = bridge.connect()?;
@@ -305,6 +316,58 @@ pub(super) async fn command(
             "Keith native runtime is unavailable",
         ),
     }
+}
+
+fn stream_command(
+    bridge: super::DaemonBridge,
+    profile: ProfileId,
+    request: PlatformCommand,
+    permit: OwnedSemaphorePermit,
+) -> Response {
+    let (sender, receiver) = mpsc::channel::<String>(super::EVENT_QUEUE_CAPACITY);
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let result = (|| {
+            let mut client = bridge.connect()?;
+            let envelope = client.envelope(request.session_id, request.command);
+            super::validate_command_scope(&mut client, &profile, &envelope)?;
+            let stream_sender = sender.clone();
+            let result = client.execute_streaming(envelope, &mut |message| {
+                if let Ok(encoded) = serde_json::to_string(&message) {
+                    let _ = stream_sender.blocking_send(encoded);
+                }
+            })?;
+            let encoded = serde_json::to_string(&WireMessage::CommandResult(result))?;
+            sender
+                .blocking_send(encoded)
+                .map_err(|_| BridgeError::Response)
+        })();
+        let _ = result;
+    });
+    let events = stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|payload| {
+            (
+                Ok::<Event, Infallible>(Event::default().data(payload)),
+                receiver,
+            )
+        })
+    });
+    let mut response = Sse::new(events)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-transform"),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 pub(super) async fn events(

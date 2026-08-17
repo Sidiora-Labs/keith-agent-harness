@@ -428,6 +428,7 @@ pub enum ToolErrorCategory {
 #[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolEffectState {
+    NotStarted,
     NotCommitted,
     Committed,
     Unknown,
@@ -437,6 +438,11 @@ pub enum ToolEffectState {
 #[serde(rename_all = "snake_case")]
 pub enum ToolFailureStatus {
     Error,
+    Denied,
+    Cancelled,
+    TimedOut,
+    OutputLimitExceeded,
+    NotStarted,
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]

@@ -392,6 +392,7 @@ pub enum ModelEvent {
 pub enum ProviderErrorKind {
     Authentication,
     InvalidRequest,
+    ContextOverflow,
     ContentRejected,
     Cancelled,
     RateLimited,
@@ -834,6 +835,7 @@ mod tests {
         for kind in [
             ProviderErrorKind::Authentication,
             ProviderErrorKind::InvalidRequest,
+            ProviderErrorKind::ContextOverflow,
             ProviderErrorKind::ContentRejected,
             ProviderErrorKind::Cancelled,
             ProviderErrorKind::MalformedResponse,

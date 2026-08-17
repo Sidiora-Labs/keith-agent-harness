@@ -15,11 +15,11 @@ use keith_action_store::{
 };
 use keith_agent_loop::{
     AgentEvent, AgentEventKind, AgentLoop, AgentLoopConfig, AgentLoopError, AgentOutcome,
-    ConservativeCompactor, NoSteering,
+    CompactionProgress, ContextCompactor, NoSteering,
 };
 use keith_agent_types::{
     ActionId, CURRENT_SCHEMA_VERSION, ClientId, EntityId, EntryId, Generation, KernelId, MessageId,
-    ProfileId, Revision, RootTreeId, SessionId, TimeZoneName, ToolEffectState, TurnId,
+    ProfileId, Revision, RootTreeId, SessionId, TimeZoneName, ToolEffectState, ToolFailure, TurnId,
     UtcTimestamp, WorkerId, WorkspaceId,
 };
 use keith_artifacts::{
@@ -100,7 +100,7 @@ use keith_provider_core::{
     CancellationToken, ContentBlock as ProviderContentBlock, ContextProvenance, ContextRecord,
     Message as ProviderMessage, MessageRole as ProviderMessageRole, ModelEvent, ModelRequest,
     ModelVisibility, PersistPolicy, ProviderError, ProviderErrorKind, RequestContext, StopReason,
-    StreamControl, Usage,
+    StreamControl, Usage, approximate_token_count,
 };
 use keith_resource_governor::{
     AcquireRequest, ExhaustionBehavior, ResourceCeiling, ResourceGovernor, ResourceKind,
@@ -121,10 +121,10 @@ use keith_scheduler::{
     JobState, JobUpdate, MissedRunPolicy, NewScheduledJob, ScheduleSpec, Scheduler, SchedulerConfig,
 };
 use keith_session_store::{
-    CompactionOutput, CompactionPolicy, CompactionRequest, ContentBlock as StoredContentBlock,
-    MessageRole as StoredMessageRole, Sensitivity, SessionEntry, SessionEntryPayload,
-    SessionManifest, SessionStore, SessionStoreError, StoredMessage, TurnTerminalStatus,
-    WriterIdentity,
+    CompactionFailureStage, CompactionOutput, CompactionPolicy, CompactionRequest,
+    CompactionTrigger, ContentBlock as StoredContentBlock, MessageRole as StoredMessageRole,
+    Sensitivity, SessionEntry, SessionEntryPayload, SessionManifest, SessionStore,
+    SessionStoreError, StoredMessage, TurnTerminalStatus, WriterIdentity,
 };
 use keith_skills::{SkillLimits, SkillRegistry, SkillRoots, SkillSelectionRequest};
 use keith_state_store::{EmbeddedStore, FileBackupHook, StoreError};
@@ -243,6 +243,91 @@ pub struct LocalRuntime {
     owner_instance: EntityId,
     system_modules: SystemModules,
     profile_modules: Mutex<BTreeMap<ProfileId, Arc<ProfileModules>>>,
+}
+
+struct RuntimeContextCompactor<'a> {
+    runtime: &'a LocalRuntime,
+    profile: &'a RegisteredProfile,
+    credentials: &'a dyn CredentialResolver,
+    task: &'a str,
+    active_user_source_id: Option<&'a str>,
+}
+
+impl ContextCompactor for RuntimeContextCompactor<'_> {
+    fn compact(
+        &self,
+        session: &mut keith_session_store::SessionWriter,
+        request: &ModelRequest,
+        trigger: CompactionTrigger,
+        cancellation: &CancellationToken,
+    ) -> Result<CompactionProgress, AgentLoopError> {
+        let previous_generation = session.manifest().compaction_generation;
+        let measured_tokens = approximate_token_count(request)
+            .map_err(|error| AgentLoopError::Compaction(error.to_string()))?;
+        let (estimated_tokens, policy) = match trigger {
+            CompactionTrigger::Pressure => (measured_tokens, CompactionPolicy::default()),
+            CompactionTrigger::ProviderOverflow | CompactionTrigger::Manual => {
+                let default = CompactionPolicy {
+                    target_tokens: 1_000,
+                    ..CompactionPolicy::default()
+                };
+                let trigger_tokens = default.target_tokens.saturating_add(1);
+                (
+                    measured_tokens.max(trigger_tokens),
+                    CompactionPolicy {
+                        trigger_tokens,
+                        ..default
+                    },
+                )
+            }
+        };
+        self.runtime
+            .compact_writer_with_policy(
+                self.profile,
+                session,
+                estimated_tokens,
+                policy,
+                self.credentials,
+                cancellation,
+                Some(&request.context.active_user_entry_id),
+                trigger,
+            )
+            .map_err(|error| AgentLoopError::Compaction(error.to_string()))?;
+        let current_generation = session.manifest().compaction_generation;
+        let rebuilt = if current_generation > previous_generation {
+            let turn_id = request
+                .context
+                .messages
+                .iter()
+                .flatten()
+                .find(|record| record.entry_id == request.context.active_user_entry_id)
+                .map(|record| record.turn_id.clone())
+                .ok_or_else(|| {
+                    AgentLoopError::Compaction(
+                        "active user metadata disappeared while rebuilding after compaction".into(),
+                    )
+                })?;
+            self.runtime
+                .model_request(
+                    self.profile,
+                    &session.manifest().session_id,
+                    &turn_id,
+                    &session.active_ancestry()?,
+                    request.tools.clone(),
+                    self.task,
+                    Some(&request.context.active_user_entry_id),
+                    self.active_user_source_id,
+                )
+                .map_err(|error| AgentLoopError::Compaction(error.to_string()))?
+        } else {
+            request.clone()
+        };
+        Ok(CompactionProgress {
+            request: rebuilt,
+            previous_generation,
+            current_generation,
+        })
+    }
 }
 
 struct SystemModules {
@@ -593,6 +678,27 @@ impl RuntimeBridge {
         tool: &str,
         arguments: &serde_json::Value,
     ) -> Result<serde_json::Value, BridgeFailure> {
+        if server.is_empty()
+            || !server
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(BridgeFailure {
+                code: "invalid".into(),
+                message: "MCP server must be a configured lowercase server id".into(),
+            });
+        }
+        if tool.is_empty()
+            || tool.len() > 128
+            || tool.chars().any(char::is_control)
+            || !arguments.is_object()
+        {
+            return Err(BridgeFailure {
+                code: "invalid".into(),
+                message: "MCP tool must be a bounded name and arguments must be a JSON object"
+                    .into(),
+            });
+        }
         let manifest = self.manifest(&context.session_id)?;
         let mut manager = self.mcp.lock().map_err(|_| BridgeFailure {
             code: "mcp".into(),
@@ -1163,6 +1269,7 @@ impl LocalRuntime {
         }
         runtime.register_child_roots()?;
         runtime.children.recover_active()?;
+        runtime.recover_unfinished_turn_obligations()?;
         Ok(runtime)
     }
 
@@ -1344,6 +1451,7 @@ impl LocalRuntime {
                 action_id,
             } => (source_id, action_id),
         };
+        let obligation_action_id = action_id.clone().unwrap_or_else(ActionId::new);
         let accepted_at = UtcTimestamp::now()?;
         let cancellation = CancellationToken::default();
         {
@@ -1400,6 +1508,15 @@ impl LocalRuntime {
                 return Err(error.into());
             }
         };
+        if let Err(error) = writer.accept_turn(
+            accepted_at,
+            obligation_action_id.clone(),
+            turn_id.clone(),
+            ingress_entry.id.clone(),
+        ) {
+            let _ = self.finish_turn_lease(session_id, &lease_id);
+            return Err(error.into());
+        }
         let request = match self.model_request(
             &profile,
             session_id,
@@ -1415,18 +1532,16 @@ impl LocalRuntime {
         ) {
             Ok(request) => request,
             Err(error) => {
-                let mut failures = vec![error.to_string()];
-                if let Err(release_error) = self.finish_turn_lease(session_id, &lease_id) {
-                    failures.push(release_error.to_string());
-                }
                 return self.finalize_accepted_failure(
                     writer,
                     &manifest,
                     session_id,
                     &turn_id,
-                    action_id.clone(),
+                    Some(obligation_action_id.clone()),
+                    &lease_id,
                     generation,
-                    failures,
+                    events,
+                    vec![error.to_string()],
                 );
             }
         };
@@ -1453,18 +1568,28 @@ impl LocalRuntime {
         let event_session_id = session_id.clone();
         let event_turn_id = turn_id.clone();
         let mut active_message_id = None;
+        let mut last_event_sequence = 0_u64;
+        let compactor = RuntimeContextCompactor {
+            runtime: self,
+            profile: &profile,
+            credentials: &resolver,
+            task: text,
+            active_user_source_id: matches!(ingress, TurnIngress::User { .. })
+                .then_some(ingress_source_id.as_str()),
+        };
         let mut agent_loop = AgentLoop::new(
             &self.models,
             &manifest.profile_id,
             &resolver,
             &tools,
             &spill,
-            &ConservativeCompactor,
+            &compactor,
             &NoSteering,
             &mut writer,
             AgentLoopConfig::default(),
         );
-        agent_loop.subscribe(move |event: &AgentEvent| {
+        agent_loop.subscribe(|event: &AgentEvent| {
+            last_event_sequence = event.sequence;
             let kind =
                 match &event.kind {
                     AgentEventKind::AgentStarted => Some(RuntimeEventKind::AgentStarted),
@@ -1490,6 +1615,13 @@ impl LocalRuntime {
                             message_id,
                             complete: *complete,
                         }),
+                    AgentEventKind::AssistantActivityCompleted { .. } => active_message_id
+                        .clone()
+                        .map(|message_id| RuntimeEventKind::AssistantCompleted {
+                            message_id,
+                            complete: false,
+                        }),
+                    AgentEventKind::FinalCandidateCompleted { .. } => None,
                     AgentEventKind::ToolStarted { call_id, name, .. } => {
                         Some(RuntimeEventKind::ToolStarted {
                             call_id: call_id.clone(),
@@ -1532,56 +1664,15 @@ impl LocalRuntime {
             }
         });
         let result = agent_loop.run(request, &cancellation);
+        drop(agent_loop);
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let bridge_effects = self.apply_kernel_effects(session_id, &mut writer);
-        let compaction_result = match (&result, &bridge_effects) {
-            (Ok(run), Ok(requested_target)) => {
-                let reported_tokens = run
-                    .usage
-                    .input_tokens
-                    .saturating_add(run.usage.output_tokens);
-                if let Some(target_tokens) = requested_target {
-                    self.compact_writer_with_policy(
-                        &profile,
-                        &mut writer,
-                        1,
-                        CompactionPolicy {
-                            trigger_tokens: 1,
-                            target_tokens: *target_tokens,
-                            ..CompactionPolicy::default()
-                        },
-                        &resolver,
-                        &cancellation,
-                    )
-                } else {
-                    self.compact_writer_if_needed(
-                        &profile,
-                        &mut writer,
-                        reported_tokens,
-                        &resolver,
-                        &cancellation,
-                    )
-                }
-            }
-            (Err(_), _) | (_, Err(_)) => Ok(Usage::default()),
-        };
-        let lease_release = self.finish_turn_lease(session_id, &lease_id);
         let mut terminal_failures = Vec::new();
         if let Err(error) = &result {
             terminal_failures.push(error.to_string());
         }
-        if let Err(error) = &bridge_effects {
-            terminal_failures.push(error.to_string());
-        }
-        if let Err(error) = &compaction_result {
-            terminal_failures.push(error.to_string());
-        }
-        if let Err(error) = &lease_release {
-            terminal_failures.push(error.to_string());
-        }
-        let execution_succeeded = terminal_failures.is_empty();
         let finalization_ancestry = writer.active_ancestry()?;
-        let artifact_ids = turn_artifact_ids(&finalization_ancestry);
+        let turn_entries = entries_for_turn(&finalization_ancestry, &turn_id);
+        let artifact_ids = turn_artifact_ids(turn_entries);
         let artifact_scope = ArtifactScope {
             root_tree_id: manifest.root_tree_id.clone(),
             session_id: session_id.clone(),
@@ -1602,41 +1693,80 @@ impl LocalRuntime {
         if !artifacts_persisted {
             terminal_failures.push("one or more turn artifacts were not durably persisted".into());
         }
-        let turn_succeeded = execution_succeeded && artifacts_persisted;
-        let final_text = if turn_succeeded {
-            result
-                .as_ref()
-                .ok()
-                .and_then(|run| run.final_text.clone())
-                .filter(|text| !text.trim().is_empty())
-                .unwrap_or_else(|| {
-                    "I couldn't produce a substantive final response for this turn.".into()
-                })
-        } else {
-            deterministic_failure_final(&terminal_failures, &finalization_ancestry)
-        };
+        let execution_succeeded = result.is_ok();
+        let fallback_text = deterministic_failure_final(&terminal_failures, turn_entries);
         let terminal_status = if matches!(&result, Err(AgentLoopError::Cancelled)) {
             TurnTerminalStatus::Cancelled
-        } else if turn_succeeded {
+        } else if result.is_ok() {
             TurnTerminalStatus::Completed
         } else {
             TurnTerminalStatus::Failed
         };
-        writer.append_finalized_turn(
+        let finalized = writer.append_finalized_turn(
             UtcTimestamp::now()?,
-            turn_id.clone(),
+            &turn_id,
             StoredMessage {
                 role: StoredMessageRole::Assistant,
-                content: vec![StoredContentBlock::Text { text: final_text }],
+                content: vec![StoredContentBlock::Text {
+                    text: fallback_text,
+                }],
                 provider_metadata: BTreeMap::new(),
             },
             terminal_status,
             execution_succeeded,
             artifacts_persisted,
-            action_id.clone(),
+            Some(obligation_action_id.clone()),
             artifact_ids,
             (!terminal_failures.is_empty()).then(|| terminal_failures.join("; ")),
-        )?;
+        );
+        let (final_entry, _) = match finalized {
+            Ok(committed) => committed,
+            Err(error) => {
+                let _ = self.finish_turn_lease(session_id, &lease_id);
+                return Err(error.into());
+            }
+        };
+
+        let mut maintenance_failures = Vec::new();
+        match self.apply_kernel_effects(session_id, &mut writer) {
+            Ok(Some(target_tokens)) => {
+                let target_tokens = target_tokens.clamp(1, u64::MAX - 1);
+                let forced_tokens = target_tokens + 1;
+                if let Err(error) = self.compact_writer_with_policy(
+                    &profile,
+                    &mut writer,
+                    forced_tokens,
+                    CompactionPolicy {
+                        trigger_tokens: forced_tokens,
+                        target_tokens,
+                        ..CompactionPolicy::default()
+                    },
+                    &resolver,
+                    &cancellation,
+                    None,
+                    CompactionTrigger::Manual,
+                ) {
+                    maintenance_failures.push(("manual_compaction", error.to_string()));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => maintenance_failures.push(("kernel_effects", error.to_string())),
+        }
+        if let Err(error) = self.finish_turn_lease(session_id, &lease_id) {
+            maintenance_failures.push(("lease_release", error.to_string()));
+        }
+        for (subsystem, detail) in maintenance_failures {
+            let parent = writer.manifest().active_leaf.clone();
+            let _ = writer.append(
+                parent,
+                UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+                SessionEntryPayload::MaintenanceFailure {
+                    turn_id: Some(turn_id.clone()),
+                    subsystem: subsystem.into(),
+                    detail,
+                },
+            );
+        }
         match &result {
             Ok(run) => {
                 let _ = self.record_provider_experience(
@@ -1655,12 +1785,7 @@ impl LocalRuntime {
                 let tokens = run
                     .usage
                     .input_tokens
-                    .saturating_add(run.usage.output_tokens)
-                    .saturating_add(
-                        compaction_result
-                            .as_ref()
-                            .map_or(0, |usage| usage.total_tokens()),
-                    );
+                    .saturating_add(run.usage.output_tokens);
                 if tokens > 0
                     && let (Ok(path), Ok(now)) =
                         (runtime_scope_path(&manifest), UtcTimestamp::now())
@@ -1701,6 +1826,21 @@ impl LocalRuntime {
                 );
             }
         }
+        let final_text = match &final_entry.payload {
+            SessionEntryPayload::AssistantFinal { message, .. } => stored_text(&message.content),
+            _ => unreachable!("turn finalizer returns an assistant final"),
+        };
+        events.emit(RuntimeEvent {
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            sequence: last_event_sequence.saturating_add(1),
+            kind: RuntimeEventKind::AssistantFinalCommitted {
+                message_id: active_message_id
+                    .unwrap_or_else(|| MessageId::from(final_entry.id.as_entity_id().clone())),
+                final_id: final_entry.id,
+                text: final_text,
+            },
+        });
         drop(writer);
         self.snapshot(session_id, generation, SessionState::Ready)
     }
@@ -1713,7 +1853,9 @@ impl LocalRuntime {
         session_id: &SessionId,
         turn_id: &TurnId,
         action_id: Option<ActionId>,
+        lease_id: &EntityId,
         generation: Generation,
+        _events: &mut dyn RuntimeEventSink,
         mut failures: Vec<String>,
     ) -> Result<SessionSnapshot, LocalRuntimeError> {
         let ancestry = writer.active_ancestry()?;
@@ -1738,10 +1880,11 @@ impl LocalRuntime {
         if !artifacts_persisted {
             failures.push("one or more turn artifacts were not durably persisted".into());
         }
-        let final_text = deterministic_failure_final(&failures, &ancestry);
+        let turn_entries = entries_for_turn(&ancestry, turn_id);
+        let final_text = deterministic_failure_final(&failures, turn_entries);
         writer.append_finalized_turn(
             UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
-            turn_id.clone(),
+            turn_id,
             StoredMessage {
                 role: StoredMessageRole::Assistant,
                 content: vec![StoredContentBlock::Text { text: final_text }],
@@ -1754,30 +1897,23 @@ impl LocalRuntime {
             artifact_ids,
             Some(failures.join("; ")),
         )?;
+        if let Err(error) = self.finish_turn_lease(session_id, lease_id) {
+            let parent = writer.manifest().active_leaf.clone();
+            let _ = writer.append(
+                parent,
+                UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+                SessionEntryPayload::MaintenanceFailure {
+                    turn_id: Some(turn_id.clone()),
+                    subsystem: "lease_release".into(),
+                    detail: error.to_string(),
+                },
+            );
+        }
         drop(writer);
         self.snapshot(session_id, generation, SessionState::Ready)
     }
 
-    fn compact_writer_if_needed(
-        &self,
-        profile: &RegisteredProfile,
-        writer: &mut keith_session_store::SessionWriter,
-        reported_tokens: u64,
-        credentials: &dyn CredentialResolver,
-        cancellation: &CancellationToken,
-    ) -> Result<Usage, LocalRuntimeError> {
-        let ancestry = writer.active_ancestry()?;
-        let estimated_tokens = reported_tokens.max(estimated_context_tokens(&ancestry));
-        self.compact_writer_with_policy(
-            profile,
-            writer,
-            estimated_tokens,
-            CompactionPolicy::default(),
-            credentials,
-            cancellation,
-        )
-    }
-
+    #[allow(clippy::too_many_arguments)]
     fn compact_writer_with_policy(
         &self,
         profile: &RegisteredProfile,
@@ -1786,11 +1922,20 @@ impl LocalRuntime {
         policy: CompactionPolicy,
         credentials: &dyn CredentialResolver,
         cancellation: &CancellationToken,
+        protected_user_entry_id: Option<&EntryId>,
+        trigger: CompactionTrigger,
     ) -> Result<Usage, LocalRuntimeError> {
         let ancestry = writer.active_ancestry()?;
-        let Some(request) = writer.request_compaction(estimated_tokens, policy)? else {
+        let Some(request) = writer.request_compaction(
+            estimated_tokens,
+            policy,
+            protected_user_entry_id,
+            trigger,
+        )?
+        else {
             return Ok(Usage::default());
         };
+        let request = writer.begin_compaction(request, UtcTimestamp::now()?)?;
         let (output, usage) = match self.model_compaction_output(
             profile,
             &request,
@@ -1799,21 +1944,33 @@ impl LocalRuntime {
             cancellation,
         ) {
             Ok(compaction) => compaction,
-            Err(error) if cancellation.is_cancelled() => return Err(error),
-            Err(_) => (
-                conservative_compaction_output(&request, &ancestry),
-                Usage::default(),
-            ),
+            Err(error) => {
+                let _ = writer.fail_compaction(
+                    &request,
+                    CompactionFailureStage::Summary,
+                    error.to_string(),
+                    UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+                );
+                return Err(error);
+            }
         };
         let emission = writer.commit_compaction(&request, output, UtcTimestamp::now()?)?;
-        self.profile_modules(profile)?
-            .memory
-            .apply_compaction(
-                &writer.manifest().session_id,
-                emission,
-                UtcTimestamp::now()?,
-            )
-            .map_err(module_error)?;
+        if let Err(error) = self.profile_modules(profile)?.memory.apply_compaction(
+            &writer.manifest().session_id,
+            emission,
+            UtcTimestamp::now()?,
+        ) {
+            let parent = writer.manifest().active_leaf.clone();
+            let _ = writer.append(
+                parent,
+                UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+                SessionEntryPayload::MaintenanceFailure {
+                    turn_id: None,
+                    subsystem: "memory_projection".into(),
+                    detail: error.to_string(),
+                },
+            );
+        }
         Ok(usage)
     }
 
@@ -1850,6 +2007,7 @@ impl LocalRuntime {
         Ok(requested_target)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn model_compaction_output(
         &self,
         profile: &RegisteredProfile,
@@ -1858,14 +2016,42 @@ impl LocalRuntime {
         credentials: &dyn CredentialResolver,
         cancellation: &CancellationToken,
     ) -> Result<(CompactionOutput, Usage), LocalRuntimeError> {
+        let source_ids = request.source_entries.iter().collect::<BTreeSet<_>>();
+        let selected = ancestry
+            .iter()
+            .filter(|entry| source_ids.contains(&entry.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if selected.len() != request.source_entries.len()
+            || selected
+                .iter()
+                .map(|entry| &entry.id)
+                .ne(request.source_entries.iter())
+        {
+            return Err(LocalRuntimeError::Invalid(
+                "compaction source entries no longer match the measured selection".into(),
+            ));
+        }
+        let summary_user_entry_id = selected
+            .iter()
+            .rev()
+            .find_map(|entry| {
+                matches!(entry.payload, SessionEntryPayload::UserMessage { .. })
+                    .then_some(&entry.id)
+            })
+            .ok_or_else(|| {
+                LocalRuntimeError::Invalid(
+                    "compaction selection has no attributable user ingress".into(),
+                )
+            })?;
         let mut model_request = self.model_request(
             profile,
             &request.session_id,
             &TurnId::new(),
-            ancestry,
+            &selected,
             Vec::new(),
             COMPACTION_PROMPT,
-            None,
+            Some(summary_user_entry_id),
             None,
         )?;
         push_system_context(
@@ -1885,58 +2071,57 @@ impl LocalRuntime {
         model_request.tools.clear();
         model_request.max_output_tokens = Some(COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS);
 
-        loop {
-            let mut summary = String::new();
-            let mut stop_reason = None;
-            let attempt = self.models.stream_with_fallback(
-                &profile.profile.id,
-                ModelPurpose::Summarization,
-                &model_request,
-                credentials,
-                cancellation,
-                &mut |event| {
-                    match event {
-                        ModelEvent::TextDelta { text } => summary.push_str(&text),
-                        ModelEvent::Finished { reason } => stop_reason = Some(reason),
-                        ModelEvent::ToolCallStarted { .. }
-                        | ModelEvent::ToolCallArgumentsDelta { .. }
-                        | ModelEvent::ToolCallCompleted { .. } => {
-                            return Err(ProviderError::new(
-                                ProviderErrorKind::MalformedResponse,
-                                "compaction response attempted a tool call",
-                            ));
-                        }
-                        ModelEvent::Started { .. }
-                        | ModelEvent::ReasoningDelta { .. }
-                        | ModelEvent::Usage { .. } => {}
+        let mut summary = String::new();
+        let mut stop_reason = None;
+        let mut raw_events = Vec::new();
+        let attempt = self.models.stream_with_fallback(
+            &profile.profile.id,
+            ModelPurpose::Summarization,
+            &model_request,
+            credentials,
+            cancellation,
+            &mut |event: ModelEvent| {
+                raw_events.push(event.clone());
+                match event {
+                    ModelEvent::TextDelta { text } => summary.push_str(&text),
+                    ModelEvent::Finished { reason } => stop_reason = Some(reason),
+                    ModelEvent::ToolCallStarted { .. }
+                    | ModelEvent::ToolCallArgumentsDelta { .. }
+                    | ModelEvent::ToolCallCompleted { .. } => {
+                        return Err(ProviderError::new(
+                            ProviderErrorKind::MalformedResponse,
+                            "compaction response attempted a tool call",
+                        ));
                     }
-                    Ok(StreamControl::Continue)
-                },
-            );
-            match attempt {
-                Ok(attempt)
-                    if matches!(
-                        stop_reason,
-                        Some(StopReason::EndTurn | StopReason::MaxTokens | StopReason::Other)
-                    ) && !summary.trim().is_empty() =>
-                {
-                    let output = compaction_output_from_summary(request, &summary);
-                    return Ok((output, attempt.usage));
+                    ModelEvent::Started { .. }
+                    | ModelEvent::ReasoningDelta { .. }
+                    | ModelEvent::Usage { .. } => {}
                 }
-                Ok(_) => {
-                    return Err(LocalRuntimeError::Provider(ProviderError::new(
-                        ProviderErrorKind::MalformedResponse,
-                        "compaction response did not contain a completed summary",
-                    )));
-                }
-                Err(error)
-                    if is_context_overflow(&error)
-                        && remove_oldest_compaction_message(&mut model_request) =>
-                {
-                    model_request.request_id = EntityId::new();
-                }
-                Err(error) => return Err(error.into()),
+                Ok(StreamControl::Continue)
+            },
+        );
+        match attempt {
+            Ok(attempt)
+                if matches!(
+                    stop_reason,
+                    Some(StopReason::EndTurn | StopReason::MaxTokens | StopReason::Other)
+                ) && !summary.trim().is_empty() =>
+            {
+                let mut output = compaction_output_from_summary(request, &summary);
+                output.raw_provider_output = serde_json::to_string(&raw_events)?;
+                output.provider = Some(attempt.provider.clone());
+                output.model = Some(attempt.model.clone());
+                output.max_output_tokens = COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS;
+                output.input_tokens = attempt.usage.input_tokens;
+                output.output_tokens = attempt.usage.output_tokens;
+                output.cached_input_tokens = attempt.usage.cached_input_tokens;
+                Ok((output, attempt.usage))
             }
+            Ok(_) => Err(LocalRuntimeError::Provider(ProviderError::new(
+                ProviderErrorKind::MalformedResponse,
+                "compaction response did not contain a completed summary",
+            ))),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -3241,6 +3426,109 @@ impl LocalRuntime {
             .transpose()
     }
 
+    fn recover_unfinished_turn_obligations(&self) -> Result<(), LocalRuntimeError> {
+        for manifest in self.sessions()? {
+            self.sessions.recover(
+                &manifest.session_id,
+                UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+            )?;
+            let manifest = self.sessions.manifest(&manifest.session_id)?;
+            let Some(leaf) = &manifest.active_leaf else {
+                continue;
+            };
+            let entries = self
+                .sessions
+                .load_index(&manifest.session_id)?
+                .ancestry(leaf)?;
+            let terminal_turns = entries
+                .iter()
+                .filter_map(|entry| match &entry.payload {
+                    SessionEntryPayload::TerminalTurn { turn_id, .. } => Some(turn_id.clone()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+            let unfinished = entries.iter().rev().find_map(|entry| match &entry.payload {
+                SessionEntryPayload::TurnObligation {
+                    action_id,
+                    turn_id,
+                    user_entry_id,
+                    state:
+                        keith_session_store::TurnObligationState::Accepted
+                        | keith_session_store::TurnObligationState::Running { .. }
+                        | keith_session_store::TurnObligationState::FinalizationPending { .. },
+                } if !terminal_turns.contains(turn_id) => {
+                    Some((action_id.clone(), turn_id.clone(), user_entry_id.clone()))
+                }
+                _ => None,
+            });
+            let Some((action_id, turn_id, ingress_entry_id)) = unfinished else {
+                continue;
+            };
+            let mut writer = self.sessions.acquire_writer(
+                &manifest.session_id,
+                self.writer_identity(
+                    Generation::new(1),
+                    UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+                ),
+            )?;
+            let active = writer.active_ancestry()?;
+            let start = active
+                .iter()
+                .position(|entry| entry.id == ingress_entry_id)
+                .unwrap_or(0);
+            repair_unknown_tool_outcomes(
+                &mut writer,
+                &active[start..],
+                UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+            )?;
+            let recovered = writer.active_ancestry()?;
+            let start = recovered
+                .iter()
+                .position(|entry| entry.id == ingress_entry_id)
+                .unwrap_or(0);
+            let turn_entries = &recovered[start..];
+            let artifact_ids = turn_artifact_ids(turn_entries);
+            let scope = ArtifactScope {
+                root_tree_id: manifest.root_tree_id.clone(),
+                session_id: manifest.session_id.clone(),
+                profile_id: manifest.profile_id.clone(),
+            };
+            let artifacts_persisted = artifact_ids.iter().all(|artifact_id| {
+                self.artifacts
+                    .inspect(
+                        &scope,
+                        &ArtifactReference {
+                            id: artifact_id.clone(),
+                            root_tree_id: manifest.root_tree_id.clone(),
+                            profile_id: manifest.profile_id.clone(),
+                        },
+                    )
+                    .is_ok()
+            });
+            let detail =
+                "the runtime restarted before this accepted turn reached its terminal commit";
+            writer.append_finalized_turn(
+                UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+                &turn_id,
+                StoredMessage {
+                    role: StoredMessageRole::Assistant,
+                    content: vec![StoredContentBlock::Text {
+                        text: deterministic_failure_final(&[detail.into()], turn_entries),
+                    }],
+                    provider_metadata: BTreeMap::new(),
+                },
+                TurnTerminalStatus::Failed,
+                false,
+                artifacts_persisted,
+                Some(action_id),
+                artifact_ids,
+                Some(detail.into()),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn finalize_interrupted_action(
         &self,
         action: &SessionAction,
@@ -3278,7 +3566,8 @@ impl LocalRuntime {
         let turn_id = entries[accepted_index..]
             .iter()
             .find_map(|entry| match &entry.payload {
-                SessionEntryPayload::AssistantFinal { turn_id, .. }
+                SessionEntryPayload::AssistantFinalCandidate { turn_id, .. }
+                | SessionEntryPayload::AssistantFinal { turn_id, .. }
                     if !terminal_turns.contains(turn_id) =>
                 {
                     Some(turn_id.clone())
@@ -3289,7 +3578,43 @@ impl LocalRuntime {
                 _ => None,
             })
             .unwrap_or_else(TurnId::new);
-        let artifact_ids = turn_artifact_ids(&entries[accepted_index..]);
+        let detail =
+            "the runtime restarted after accepting this action and before terminal finalization";
+        let mut writer = self.sessions.acquire_writer(
+            &action.session_id,
+            self.writer_identity(
+                generation,
+                UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+            ),
+        )?;
+        if !entries.iter().any(|entry| {
+            matches!(
+                &entry.payload,
+                SessionEntryPayload::TurnObligation {
+                    turn_id: obligation_turn,
+                    ..
+                } if obligation_turn == &turn_id
+            )
+        }) {
+            writer.accept_turn(
+                UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+                action.id.clone(),
+                turn_id.clone(),
+                entries[accepted_index].id.clone(),
+            )?;
+        }
+        repair_unknown_tool_outcomes(
+            &mut writer,
+            &entries[accepted_index..],
+            UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+        )?;
+        let recovered_entries = writer.active_ancestry()?;
+        let recovered_start = recovered_entries
+            .iter()
+            .position(|entry| entry.id == entries[accepted_index].id)
+            .unwrap_or(0);
+        let turn_entries = &recovered_entries[recovered_start..];
+        let artifact_ids = turn_artifact_ids(turn_entries);
         let scope = ArtifactScope {
             root_tree_id: manifest.root_tree_id.clone(),
             session_id: action.session_id.clone(),
@@ -3307,22 +3632,13 @@ impl LocalRuntime {
                 )
                 .is_ok()
         });
-        let detail =
-            "the runtime restarted after accepting this action and before terminal finalization";
-        let mut writer = self.sessions.acquire_writer(
-            &action.session_id,
-            self.writer_identity(
-                generation,
-                UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
-            ),
-        )?;
         writer.append_finalized_turn(
             UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
-            turn_id,
+            &turn_id,
             StoredMessage {
                 role: StoredMessageRole::Assistant,
                 content: vec![StoredContentBlock::Text {
-                    text: deterministic_failure_final(&[detail.into()], &entries),
+                    text: deterministic_failure_final(&[detail.into()], turn_entries),
                 }],
                 provider_metadata: BTreeMap::new(),
             },
@@ -4995,9 +5311,13 @@ impl LocalRuntime {
             active_goal_persistence,
             None,
         );
-        let compacted_at = entries
-            .iter()
-            .rposition(|entry| matches!(entry.payload, SessionEntryPayload::Compaction { .. }));
+        let compacted_at = entries.iter().rposition(|entry| {
+            matches!(
+                entry.payload,
+                SessionEntryPayload::Compaction { .. }
+                    | SessionEntryPayload::CompactionCheckpoint { .. }
+            )
+        });
         let (active_user_session_id, active_user_entry) =
             self.resolve_active_user_entry(session_id, entries, active_user_entry_id)?;
         let active_user_text = match &active_user_entry.payload {
@@ -5005,15 +5325,33 @@ impl LocalRuntime {
             _ => unreachable!("active user resolution returns only user messages"),
         };
         let mut history = CompiledProviderHistory::default();
+        let surface_entries = compacted_at.map(|index| provider_surface_tail(entries, index));
         if let Some(index) = compacted_at {
+            let shadowed_entries = match &entries[index].payload {
+                SessionEntryPayload::CompactionCheckpoint { source_entries, .. } => {
+                    let first = source_entries
+                        .first()
+                        .and_then(|source| entries.iter().position(|entry| &entry.id == source))
+                        .unwrap_or(0);
+                    let last = source_entries
+                        .last()
+                        .and_then(|source| entries.iter().position(|entry| &entry.id == source))
+                        .unwrap_or(index.saturating_sub(1));
+                    &entries[first..=last]
+                }
+                SessionEntryPayload::Compaction { .. } => &entries[..index],
+                _ => unreachable!("compacted_at only selects compaction payloads"),
+            };
             history.extend(recent_compacted_user_history(
-                &entries[..index],
+                shadowed_entries,
                 COMPACTION_USER_MESSAGE_MAX_TOKENS,
                 session_id,
                 turn_id,
                 &active_user_entry.id,
             ));
-            if let SessionEntryPayload::Compaction { summary, .. } = &entries[index].payload {
+            if let SessionEntryPayload::Compaction { summary, .. }
+            | SessionEntryPayload::CompactionCheckpoint { summary, .. } = &entries[index].payload
+            {
                 push_system_context(
                     &mut system,
                     &mut system_context,
@@ -5030,7 +5368,7 @@ impl LocalRuntime {
                 );
             }
         }
-        let context_entries = compacted_at.map_or(entries, |index| &entries[index + 1..]);
+        let context_entries = surface_entries.as_deref().unwrap_or(entries);
         for entry in context_entries {
             if let SessionEntryPayload::ControllerGuidance {
                 source_id, text, ..
@@ -5827,95 +6165,14 @@ fn compaction_output_from_summary(
     truncate_utf8(&mut daily_entry, request.max_candidate_bytes.min(4 * 1_024));
     CompactionOutput {
         request_id: request.id.clone(),
+        raw_provider_output: summary.clone(),
         session_summary: summary,
-        memory_candidates: Vec::new(),
-        daily_entry: Some(daily_entry),
-        open_commitments: Vec::new(),
-        unresolved_items: Vec::new(),
-    }
-}
-
-fn conservative_compaction_output(
-    request: &CompactionRequest,
-    ancestry: &[SessionEntry],
-) -> CompactionOutput {
-    let start = ancestry
-        .iter()
-        .position(|entry| entry.id == request.range_start)
-        .unwrap_or(0);
-    let end = ancestry
-        .iter()
-        .position(|entry| entry.id == request.range_end)
-        .unwrap_or_else(|| ancestry.len().saturating_sub(1));
-    let mut lines = Vec::new();
-    if let Some(previous_boundary) = &request.previous_boundary
-        && let Some(SessionEntry {
-            payload: SessionEntryPayload::Compaction { summary, .. },
-            ..
-        }) = ancestry.iter().find(|entry| entry.id == *previous_boundary)
-    {
-        lines.push(format!("Earlier checkpoint: {summary}"));
-    }
-    for entry in ancestry.get(start..=end).unwrap_or_default() {
-        let line = match &entry.payload {
-            SessionEntryPayload::UserMessage { message } => {
-                format!("User: {}", stored_text(&message.content))
-            }
-            SessionEntryPayload::AssistantMessage { message } => {
-                format!("Assistant: {}", stored_text(&message.content))
-            }
-            SessionEntryPayload::ToolResult {
-                content, is_error, ..
-            } => format!(
-                "Tool {}: {}",
-                if *is_error { "error" } else { "result" },
-                stored_text(content)
-            ),
-            SessionEntryPayload::GoalChanged { goal_id, state } => {
-                format!("Goal {goal_id} changed to {state}")
-            }
-            SessionEntryPayload::PlanChanged { plan_id, revision } => {
-                format!("Plan {plan_id} changed at revision {revision}")
-            }
-            _ => continue,
-        };
-        if line.trim_end_matches(['\n', '\r']).is_empty() {
-            continue;
-        }
-        lines.push(line);
-    }
-    let target_bytes =
-        usize::try_from(request.target_tokens.saturating_mul(4)).unwrap_or(usize::MAX);
-    let summary_limit = request.max_summary_bytes.min(target_bytes);
-    let mut summary = String::from(
-        "Bounded selected-branch transcript retained during deterministic compaction:\n",
-    );
-    let available = summary_limit.saturating_sub(summary.len());
-    let per_line = if lines.is_empty() {
-        0
-    } else {
-        available.saturating_sub(lines.len()) / lines.len()
-    };
-    for line in lines {
-        if per_line == 0 {
-            break;
-        }
-        summary.push_str(&bounded_compaction_line(line, per_line));
-        summary.push('\n');
-    }
-    truncate_utf8(&mut summary, summary_limit);
-    if summary.trim().is_empty() {
-        summary = format!(
-            "Selected branch compacted through entry {}",
-            request.range_end
-        );
-        truncate_utf8(&mut summary, summary_limit);
-    }
-    let mut daily_entry = summary.clone();
-    truncate_utf8(&mut daily_entry, request.max_candidate_bytes.min(4 * 1_024));
-    CompactionOutput {
-        request_id: request.id.clone(),
-        session_summary: summary,
+        provider: None,
+        model: None,
+        max_output_tokens: COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS,
+        input_tokens: 0,
+        output_tokens: 0,
+        cached_input_tokens: 0,
         memory_candidates: Vec::new(),
         daily_entry: Some(daily_entry),
         open_commitments: Vec::new(),
@@ -5935,32 +6192,6 @@ fn validate_prompt_text(text: &str) -> Result<(), LocalRuntimeError> {
         )));
     }
     Ok(())
-}
-
-fn estimated_context_tokens(ancestry: &[SessionEntry]) -> u64 {
-    let boundary = ancestry
-        .iter()
-        .rposition(|entry| matches!(entry.payload, SessionEntryPayload::Compaction { .. }));
-    let mut estimated = boundary
-        .and_then(|index| match &ancestry[index].payload {
-            SessionEntryPayload::Compaction { summary, .. } => Some(estimated_text_tokens(summary)),
-            _ => None,
-        })
-        .unwrap_or(0);
-    for entry in boundary.map_or(ancestry, |index| &ancestry[index + 1..]) {
-        let tokens = match &entry.payload {
-            SessionEntryPayload::UserMessage { message }
-            | SessionEntryPayload::AssistantMessage { message } => {
-                estimated_text_tokens(&stored_text(&message.content))
-            }
-            SessionEntryPayload::ToolResult { content, .. } => {
-                estimated_text_tokens(&stored_text(content))
-            }
-            _ => 0,
-        };
-        estimated = estimated.saturating_add(tokens);
-    }
-    estimated
 }
 
 fn estimated_text_tokens(text: &str) -> u64 {
@@ -6052,38 +6283,44 @@ fn recent_compacted_user_history(
     history
 }
 
-fn remove_oldest_compaction_message(request: &mut ModelRequest) -> bool {
-    if request.messages.len() <= 1 {
-        return false;
-    }
-    request.messages.remove(0);
-    request.context.messages.remove(0);
-    while request.messages.len() > 1 && request.messages[0].role != ProviderMessageRole::User {
-        request.messages.remove(0);
-        request.context.messages.remove(0);
-    }
-    true
-}
-
-fn is_context_overflow(error: &RegistryError) -> bool {
-    matches!(error, RegistryError::Provider(provider)
-        if provider.kind == ProviderErrorKind::InvalidRequest
-            && (provider.message.to_ascii_lowercase().contains("context")
-                || provider.message.to_ascii_lowercase().contains("token limit")))
-}
-
-fn bounded_compaction_line(mut line: String, max_bytes: usize) -> String {
-    const MARKER: &str = "...[truncated]";
-    if line.len() <= max_bytes {
-        return line;
-    }
-    if max_bytes <= MARKER.len() {
-        truncate_utf8(&mut line, max_bytes);
-        return line;
-    }
-    truncate_utf8(&mut line, max_bytes - MARKER.len());
-    line.push_str(MARKER);
-    line
+fn provider_surface_tail(entries: &[SessionEntry], boundary_index: usize) -> Vec<SessionEntry> {
+    let SessionEntryPayload::CompactionCheckpoint {
+        compaction_id,
+        compacted_through,
+        ..
+    } = &entries[boundary_index].payload
+    else {
+        return entries.iter().skip(boundary_index + 1).cloned().collect();
+    };
+    let compacted_end = entries[..boundary_index]
+        .iter()
+        .position(|entry| &entry.id == compacted_through)
+        .unwrap_or(boundary_index);
+    let started = entries[compacted_end.saturating_add(1)..boundary_index]
+        .iter()
+        .position(|entry| {
+            matches!(
+                &entry.payload,
+                SessionEntryPayload::CompactionStarted {
+                    compaction_id: started_id,
+                    ..
+                } if started_id == compaction_id
+            )
+        })
+        .map_or(boundary_index, |offset| compacted_end + 1 + offset);
+    entries[compacted_end.saturating_add(1)..started]
+        .iter()
+        .chain(entries.iter().skip(boundary_index + 1))
+        .filter(|entry| {
+            !matches!(
+                entry.payload,
+                SessionEntryPayload::CompactionStarted { .. }
+                    | SessionEntryPayload::CompactionSummary { .. }
+                    | SessionEntryPayload::CompactionEnded { .. }
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 fn truncate_utf8(value: &mut String, max_bytes: usize) {
@@ -6270,6 +6507,7 @@ const fn experience_failure(error: &AgentLoopError) -> FailureCategory {
         AgentLoopError::Registry(_) => FailureCategory::Unavailable,
         AgentLoopError::TurnBudget => FailureCategory::Verification,
         AgentLoopError::Session(_)
+        | AgentLoopError::Compaction(_)
         | AgentLoopError::Io(_)
         | AgentLoopError::Artifact(_)
         | AgentLoopError::Time(_)
@@ -6288,6 +6526,7 @@ const fn telemetry_failure(error: &AgentLoopError) -> TelemetryFailureClass {
         AgentLoopError::Registry(_) => TelemetryFailureClass::Unavailable,
         AgentLoopError::TurnBudget => TelemetryFailureClass::ResourceExhausted,
         AgentLoopError::Session(_)
+        | AgentLoopError::Compaction(_)
         | AgentLoopError::Io(_)
         | AgentLoopError::Artifact(_)
         | AgentLoopError::Time(_)
@@ -6305,6 +6544,7 @@ fn deterministic_failure_final(failures: &[String], entries: &[SessionEntry]) ->
         _ => None,
     }) {
         let effect = match failure.effect_state {
+            ToolEffectState::NotStarted => "The tool body did not start.",
             ToolEffectState::NotCommitted => "No external state was changed.",
             ToolEffectState::Committed => {
                 "The tool reports that its external effect was committed."
@@ -6328,6 +6568,64 @@ fn deterministic_failure_final(failures: &[String], entries: &[SessionEntry]) ->
     format!(
         "I couldn't complete this turn because {detail}. The failure was finalized locally, and no identical state-changing operation will be retried without checking its effect first."
     )
+}
+
+fn entries_for_turn<'a>(entries: &'a [SessionEntry], turn_id: &TurnId) -> &'a [SessionEntry] {
+    let user_entry_id = entries.iter().find_map(|entry| match &entry.payload {
+        SessionEntryPayload::TurnObligation {
+            turn_id: obligation_turn,
+            user_entry_id,
+            ..
+        } if obligation_turn == turn_id => Some(user_entry_id),
+        _ => None,
+    });
+    user_entry_id
+        .and_then(|user_entry_id| entries.iter().position(|entry| &entry.id == user_entry_id))
+        .map_or(entries, |start| &entries[start..])
+}
+
+fn repair_unknown_tool_outcomes(
+    writer: &mut keith_session_store::SessionWriter,
+    entries: &[SessionEntry],
+    timestamp: UtcTimestamp,
+) -> Result<(), SessionStoreError> {
+    let completed = entries
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            SessionEntryPayload::ToolResult { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    for (call_id, name) in entries.iter().filter_map(|entry| match &entry.payload {
+        SessionEntryPayload::ToolCall { call_id, name, .. } if !completed.contains(call_id) => {
+            Some((call_id.clone(), name.clone()))
+        }
+        _ => None,
+    }) {
+        let mut failure = ToolFailure::execution(
+            format!(
+                "Keith restarted after recording {name} but before its terminal result became durable"
+            ),
+            false,
+        );
+        failure.error.code = "TOOL_OUTCOME_UNKNOWN".into();
+        failure.error.reason = "tool_outcome_unknown_after_restart".into();
+        failure.retry.reason =
+            "Inspect external state before deciding whether the operation can be retried".into();
+        writer.append(
+            writer.manifest().active_leaf.clone(),
+            timestamp,
+            SessionEntryPayload::ToolResult {
+                call_id,
+                content: vec![StoredContentBlock::Text {
+                    text: "The tool outcome is unknown because the runtime restarted before its result committed. Inspect state before retrying.".into(),
+                }],
+                is_error: true,
+                failure: Some(failure),
+            },
+        )?;
+    }
+    Ok(())
 }
 
 fn turn_artifact_ids(entries: &[SessionEntry]) -> Vec<keith_agent_types::ArtifactId> {
@@ -6691,6 +6989,8 @@ fn message_projection(
 ) -> MessageProjection {
     MessageProjection {
         message_id: MessageId::from(entry.id.as_entity_id().clone()),
+        final_id: matches!(entry.payload, SessionEntryPayload::AssistantFinal { .. })
+            .then(|| entry.id.clone()),
         role,
         text: stored_text(content),
         committed: true,
@@ -7980,12 +8280,12 @@ impl KernelTool {
                 .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"));
         let (description, uses_network) = if trusted_fallback {
             (
-                "Execute code in a persistent Python reasoning environment with the same trusted workspace authority as the enabled bash tool. Variables survive turns and compaction; use rlm(...) for admitted child work and typed host operations.",
+                "Execute code in a persistent Python reasoning environment with the same trusted workspace authority as the enabled bash tool. Variables survive turns and compaction; use rlm(...) for admitted child work and typed host operations. Call rlm.help() for exact bridge signatures; rlm.call_mcp requires a configured server id, tool name, and Python dict arguments.",
                 true,
             )
         } else {
             (
-                "Execute code in a persistent isolated Python reasoning environment. Variables survive turns and compaction; use rlm(...) for admitted child work and typed host operations.",
+                "Execute code in a persistent isolated Python reasoning environment. Variables survive turns and compaction; use rlm(...) for admitted child work and typed host operations. Call rlm.help() for exact bridge signatures; rlm.call_mcp requires a configured server id, tool name, and Python dict arguments.",
                 false,
             )
         };
@@ -8017,6 +8317,83 @@ impl KernelTool {
             .map(PathBuf::from)
             .find(|path| path.is_file())
     }
+
+    fn spec(&self) -> Result<KernelSpec, ToolExecutionError> {
+        let (isolation, network) = if self.trusted_fallback {
+            (KernelIsolation::TrustedLocal, KernelNetwork::Allowed)
+        } else {
+            (KernelIsolation::Untrusted, KernelNetwork::Denied)
+        };
+        Ok(KernelSpec {
+            session_id: self.session_id.clone(),
+            runtime: KernelRuntime::Python {
+                executable: Self::python().ok_or_else(|| {
+                    ToolExecutionError::new("Python kernel runtime is unavailable")
+                })?,
+            },
+            working_directory: self.workspace_root.clone(),
+            isolation,
+            network,
+            limits: KernelLimits::default(),
+            allowed_bridge: BTreeSet::from([
+                BridgeCapability::Children,
+                BridgeCapability::Messages,
+                BridgeCapability::Goals,
+                BridgeCapability::Mcp,
+                BridgeCapability::Compaction,
+                BridgeCapability::Artifacts,
+            ]),
+        })
+    }
+
+    fn launch(
+        &self,
+        spec: &KernelSpec,
+        cancellation: &CancellationToken,
+    ) -> Result<(KernelId, Option<EntityId>, Option<String>), ToolExecutionError> {
+        let now = UtcTimestamp::now().map_err(tool_error)?;
+        let latest = self
+            .broker
+            .latest_snapshot(&self.session_id)
+            .map_err(tool_error)?;
+        if let Some(snapshot) = latest {
+            return match self
+                .broker
+                .restore(&snapshot.id, spec.clone(), cancellation, now)
+            {
+                Ok(id) => Ok((id, Some(snapshot.id), None)),
+                Err(error) => Ok((
+                    self.broker.start(spec.clone(), now).map_err(tool_error)?,
+                    None,
+                    Some(error.to_string()),
+                )),
+            };
+        }
+        Ok((
+            self.broker.start(spec.clone(), now).map_err(tool_error)?,
+            None,
+            None,
+        ))
+    }
+
+    fn remember(&self, id: KernelId) -> Result<(), ToolExecutionError> {
+        self.sessions
+            .lock()
+            .map_err(|_| ToolExecutionError::new("kernel session registry lock was poisoned"))?
+            .insert(self.session_id.clone(), id);
+        Ok(())
+    }
+
+    fn retire(&self, id: &KernelId) {
+        if let Ok(mut sessions) = self.sessions.lock()
+            && sessions
+                .get(&self.session_id)
+                .is_some_and(|current| current == id)
+        {
+            sessions.remove(&self.session_id);
+        }
+        let _ = self.broker.shutdown(id);
+    }
 }
 
 impl ManagedTool for KernelTool {
@@ -8044,90 +8421,95 @@ impl ManagedTool for KernelTool {
         Readiness::Ready
     }
 
+    #[allow(clippy::too_many_lines)]
     fn execute(
         &self,
         invocation: &ToolInvocation,
         _progress: &mut dyn ProgressSink,
         cancellation: &CancellationToken,
     ) -> Result<Vec<u8>, ToolExecutionError> {
-        let mut sessions = self
+        let code = string_argument(invocation, "code")?;
+        let spec = self.spec()?;
+        let existing = self
             .sessions
             .lock()
-            .map_err(|_| ToolExecutionError::new("kernel session registry lock was poisoned"))?;
+            .map_err(|_| ToolExecutionError::new("kernel session registry lock was poisoned"))?
+            .get(&self.session_id)
+            .cloned();
         let mut restored_snapshot = None;
         let mut restore_warning = None;
-        let kernel_id = if let Some(existing) = sessions.get(&self.session_id) {
-            existing.clone()
-        } else {
-            let (isolation, network) = if self.trusted_fallback {
-                (KernelIsolation::TrustedLocal, KernelNetwork::Allowed)
-            } else {
-                (KernelIsolation::Untrusted, KernelNetwork::Denied)
-            };
-            let spec = KernelSpec {
-                session_id: self.session_id.clone(),
-                runtime: KernelRuntime::Python {
-                    executable: Self::python().ok_or_else(|| {
-                        ToolExecutionError::new("Python kernel runtime is unavailable")
-                    })?,
-                },
-                working_directory: self.workspace_root.clone(),
-                isolation,
-                network,
-                limits: KernelLimits::default(),
-                allowed_bridge: BTreeSet::from([
-                    BridgeCapability::Children,
-                    BridgeCapability::Messages,
-                    BridgeCapability::Goals,
-                    BridgeCapability::Mcp,
-                    BridgeCapability::Compaction,
-                    BridgeCapability::Artifacts,
-                ]),
-            };
-            let now = UtcTimestamp::now().map_err(tool_error)?;
-            let latest = self
-                .broker
-                .latest_snapshot(&self.session_id)
-                .map_err(tool_error)?;
-            let id = if let Some(snapshot) = latest {
-                match self
-                    .broker
-                    .restore(&snapshot.id, spec.clone(), cancellation, now)
-                {
-                    Ok(id) => {
-                        restored_snapshot = Some(snapshot.id);
-                        id
-                    }
-                    Err(error) => {
-                        restore_warning = Some(error.to_string());
-                        self.broker.start(spec, now).map_err(tool_error)?
-                    }
+        let kernel_id = match existing {
+            Some(existing) if self.broker.is_running(&existing).unwrap_or(false) => existing,
+            stale => {
+                if let Some(existing) = stale {
+                    self.retire(&existing);
                 }
-            } else {
-                self.broker.start(spec, now).map_err(tool_error)?
-            };
-            sessions.insert(self.session_id.clone(), id.clone());
-            id
+                let (id, restored, warning) = self.launch(&spec, cancellation)?;
+                restored_snapshot = restored;
+                restore_warning = warning;
+                self.remember(id.clone())?;
+                id
+            }
         };
-        drop(sessions);
         let mut output = NoKernelOutput;
-        let execution = self
-            .broker
-            .execute(
-                &kernel_id,
-                string_argument(invocation, "code")?,
-                cancellation,
-                &mut output,
-                UtcTimestamp::now().map_err(tool_error)?,
-            )
-            .map_err(tool_error)?;
+        let execution = match self.broker.execute(
+            &kernel_id,
+            code,
+            cancellation,
+            &mut output,
+            UtcTimestamp::now().map_err(tool_error)?,
+        ) {
+            Ok(execution) => execution,
+            Err(error) => {
+                if !self.broker.is_running(&kernel_id).unwrap_or(false) {
+                    self.retire(&kernel_id);
+                    let replacement = self.launch(&spec, &CancellationToken::default());
+                    return match replacement {
+                        Ok((replacement_id, _, warning)) => {
+                            self.remember(replacement_id.clone())?;
+                            let warning = warning
+                                .map(|warning| format!("; snapshot restore warning: {warning}"))
+                                .unwrap_or_default();
+                            Err(ToolExecutionError::new(format!(
+                                "{error}; the dead kernel was replaced as {replacement_id} from the latest durable snapshot{warning}; the failed code was not replayed"
+                            )))
+                        }
+                        Err(restart_error) => Err(ToolExecutionError::new(format!(
+                            "{error}; automatic kernel replacement failed: {restart_error}"
+                        ))),
+                    };
+                }
+                return Err(tool_error(error));
+            }
+        };
+        let mut replacement_kernel_id = None;
         let (snapshot_id, snapshot_excluded, snapshot_warning) = match self.broker.snapshot(
             &kernel_id,
             &CancellationToken::default(),
             UtcTimestamp::now().map_err(tool_error)?,
         ) {
             Ok(snapshot) => (Some(snapshot.id), snapshot.excluded, None),
-            Err(error) => (None, Vec::new(), Some(error.to_string())),
+            Err(error) => {
+                let mut warning = error.to_string();
+                if !self.broker.is_running(&kernel_id).unwrap_or(false) {
+                    self.retire(&kernel_id);
+                    match self.launch(&spec, &CancellationToken::default()) {
+                        Ok((replacement, _, restore_error)) => {
+                            self.remember(replacement.clone())?;
+                            replacement_kernel_id = Some(replacement);
+                            if let Some(restore_error) = restore_error {
+                                warning.push_str("; replacement restore warning: ");
+                                warning.push_str(&restore_error);
+                            }
+                        }
+                        Err(restart_error) => {
+                            warning.push_str("; automatic replacement failed: ");
+                            warning.push_str(&restart_error.to_string());
+                        }
+                    }
+                }
+                (None, Vec::new(), Some(warning))
+            }
         };
         let spill = execution.spill.as_ref().map(|spill| {
             serde_json::json!({
@@ -8140,6 +8522,7 @@ impl ManagedTool for KernelTool {
         });
         serde_json::to_vec(&serde_json::json!({
             "kernel_id": kernel_id,
+            "replacement_kernel_id": replacement_kernel_id,
             "restored_snapshot_id": restored_snapshot,
             "restore_warning": restore_warning,
             "snapshot_id": snapshot_id,
@@ -8626,46 +9009,6 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_compaction_fallback_respects_token_budget_and_marks_truncation() {
-        let text = format!("ANCHOR {}", "loadpad ".repeat(10_000));
-        let entry = SessionEntry::new(
-            EntryId::new(),
-            None,
-            UtcTimestamp::UNIX_EPOCH,
-            SessionEntryPayload::UserMessage {
-                message: StoredMessage {
-                    role: StoredMessageRole::User,
-                    content: vec![StoredContentBlock::Text { text }],
-                    provider_metadata: BTreeMap::new(),
-                },
-            },
-        )
-        .unwrap();
-        let request = CompactionRequest {
-            id: EntityId::new(),
-            session_id: SessionId::new(),
-            selected_leaf: entry.id.clone(),
-            range_start: entry.id.clone(),
-            range_end: entry.id.clone(),
-            previous_boundary: None,
-            target_tokens: 512,
-            max_summary_bytes: 4 * 1_024,
-            max_candidates: 8,
-            max_candidate_bytes: 2 * 1_024,
-        };
-        let output = conservative_compaction_output(&request, &[entry]);
-        assert!(output.session_summary.len() <= 2_048);
-        assert!(output.session_summary.contains("ANCHOR"));
-        assert!(output.session_summary.contains("...[truncated]"));
-        assert!(
-            output
-                .daily_entry
-                .as_ref()
-                .is_some_and(|daily| daily.len() <= 2_048)
-        );
-    }
-
-    #[test]
     fn compacted_context_retains_the_most_recent_user_messages_within_budget() {
         let entry = |text: &str, parent_id: Option<EntryId>| {
             SessionEntry::new(
@@ -8695,54 +9038,6 @@ mod tests {
             [ProviderContentBlock::Text { text }]
                 if text == "new-user-message-tha"
         ));
-    }
-
-    #[test]
-    fn active_context_estimate_resets_at_the_latest_checkpoint() {
-        let old = SessionEntry::new(
-            EntryId::new(),
-            None,
-            UtcTimestamp::UNIX_EPOCH,
-            SessionEntryPayload::UserMessage {
-                message: StoredMessage {
-                    role: StoredMessageRole::User,
-                    content: vec![StoredContentBlock::Text {
-                        text: "old ".repeat(100_000),
-                    }],
-                    provider_metadata: BTreeMap::new(),
-                },
-            },
-        )
-        .unwrap();
-        let checkpoint = SessionEntry::new(
-            EntryId::new(),
-            Some(old.id.clone()),
-            UtcTimestamp::UNIX_EPOCH,
-            SessionEntryPayload::Compaction {
-                summary: "bounded checkpoint".into(),
-                compacted_through: old.id.clone(),
-            },
-        )
-        .unwrap();
-        let continuation = SessionEntry::new(
-            EntryId::new(),
-            Some(checkpoint.id.clone()),
-            UtcTimestamp::UNIX_EPOCH,
-            SessionEntryPayload::UserMessage {
-                message: StoredMessage {
-                    role: StoredMessageRole::User,
-                    content: vec![StoredContentBlock::Text {
-                        text: "continue".into(),
-                    }],
-                    provider_metadata: BTreeMap::new(),
-                },
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            estimated_context_tokens(&[old, checkpoint, continuation]),
-            estimated_text_tokens("bounded checkpoint") + estimated_text_tokens("continue")
-        );
     }
 
     #[test]
@@ -9090,6 +9385,265 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn restart_commits_the_same_provider_candidate_for_a_direct_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path().join("data");
+        let credential_root = root.path().join("credentials");
+        let workspace_root = root.path().join("workspace");
+        let key = [65_u8; 32];
+        seed_provider_credential(&credential_root, key, "openai", "candidate-recovery-secret");
+        let configuration = || LocalRuntimeConfig {
+            data_root: data_root.clone(),
+            credential_root: credential_root.clone(),
+            credential_key: MasterKey::from_bytes(key),
+            workspace_root: workspace_root.clone(),
+            openai_base_url: "http://127.0.0.1:65535".into(),
+            anthropic_base_url: "http://127.0.0.1:65535".into(),
+            provider_base_urls: BTreeMap::new(),
+            root_scope: None,
+            worker_id: WorkerId::new(),
+            owner_instance: EntityId::new(),
+        };
+        let runtime = LocalRuntime::open(configuration()).unwrap();
+        let profile = runtime.registered_profiles().unwrap().remove(0);
+        let session = runtime
+            .create_session(
+                &profile.profile.id,
+                &profile.profile.workspace_id,
+                Some("Candidate crash recovery".into()),
+            )
+            .unwrap();
+        let turn_id = TurnId::new();
+        let action_id = ActionId::new();
+        let now = UtcTimestamp::now().unwrap();
+        {
+            let mut writer = runtime
+                .sessions
+                .acquire_writer(
+                    &session.session_id,
+                    runtime.writer_identity(Generation::new(1), now),
+                )
+                .unwrap();
+            let ingress = writer
+                .append(
+                    None,
+                    now,
+                    SessionEntryPayload::UserMessage {
+                        message: StoredMessage {
+                            role: StoredMessageRole::User,
+                            content: vec![StoredContentBlock::Text {
+                                text: "Return the accepted answer.".into(),
+                            }],
+                            provider_metadata: BTreeMap::new(),
+                        },
+                    },
+                )
+                .unwrap();
+            writer
+                .accept_turn(now, action_id, turn_id.clone(), ingress.id)
+                .unwrap();
+            writer
+                .append_final_candidate(
+                    now,
+                    turn_id,
+                    StoredMessage {
+                        role: StoredMessageRole::Assistant,
+                        content: vec![StoredContentBlock::Text {
+                            text: "This exact answer survived the restart.".into(),
+                        }],
+                        provider_metadata: BTreeMap::new(),
+                    },
+                    40,
+                    9,
+                    0,
+                )
+                .unwrap();
+        }
+        drop(runtime);
+
+        let restarted = LocalRuntime::open(configuration()).unwrap();
+        let snapshot = restarted
+            .snapshot(&session.session_id, Generation::new(2), SessionState::Ready)
+            .unwrap();
+        let assistant = snapshot
+            .messages
+            .iter()
+            .filter(|message| message.role == ProjectionMessageRole::Assistant)
+            .collect::<Vec<_>>();
+        assert_eq!(assistant.len(), 1);
+        assert_eq!(assistant[0].text, "This exact answer survived the restart.");
+        assert!(snapshot.terminal.as_ref().is_some_and(|terminal| {
+            terminal.status == ProjectionTurnTerminalStatus::Completed
+                && terminal.execution_succeeded
+                && terminal.final_created
+                && terminal.delivery_enqueued
+        }));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn restart_records_an_unfinished_tool_as_unknown_before_finalizing() {
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path().join("data");
+        let credential_root = root.path().join("credentials");
+        let workspace_root = root.path().join("workspace");
+        let key = [64_u8; 32];
+        seed_provider_credential(&credential_root, key, "openai", "unknown-outcome-secret");
+        let configuration = || LocalRuntimeConfig {
+            data_root: data_root.clone(),
+            credential_root: credential_root.clone(),
+            credential_key: MasterKey::from_bytes(key),
+            workspace_root: workspace_root.clone(),
+            openai_base_url: "http://127.0.0.1:65535".into(),
+            anthropic_base_url: "http://127.0.0.1:65535".into(),
+            provider_base_urls: BTreeMap::new(),
+            root_scope: None,
+            worker_id: WorkerId::new(),
+            owner_instance: EntityId::new(),
+        };
+        let runtime = LocalRuntime::open(configuration()).unwrap();
+        let profile = runtime.registered_profiles().unwrap().remove(0);
+        let session = runtime
+            .create_session(
+                &profile.profile.id,
+                &profile.profile.workspace_id,
+                Some("Unknown tool recovery".into()),
+            )
+            .unwrap();
+        let action_id = ActionId::new();
+        let now = UtcTimestamp::now().unwrap();
+        runtime
+            .actions
+            .submit(
+                SessionAction {
+                    id: action_id.clone(),
+                    session_id: session.session_id.clone(),
+                    source: ActionSource::Channel {
+                        channel: "telegram".into(),
+                        message_id: "unknown-inbound".into(),
+                    },
+                    delivery: ActionDeliveryPolicy::Immediate,
+                    priority: ActionPriority::User,
+                    created_at: now,
+                    not_before: None,
+                    deadline: None,
+                    limits: ActionLimits::default(),
+                    reply_route: Some(ActionReplyRoute::Channel {
+                        channel: "telegram".into(),
+                        external_account: Some("primary".into()),
+                        conversation_id: "unknown-conversation".into(),
+                        thread_id: None,
+                        reply_to_message: Some("unknown-inbound".into()),
+                    }),
+                    payload: ActionPayload::ChannelMessage {
+                        text: "Perform a state-changing operation.".into(),
+                        attachments: Vec::new(),
+                    },
+                },
+                now,
+            )
+            .unwrap();
+        runtime
+            .actions
+            .select_next(
+                &session.session_id,
+                now,
+                &PumpContext {
+                    active_action: None,
+                    at_turn_boundary: true,
+                    session_idle: true,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        runtime.actions.mark_running(&action_id, now).unwrap();
+        let call_id = keith_agent_types::ToolCallId::new();
+        {
+            let mut writer = runtime
+                .sessions
+                .acquire_writer(
+                    &session.session_id,
+                    runtime.writer_identity(Generation::new(1), now),
+                )
+                .unwrap();
+            let ingress = writer
+                .append(
+                    None,
+                    now,
+                    SessionEntryPayload::UserMessage {
+                        message: StoredMessage {
+                            role: StoredMessageRole::User,
+                            content: vec![StoredContentBlock::Text {
+                                text: "Perform a state-changing operation.".into(),
+                            }],
+                            provider_metadata: BTreeMap::from([(
+                                "ingress_source_id".into(),
+                                format!("action:{action_id}"),
+                            )]),
+                        },
+                    },
+                )
+                .unwrap();
+            writer
+                .append(
+                    Some(ingress.id),
+                    now,
+                    SessionEntryPayload::ToolCall {
+                        call_id: call_id.clone(),
+                        name: "external_write".into(),
+                        arguments: serde_json::json!({"operation": "write"}),
+                    },
+                )
+                .unwrap();
+        }
+        drop(runtime);
+
+        let restarted = LocalRuntime::open(configuration()).unwrap();
+        let snapshot = restarted
+            .drain_session_actions(&session.session_id, Generation::new(2), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restarted.actions.list_session(&session.session_id).unwrap()[0].state,
+            ActionState::Completed
+        );
+        let ancestry = restarted
+            .sessions
+            .load_index(&session.session_id)
+            .unwrap()
+            .ancestry(
+                restarted
+                    .sessions
+                    .manifest(&session.session_id)
+                    .unwrap()
+                    .active_leaf
+                    .as_ref()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(ancestry.iter().any(|entry| matches!(
+            &entry.payload,
+            SessionEntryPayload::ToolResult {
+                call_id: result_call,
+                is_error: true,
+                failure: Some(failure),
+                ..
+            } if result_call == &call_id
+                && failure.error.code == "TOOL_OUTCOME_UNKNOWN"
+                && failure.effect_state == ToolEffectState::Unknown
+                && !failure.retry.automatic
+        )));
+        assert!(snapshot.messages.iter().any(|message| {
+            message.role == ProjectionMessageRole::Assistant
+                && message.text.contains("TOOL_OUTCOME_UNKNOWN")
+                && message.text.contains("inspect state")
+        }));
+        assert!(snapshot.tools.iter().any(|tool| {
+            tool.tool_call_id == call_id && tool.terminal && tool.state == "failed"
+        }));
     }
 
     #[test]
@@ -9615,35 +10169,38 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn context_limit_uses_the_real_provider_to_install_a_continuation_checkpoint() {
+    fn context_overflow_retries_only_after_a_durable_continuation_checkpoint() {
         let models = r#"{"data":[{"id":"gpt-4.1-mini"}]}"#;
         let primary_turn = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Primary answer before compaction.\"},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":96000,\"completion_tokens\":8}}\n\n",
-            "data: [DONE]\n\n"
-        );
-        let checkpoint_turn = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Progress: the user anchor is lighthouse-731. Next: continue the verification run.\"},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":24}}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Primary answer before overflow.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":8}}\n\n",
             "data: [DONE]\n\n"
         );
         let second_primary_turn = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Second answer before compaction.\"},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":96000,\"completion_tokens\":7}}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Second answer before overflow.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1300,\"completion_tokens\":7}}\n\n",
             "data: [DONE]\n\n"
         );
-        let second_checkpoint_turn = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Progress: retain lighthouse-731 and exact active tail comet-884. Next: verify after restart.\"},\"finish_reason\":\"stop\"}]}\n\n",
+        let overflow_turn = "data: {\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"maximum context length exceeded\"}}\n\n";
+        let checkpoint_turn = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Progress: retain lighthouse-731. Next: continue from the exact retained tail.\"},\"finish_reason\":\"stop\"}]}\n\n",
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1300,\"completion_tokens\":26}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let retry_turn = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Recovered after durable compaction.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":6}}\n\n",
             "data: [DONE]\n\n"
         );
         let server = ProviderServer::start(vec![
             response("application/json", models),
             response("text/event-stream", primary_turn),
-            response("text/event-stream", checkpoint_turn),
             response("application/json", models),
             response("text/event-stream", second_primary_turn),
-            response("text/event-stream", second_checkpoint_turn),
+            response("application/json", models),
+            response("text/event-stream", overflow_turn),
+            response("text/event-stream", checkpoint_turn),
+            response("text/event-stream", retry_turn),
         ]);
         let root = tempfile::tempdir().unwrap();
         let data_root = root.path().join("data");
@@ -9700,11 +10257,18 @@ mod tests {
             .into_iter()
             .find(|candidate| candidate.profile.id == profile.profile.id)
             .unwrap();
+        let retained_tail = format!(
+            "The verbatim retained tail is comet-884. {}",
+            "retained-context ".repeat(100)
+        );
+        runtime
+            .run_prompt(&session.session_id, &retained_tail, Generation::new(2))
+            .unwrap();
         runtime
             .run_prompt(
                 &session.session_id,
-                "The verbatim active tail is comet-884.",
-                Generation::new(2),
+                "The exact current instruction is nova-992.",
+                Generation::new(3),
             )
             .unwrap();
 
@@ -9719,19 +10283,22 @@ mod tests {
             .iter()
             .rev()
             .find_map(|entry| match &entry.payload {
-                SessionEntryPayload::Compaction { summary, .. } => Some(summary),
+                SessionEntryPayload::CompactionCheckpoint { summary, .. } => Some(summary),
                 _ => None,
             })
             .unwrap();
         assert!(summary.starts_with(COMPACTION_SUMMARY_PREFIX));
         assert!(summary.contains("lighthouse-731"));
-        assert!(summary.contains("comet-884"));
+        assert!(!summary.contains("nova-992"));
         assert_eq!(
             ancestry
                 .iter()
-                .filter(|entry| matches!(entry.payload, SessionEntryPayload::Compaction { .. }))
+                .filter(|entry| matches!(
+                    entry.payload,
+                    SessionEntryPayload::CompactionCheckpoint { .. }
+                ))
                 .count(),
-            2
+            1
         );
         let resumed_request = runtime
             .model_request(
@@ -9740,14 +10307,14 @@ mod tests {
                 &TurnId::new(),
                 &ancestry,
                 Vec::new(),
-                "The verbatim active tail is comet-884.",
+                "The exact current instruction is nova-992.",
                 None,
                 None,
             )
             .unwrap();
         assert_eq!(
             resumed_request.context.verbatim_last_user_message,
-            "The verbatim active tail is comet-884."
+            "The exact current instruction is nova-992."
         );
         let active_user_messages = resumed_request
             .messages
@@ -9765,7 +10332,7 @@ mod tests {
         assert!(matches!(
             active_user_messages[0].0.content.as_slice(),
             [ProviderContentBlock::Text { text }]
-                if text == "The verbatim active tail is comet-884."
+                if text == "The exact current instruction is nova-992."
         ));
         assert!(
             resumed_request
@@ -9776,7 +10343,7 @@ mod tests {
                     context.provenance == ContextProvenance::CompactionSummary
                         && matches!(content, ProviderContentBlock::Text { text }
                         if text.contains(COMPACTION_SUMMARY_PREFIX)
-                            && text.contains("verify after restart"))
+                            && text.contains("exact retained tail"))
                 })
         );
         assert!(
@@ -9800,18 +10367,25 @@ mod tests {
 
         let discovery_request = server.request();
         let primary_request = server.request();
-        let compaction_request = server.request();
         let restarted_discovery_request = server.request();
         let second_primary_request = server.request();
-        let second_compaction_request = server.request();
+        let third_discovery_request = server.request();
+        let overflow_request = server.request();
+        let compaction_request = server.request();
+        let retry_request = server.request();
         assert!(discovery_request.starts_with("GET /v1/models "));
         assert!(primary_request.starts_with("POST /v1/chat/completions "));
+        assert!(restarted_discovery_request.starts_with("GET /v1/models "));
+        assert!(second_primary_request.contains("comet-884"));
+        assert!(third_discovery_request.starts_with("GET /v1/models "));
+        assert!(overflow_request.contains("nova-992"));
         assert!(compaction_request.starts_with("POST /v1/chat/completions "));
         assert!(compaction_request.contains("context checkpoint"));
         assert!(compaction_request.contains("\"tools\":[]"));
-        assert!(restarted_discovery_request.starts_with("GET /v1/models "));
-        assert!(second_primary_request.contains("The verbatim active tail is comet-884."));
-        assert!(second_compaction_request.contains("context checkpoint"));
+        assert!(!compaction_request.contains("nova-992"));
+        assert!(!compaction_request.contains("comet-884"));
+        assert!(retry_request.contains("comet-884"));
+        assert!(retry_request.contains("nova-992"));
     }
 
     #[test]

@@ -548,6 +548,8 @@ pub struct ActionProjection {
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
 pub struct MessageProjection {
     pub message_id: MessageId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_id: Option<EntryId>,
     pub role: MessageRole,
     pub text: String,
     pub committed: bool,

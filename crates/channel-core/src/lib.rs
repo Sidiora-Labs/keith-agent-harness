@@ -597,8 +597,7 @@ impl<T: AgentTransport> AgentConnection<T> {
                 WireMessage::CommandResult(_) => {
                     return Err(AgentConnectionError::MismatchedResult);
                 }
-                message
-                @ (WireMessage::Event(_)
+                message @ (WireMessage::Event(_)
                 | WireMessage::Snapshot(_)
                 | WireMessage::Terminal(_)) => {
                     if let Some(event) = message.into_event() {

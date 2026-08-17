@@ -6,8 +6,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use keith_agent_types::{
-    EntityId, ToolCallId, ToolEffectState, ToolErrorCategory, ToolFailure, ToolRecoveryAction,
-    ToolRecoveryActionKind,
+    EntityId, ToolCallId, ToolEffectState, ToolErrorCategory, ToolFailure, ToolFailureStatus,
+    ToolRecoveryAction, ToolRecoveryActionKind,
 };
 use keith_provider_core::{CancellationToken, ToolBehavior as ProviderToolBehavior};
 use serde::{Deserialize, Serialize};
@@ -497,17 +497,22 @@ impl ToolManager {
         for attempt in 1..=max_attempts {
             if cancellation.is_cancelled() {
                 emitter.terminal(TerminalState::Cancelled, None);
+                let mut failure = terminal_failure(
+                    tool.definition(),
+                    ToolErrorCategory::Cancelled,
+                    "TOOL_CANCELLED",
+                    "cancelled_before_attempt",
+                    "tool invocation was cancelled before an attempt started",
+                );
+                failure.status = ToolFailureStatus::NotStarted;
+                failure.effect_state = ToolEffectState::NotStarted;
+                failure.retry.automatic = tool.definition().repeatability == Repeatability::Safe;
+                failure.retry.reason = "The tool body did not start".into();
                 return Ok(ToolOutcome {
                     state: TerminalState::Cancelled,
                     output: None,
                     attempts: attempt - 1,
-                    failure: Some(terminal_failure(
-                        tool.definition(),
-                        ToolErrorCategory::Cancelled,
-                        "TOOL_CANCELLED",
-                        "cancelled_before_attempt",
-                        "tool invocation was cancelled before an attempt started",
-                    )),
+                    failure: Some(failure),
                 });
             }
             emitter.emit(ToolEventKind::Started { attempt });
@@ -805,6 +810,21 @@ fn terminal_failure(
     detail: impl Into<String>,
 ) -> ToolFailure {
     let mut failure = ToolFailure::not_committed(category, code, reason, detail);
+    failure.status = match category {
+        ToolErrorCategory::InvalidArguments
+        | ToolErrorCategory::PolicyDenied
+        | ToolErrorCategory::ConfirmationDeclined
+        | ToolErrorCategory::NotReady => ToolFailureStatus::Denied,
+        ToolErrorCategory::Cancelled => ToolFailureStatus::Cancelled,
+        ToolErrorCategory::Timeout => ToolFailureStatus::TimedOut,
+        ToolErrorCategory::OutputLimit => ToolFailureStatus::OutputLimitExceeded,
+        ToolErrorCategory::Provider4xx
+        | ToolErrorCategory::Provider5xx
+        | ToolErrorCategory::Unavailable
+        | ToolErrorCategory::Execution
+        | ToolErrorCategory::WorkerDisconnected
+        | ToolErrorCategory::Internal => ToolFailureStatus::Error,
+    };
     if definition.behavior.writes_state
         && matches!(
             category,
@@ -1478,6 +1498,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(echo, b"real");
+    }
+
+    #[test]
+    fn cancellation_before_dispatch_is_not_started_and_safe_to_distinguish_from_unknown() {
+        let mut manager = manager(ToolManagerConfig::default());
+        manager
+            .register(Arc::new(ConformanceTool::new(
+                "never-started",
+                Mode::Success,
+            )))
+            .unwrap();
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let outcome = manager
+            .invoke(
+                invocation("never-started", json!({"text": "must not run"})),
+                &cancellation,
+            )
+            .unwrap();
+        let failure = outcome.failure.unwrap();
+        assert_eq!(outcome.state, TerminalState::Cancelled);
+        assert_eq!(failure.status, ToolFailureStatus::NotStarted);
+        assert_eq!(failure.effect_state, ToolEffectState::NotStarted);
+        assert_eq!(failure.error.code, "TOOL_CANCELLED");
     }
 
     #[test]

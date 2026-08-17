@@ -536,13 +536,13 @@ async fn native_platform_bridge_reaches_the_real_daemon_and_leased_worker() {
             String::from_utf8_lossy(platform_key)
         )
         .into_bytes(),
-        "\"message\":\"event\"",
+        "\"message\":\"snapshot\"",
     )
     .await;
     assert!(replay.starts_with("HTTP/1.1 200 OK"), "{replay}");
     assert!(replay.contains("text/event-stream"), "{replay}");
-    assert!(replay.contains("\"message\":\"event\""), "{replay}");
-    assert!(replay.contains("\"event\":\"snapshot\""), "{replay}");
+    assert!(replay.contains("\"message\":\"snapshot\""), "{replay}");
+    assert!(replay.contains("Prove native replay"), "{replay}");
 
     web_task.abort();
     let _ = web_task.await;

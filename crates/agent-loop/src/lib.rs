@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use keith_agent_types::{
-    ArtifactId, EntityId, ProfileId, TimestampError, ToolCallId, ToolFailure, TurnId, UtcTimestamp,
-    canonical_json_bytes,
+    ArtifactId, EntityId, EntryId, ProfileId, TimestampError, ToolCallId, ToolEffectState,
+    ToolErrorCategory, ToolFailure, ToolFailureStatus, TurnId, UtcTimestamp, canonical_json_bytes,
 };
 use keith_artifacts::{ArtifactError, OutputSpill};
 use keith_model_registry::{CredentialResolver, ModelPurpose, ModelRegistry, RegistryError};
@@ -12,12 +12,13 @@ use keith_provider_core::{
     ToolBehavior, ToolDefinition, Usage,
 };
 use keith_session_store::{
-    ContentBlock as StoredContentBlock, MessageRole as StoredMessageRole, SessionEntryPayload,
-    SessionStoreError, SessionWriter, StoredMessage,
+    CompactionTrigger, ContentBlock as StoredContentBlock, MessageRole as StoredMessageRole,
+    SessionEntryPayload, SessionStoreError, SessionWriter, StepBoundaryState, StoredMessage,
 };
 use keith_tool_core::{ToolExecutionError, ToolExecutor, ToolInvocation};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -38,6 +39,14 @@ pub enum AgentEventKind {
     MessageCompleted {
         turn_id: TurnId,
         complete: bool,
+    },
+    AssistantActivityCompleted {
+        turn_id: TurnId,
+        activity_id: EntryId,
+    },
+    FinalCandidateCompleted {
+        turn_id: TurnId,
+        candidate_id: EntryId,
     },
     ToolStarted {
         turn_id: TurnId,
@@ -109,45 +118,44 @@ pub trait ContextCompactor: Send + Sync {
     /// # Errors
     ///
     /// Returns an overflow error when the request cannot be reduced safely.
-    fn compact(&self, request: &ModelRequest) -> Result<ModelRequest, AgentLoopError>;
+    fn compact(
+        &self,
+        session: &mut SessionWriter,
+        request: &ModelRequest,
+        trigger: CompactionTrigger,
+        cancellation: &CancellationToken,
+    ) -> Result<CompactionProgress, AgentLoopError>;
 }
 
 #[derive(Default)]
-pub struct ConservativeCompactor;
+pub struct NoCompaction;
 
-impl ContextCompactor for ConservativeCompactor {
-    fn compact(&self, request: &ModelRequest) -> Result<ModelRequest, AgentLoopError> {
-        if request.messages.len() < 3 {
-            return Err(AgentLoopError::ContextOverflow);
-        }
-        let mut compacted = request.clone();
-        let keep = compacted.messages.len().div_ceil(2);
-        let removed = compacted.messages.len().saturating_sub(keep);
-        compacted.messages.drain(..removed);
-        compacted.context.messages.drain(..removed);
-        compacted.system.push(ContentBlock::Text {
-            text: format!("{removed} earlier messages were compacted after context overflow."),
-        });
-        let template = compacted
-            .context
-            .messages
-            .iter()
-            .flatten()
-            .next()
-            .or_else(|| compacted.context.system.first())
-            .ok_or(AgentLoopError::ContextOverflow)?;
-        compacted.context.system.push(ContextRecord {
-            session_id: template.session_id.clone(),
-            turn_id: template.turn_id.clone(),
-            entry_id: keith_agent_types::EntryId::new(),
-            source_id: "context_overflow_compactor".into(),
-            provenance: ContextProvenance::CompactionSummary,
-            current_turn: false,
-            persist_policy: PersistPolicy::Session,
-            model_visibility: ModelVisibility::Visible,
-        });
-        compacted.request_id = EntityId::new();
-        Ok(compacted)
+impl ContextCompactor for NoCompaction {
+    fn compact(
+        &self,
+        session: &mut SessionWriter,
+        request: &ModelRequest,
+        _trigger: CompactionTrigger,
+        _cancellation: &CancellationToken,
+    ) -> Result<CompactionProgress, AgentLoopError> {
+        Ok(CompactionProgress {
+            request: request.clone(),
+            previous_generation: session.manifest().compaction_generation,
+            current_generation: session.manifest().compaction_generation,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompactionProgress {
+    pub request: ModelRequest,
+    pub previous_generation: u64,
+    pub current_generation: u64,
+}
+
+impl CompactionProgress {
+    pub const fn advanced(&self) -> bool {
+        self.current_generation > self.previous_generation
     }
 }
 
@@ -177,7 +185,7 @@ impl Default for AgentLoopConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentRunResult {
     pub outcome: AgentOutcome,
-    pub final_text: Option<String>,
+    pub final_candidate_id: EntryId,
     pub turns: u32,
     pub usage: Usage,
 }
@@ -198,6 +206,8 @@ pub enum AgentLoopError {
     EmptyResponse,
     #[error("model context overflow persisted after compaction")]
     ContextOverflow,
+    #[error("durable context compaction failed: {0}")]
+    Compaction(String),
     #[error("tool stream was malformed: {0}")]
     MalformedTool(String),
     #[error("identical failure repeated beyond the configured bound: {0}")]
@@ -267,6 +277,19 @@ impl<'a> AgentLoop<'a> {
         mut request: ModelRequest,
         cancellation: &CancellationToken,
     ) -> Result<AgentRunResult, AgentLoopError> {
+        let durable_turn_id = request
+            .context
+            .messages
+            .iter()
+            .flatten()
+            .find(|record| record.entry_id == request.context.active_user_entry_id)
+            .map(|record| record.turn_id.clone())
+            .ok_or_else(|| {
+                AgentLoopError::Compaction(
+                    "model request is missing its active user turn identity".into(),
+                )
+            })?;
+        let turn_id = &durable_turn_id;
         self.emit(AgentEventKind::AgentStarted)?;
         let mut total_usage = Usage::default();
         let mut empty_attempts = 0;
@@ -278,13 +301,34 @@ impl<'a> AgentLoop<'a> {
                 self.finish(AgentOutcome::Cancelled)?;
                 return Err(AgentLoopError::Cancelled);
             }
-            let turn_id = TurnId::new();
             if let Some(text) = self.steering.take_at_boundary() {
-                self.add_controller_guidance(&mut request, &turn_id, "steering", &text)?;
+                self.add_controller_guidance(&mut request, turn_id, "steering", &text)?;
+            }
+            match self.compactor.compact(
+                self.session,
+                &request,
+                CompactionTrigger::Pressure,
+                cancellation,
+            ) {
+                Ok(progress) => request = progress.request,
+                Err(error) => {
+                    self.emit(AgentEventKind::StrategyChanged {
+                        turn_id: turn_id.clone(),
+                        reason: format!("pressure_compaction_failed:{error}"),
+                    })?;
+                }
             }
             self.emit(AgentEventKind::TurnStarted {
                 turn_id: turn_id.clone(),
                 number,
+            })?;
+            let step_request_id = request.request_id.clone();
+            self.append(SessionEntryPayload::StepBoundary {
+                turn_id: turn_id.clone(),
+                step: number,
+                provider_request_id: step_request_id.clone(),
+                state: StepBoundaryState::Started,
+                detail: None,
             })?;
             self.emit(AgentEventKind::MessageStarted {
                 turn_id: turn_id.clone(),
@@ -311,6 +355,13 @@ impl<'a> AgentLoop<'a> {
             let attempt = match stream_result {
                 Ok(attempt) => attempt,
                 Err(error) if is_context_overflow(&error) => {
+                    self.append(SessionEntryPayload::StepBoundary {
+                        turn_id: turn_id.clone(),
+                        step: number,
+                        provider_request_id: step_request_id.clone(),
+                        state: StepBoundaryState::Failed,
+                        detail: Some("provider_context_overflow".into()),
+                    })?;
                     self.emit(AgentEventKind::MessageCompleted {
                         turn_id: turn_id.clone(),
                         complete: false,
@@ -320,9 +371,22 @@ impl<'a> AgentLoop<'a> {
                         return Err(AgentLoopError::ContextOverflow);
                     }
                     overflow_attempts += 1;
-                    request = self.compactor.compact(&request)?;
+                    let Ok(progress) = self.compactor.compact(
+                        self.session,
+                        &request,
+                        CompactionTrigger::ProviderOverflow,
+                        cancellation,
+                    ) else {
+                        self.finish(AgentOutcome::Exhausted)?;
+                        return Err(AgentLoopError::ContextOverflow);
+                    };
+                    if !progress.advanced() {
+                        self.finish(AgentOutcome::Exhausted)?;
+                        return Err(AgentLoopError::ContextOverflow);
+                    }
+                    request = progress.request;
                     self.emit(AgentEventKind::StrategyChanged {
-                        turn_id,
+                        turn_id: turn_id.clone(),
                         reason: "context_overflow_compaction".into(),
                     })?;
                     continue;
@@ -330,27 +394,54 @@ impl<'a> AgentLoop<'a> {
                 Err(RegistryError::Provider(error))
                     if error.kind == keith_provider_core::ProviderErrorKind::Cancelled =>
                 {
+                    self.append(SessionEntryPayload::StepBoundary {
+                        turn_id: turn_id.clone(),
+                        step: number,
+                        provider_request_id: step_request_id.clone(),
+                        state: StepBoundaryState::Cancelled,
+                        detail: Some("provider_cancelled".into()),
+                    })?;
                     self.emit(AgentEventKind::MessageCompleted {
-                        turn_id,
+                        turn_id: turn_id.clone(),
                         complete: false,
                     })?;
                     self.finish(AgentOutcome::Cancelled)?;
                     return Err(AgentLoopError::Cancelled);
                 }
                 Err(error) => {
+                    self.append(SessionEntryPayload::StepBoundary {
+                        turn_id: turn_id.clone(),
+                        step: number,
+                        provider_request_id: step_request_id.clone(),
+                        state: StepBoundaryState::Failed,
+                        detail: Some(error.to_string()),
+                    })?;
                     self.emit(AgentEventKind::MessageCompleted {
-                        turn_id,
+                        turn_id: turn_id.clone(),
                         complete: false,
                     })?;
                     return Err(error.into());
                 }
             };
-            let completed = assembly.finish()?;
+            let completed = match assembly.finish() {
+                Ok(completed) => completed,
+                Err(error) => {
+                    self.append(SessionEntryPayload::StepBoundary {
+                        turn_id: turn_id.clone(),
+                        step: number,
+                        provider_request_id: step_request_id.clone(),
+                        state: StepBoundaryState::Failed,
+                        detail: Some(error.to_string()),
+                    })?;
+                    self.emit(AgentEventKind::MessageCompleted {
+                        turn_id: turn_id.clone(),
+                        complete: false,
+                    })?;
+                    return Err(error);
+                }
+            };
             add_usage(&mut total_usage, attempt.usage);
-            self.emit(AgentEventKind::MessageCompleted {
-                turn_id: turn_id.clone(),
-                complete: true,
-            })?;
+            overflow_attempts = 0;
 
             if completed.text.trim().is_empty() && completed.calls.is_empty() {
                 if empty_attempts >= self.config.empty_response_retries {
@@ -358,14 +449,25 @@ impl<'a> AgentLoop<'a> {
                     return Err(AgentLoopError::EmptyResponse);
                 }
                 empty_attempts += 1;
+                self.append(SessionEntryPayload::StepBoundary {
+                    turn_id: turn_id.clone(),
+                    step: number,
+                    provider_request_id: step_request_id.clone(),
+                    state: StepBoundaryState::Failed,
+                    detail: Some("empty_provider_response".into()),
+                })?;
+                self.emit(AgentEventKind::MessageCompleted {
+                    turn_id: turn_id.clone(),
+                    complete: false,
+                })?;
                 self.add_controller_guidance(
                     &mut request,
-                    &turn_id,
+                    turn_id,
                     "empty_response_retry",
                     "The previous response was empty. Continue with a substantive response.",
                 )?;
                 self.emit(AgentEventKind::StrategyChanged {
-                    turn_id,
+                    turn_id: turn_id.clone(),
                     reason: "empty_response_retry".into(),
                 })?;
                 continue;
@@ -373,25 +475,73 @@ impl<'a> AgentLoop<'a> {
 
             self.commit_model_change(&attempt.provider, &attempt.model)?;
             if completed.calls.is_empty() {
+                let candidate = self.commit_final_candidate(turn_id, &completed, attempt.usage)?;
                 self.commit_usage(attempt.usage)?;
+                self.append(SessionEntryPayload::StepBoundary {
+                    turn_id: turn_id.clone(),
+                    step: number,
+                    provider_request_id: step_request_id.clone(),
+                    state: StepBoundaryState::Completed,
+                    detail: None,
+                })?;
+                self.emit(AgentEventKind::FinalCandidateCompleted {
+                    turn_id: turn_id.clone(),
+                    candidate_id: candidate.clone(),
+                })?;
                 self.emit(AgentEventKind::TurnEnded {
-                    turn_id,
+                    turn_id: turn_id.clone(),
                     usage: attempt.usage,
                 })?;
                 self.finish(AgentOutcome::Completed)?;
                 return Ok(AgentRunResult {
                     outcome: AgentOutcome::Completed,
-                    final_text: Some(completed.text),
+                    final_candidate_id: candidate,
                     turns: number,
                     usage: total_usage,
                 });
             }
 
-            let activity = self.commit_assistant_activity(&turn_id, &completed)?;
+            let activity = self.commit_assistant_activity(turn_id, &completed)?;
+            self.emit(AgentEventKind::AssistantActivityCompleted {
+                turn_id: turn_id.clone(),
+                activity_id: activity.entry_id.clone(),
+            })?;
 
             let outcomes =
-                self.execute_calls(&turn_id, &request.tools, &completed.calls, cancellation)?;
+                match self.execute_calls(turn_id, &request.tools, &completed.calls, cancellation) {
+                    Ok(outcomes) => outcomes,
+                    Err(error) => {
+                        self.commit_unknown_tool_results(turn_id, &completed.calls)?;
+                        self.append(SessionEntryPayload::StepBoundary {
+                            turn_id: turn_id.clone(),
+                            step: number,
+                            provider_request_id: step_request_id.clone(),
+                            state: StepBoundaryState::Failed,
+                            detail: Some(error.to_string()),
+                        })?;
+                        self.emit(AgentEventKind::MessageCompleted {
+                            turn_id: turn_id.clone(),
+                            complete: false,
+                        })?;
+                        return Err(error);
+                    }
+                };
             append_tool_exchange(&mut request, &completed, &activity, &outcomes);
+            if cancellation.is_cancelled() {
+                self.append(SessionEntryPayload::StepBoundary {
+                    turn_id: turn_id.clone(),
+                    step: number,
+                    provider_request_id: step_request_id.clone(),
+                    state: StepBoundaryState::Cancelled,
+                    detail: Some("cancelled_after_tool_results".into()),
+                })?;
+                self.emit(AgentEventKind::MessageCompleted {
+                    turn_id: turn_id.clone(),
+                    complete: false,
+                })?;
+                self.finish(AgentOutcome::Cancelled)?;
+                return Err(AgentLoopError::Cancelled);
+            }
             let mut changed_strategy = false;
             for outcome in &outcomes {
                 if outcome.is_error {
@@ -410,7 +560,7 @@ impl<'a> AgentLoop<'a> {
             if changed_strategy {
                 self.add_controller_guidance(
                     &mut request,
-                    &turn_id,
+                    turn_id,
                     "repeated_tool_failure",
                     "A tool failure repeated. Change strategy; do not repeat the identical call.",
                 )?;
@@ -420,8 +570,15 @@ impl<'a> AgentLoop<'a> {
                 })?;
             }
             self.commit_usage(attempt.usage)?;
+            self.append(SessionEntryPayload::StepBoundary {
+                turn_id: turn_id.clone(),
+                step: number,
+                provider_request_id: step_request_id,
+                state: StepBoundaryState::Completed,
+                detail: None,
+            })?;
             self.emit(AgentEventKind::TurnEnded {
-                turn_id,
+                turn_id: turn_id.clone(),
                 usage: attempt.usage,
             })?;
         }
@@ -444,7 +601,24 @@ impl<'a> AgentLoop<'a> {
         let mut index = 0;
         while index < calls.len() {
             if cancellation.is_cancelled() {
-                return Err(AgentLoopError::Cancelled);
+                for call in &calls[index..] {
+                    let mut failure = ToolFailure::not_committed(
+                        ToolErrorCategory::Cancelled,
+                        "TOOL_NOT_STARTED",
+                        "cancelled_before_dispatch",
+                        "tool call was durably requested but cancelled before dispatch",
+                    );
+                    failure.status = ToolFailureStatus::NotStarted;
+                    failure.effect_state = ToolEffectState::NotStarted;
+                    failure.retry.automatic = true;
+                    failure.retry.reason = "The tool body did not start".into();
+                    outcomes.push(self.finish_tool(
+                        turn_id,
+                        call,
+                        Err(ToolExecutionError::typed(failure)),
+                    )?);
+                }
+                break;
             }
             if behavior.get(calls[index].name.as_str()) == Some(&ToolBehavior::ReadOnly) {
                 let end = calls[index..]
@@ -486,7 +660,9 @@ impl<'a> AgentLoop<'a> {
                     call_id: call.call_id.clone(),
                     name: call.name.clone(),
                 })?;
-                let result = self.tools.execute(call, cancellation);
+                let result =
+                    catch_unwind(AssertUnwindSafe(|| self.tools.execute(call, cancellation)))
+                        .map_err(|_| AgentLoopError::ToolWorkerPanicked)?;
                 outcomes.push(self.finish_tool(turn_id, call, result)?);
                 index += 1;
             }
@@ -537,6 +713,38 @@ impl<'a> AgentLoop<'a> {
         Ok(outcome)
     }
 
+    fn commit_unknown_tool_results(
+        &mut self,
+        turn_id: &TurnId,
+        calls: &[ToolInvocation],
+    ) -> Result<(), AgentLoopError> {
+        let completed = self
+            .session
+            .active_ancestry()?
+            .into_iter()
+            .filter_map(|entry| match entry.payload {
+                SessionEntryPayload::ToolResult { call_id, .. } => Some(call_id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for call in calls
+            .iter()
+            .filter(|call| !completed.contains(&call.call_id))
+        {
+            let mut failure = ToolFailure::execution(
+                "the tool scheduler stopped before a terminal result became durable",
+                false,
+            );
+            failure.error.code = "TOOL_OUTCOME_UNKNOWN".into();
+            failure.error.reason = "tool_outcome_unknown".into();
+            failure.retry.reason =
+                "Inspect external state before deciding whether the operation can be retried"
+                    .into();
+            self.finish_tool(turn_id, call, Err(ToolExecutionError::typed(failure)))?;
+        }
+        Ok(())
+    }
+
     fn commit_model_change(&mut self, provider: &str, model: &str) -> Result<(), AgentLoopError> {
         self.append(SessionEntryPayload::ModelChanged {
             provider: provider.into(),
@@ -584,6 +792,36 @@ impl<'a> AgentLoop<'a> {
             session_id: self.session.manifest().session_id.clone(),
             turn_id: turn_id.clone(),
         })
+    }
+
+    fn commit_final_candidate(
+        &mut self,
+        turn_id: &TurnId,
+        completed: &CompletedMessage,
+        usage: Usage,
+    ) -> Result<EntryId, AgentLoopError> {
+        let mut content = vec![StoredContentBlock::Text {
+            text: completed.text.clone(),
+        }];
+        if !completed.reasoning.is_empty() {
+            content.push(StoredContentBlock::Reasoning {
+                text: completed.reasoning.clone(),
+                visibility: keith_session_store::ReasoningVisibility::Hidden,
+            });
+        }
+        let candidate = self.session.append_final_candidate(
+            UtcTimestamp::now()?,
+            turn_id.clone(),
+            StoredMessage {
+                role: StoredMessageRole::Assistant,
+                content,
+                provider_metadata: BTreeMap::new(),
+            },
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cached_input_tokens,
+        )?;
+        Ok(candidate.id)
     }
 
     fn commit_tool(
@@ -921,9 +1159,11 @@ fn append_tool_exchange(
 }
 
 fn is_context_overflow(error: &RegistryError) -> bool {
-    matches!(error, RegistryError::Provider(provider) if provider.kind == keith_provider_core::ProviderErrorKind::InvalidRequest
-        && (provider.message.to_ascii_lowercase().contains("context")
-            || provider.message.to_ascii_lowercase().contains("token limit")))
+    matches!(
+        error,
+        RegistryError::Provider(provider)
+            if provider.kind == keith_provider_core::ProviderErrorKind::ContextOverflow
+    )
 }
 
 fn loop_error_as_provider(error: &AgentLoopError) -> keith_provider_core::ProviderError {
@@ -1071,6 +1311,18 @@ mod tests {
         }
     }
 
+    struct PanickingTool;
+
+    impl ToolExecutor for PanickingTool {
+        fn execute(
+            &self,
+            _invocation: &ToolInvocation,
+            _cancellation: &CancellationToken,
+        ) -> Result<Vec<u8>, ToolExecutionError> {
+            panic!("simulated tool worker crash");
+        }
+    }
+
     fn response(events: Vec<ModelEvent>) -> ScriptedResponse {
         ScriptedResponse {
             events,
@@ -1214,6 +1466,28 @@ mod tests {
         )
     }
 
+    fn final_candidate_text(
+        store: &SessionStore,
+        session_id: &SessionId,
+        candidate_id: &EntryId,
+    ) -> String {
+        let index = store.load_index(session_id).unwrap();
+        let entry = index.get(candidate_id).expect("durable final candidate");
+        let SessionEntryPayload::AssistantFinalCandidate { message, .. } = &entry.payload else {
+            panic!("result must cite an assistant final candidate");
+        };
+        message
+            .content
+            .iter()
+            .find_map(|block| match block {
+                keith_session_store::ContentBlock::Text { text } => Some(text.clone()),
+                keith_session_store::ContentBlock::Reasoning { .. }
+                | keith_session_store::ContentBlock::Artifact { .. }
+                | keith_session_store::ContentBlock::Resource { .. } => None,
+            })
+            .expect("candidate text")
+    }
+
     #[test]
     fn text_turn_commits_only_after_complete_stream_and_orders_subscribers() {
         let provider = Arc::new(ScriptedProvider::new(vec![text_response("hello")])) as Arc<_>;
@@ -1230,7 +1504,7 @@ mod tests {
             &credential,
             &ProcessTool,
             &spill,
-            &ConservativeCompactor,
+            &NoCompaction,
             &NoSteering,
             &mut writer,
             AgentLoopConfig::default(),
@@ -1246,7 +1520,10 @@ mod tests {
             .unwrap();
         drop(loop_);
         drop(writer);
-        assert_eq!(result.final_text.as_deref(), Some("hello"));
+        assert_eq!(
+            final_candidate_text(&store, &session_id, &result.final_candidate_id),
+            "hello"
+        );
         let pairs = observed.lock().unwrap();
         assert!(
             pairs
@@ -1259,6 +1536,10 @@ mod tests {
             .unwrap()
             .ancestry(manifest.active_leaf.as_ref().unwrap())
             .unwrap();
+        assert!(ancestry.iter().any(|entry| matches!(
+            &entry.payload,
+            SessionEntryPayload::AssistantFinalCandidate { .. }
+        )));
         assert!(!ancestry.iter().any(|entry| matches!(
             &entry.payload,
             SessionEntryPayload::AssistantMessage { .. }
@@ -1290,7 +1571,7 @@ mod tests {
             &credential,
             &ProcessTool,
             &spill,
-            &ConservativeCompactor,
+            &NoCompaction,
             &NoSteering,
             &mut writer,
             AgentLoopConfig::default(),
@@ -1304,7 +1585,26 @@ mod tests {
         );
         drop(loop_);
         drop(writer);
-        assert!(store.load_index(&session_id).unwrap().is_empty());
+        let manifest = store.manifest(&session_id).unwrap();
+        let ancestry = store
+            .load_index(&session_id)
+            .unwrap()
+            .ancestry(manifest.active_leaf.as_ref().unwrap())
+            .unwrap();
+        assert!(!ancestry.iter().any(|entry| matches!(
+            entry.payload,
+            SessionEntryPayload::AssistantFinalCandidate { .. }
+                | SessionEntryPayload::AssistantMessage { .. }
+                | SessionEntryPayload::AssistantActivity { .. }
+                | SessionEntryPayload::AssistantFinal { .. }
+        )));
+        assert!(ancestry.iter().any(|entry| matches!(
+            entry.payload,
+            SessionEntryPayload::StepBoundary {
+                state: StepBoundaryState::Failed,
+                ..
+            }
+        )));
         assert!(events.lock().unwrap().iter().any(|event| matches!(
             event,
             AgentEventKind::MessageCompleted {
@@ -1347,7 +1647,7 @@ mod tests {
             &credential,
             &ProcessTool,
             &spill,
-            &ConservativeCompactor,
+            &NoCompaction,
             &NoSteering,
             &mut writer,
             config,
@@ -1379,11 +1679,11 @@ mod tests {
     }
 
     #[test]
-    fn overflow_compacts_once_and_cancelled_run_stops_before_history() {
+    fn overflow_without_durable_generation_advance_is_not_retried() {
         let overflow = ScriptedResponse {
             events: Vec::new(),
             terminal: Err(ProviderError::new(
-                ProviderErrorKind::InvalidRequest,
+                ProviderErrorKind::ContextOverflow,
                 "context token limit exceeded",
             )),
         };
@@ -1416,19 +1716,21 @@ mod tests {
             &credential,
             &ProcessTool,
             &spill,
-            &ConservativeCompactor,
+            &NoCompaction,
             &NoSteering,
             &mut writer,
             AgentLoopConfig::default(),
         );
-        assert_eq!(
-            loop_
-                .run(model_request, &CancellationToken::default())
-                .unwrap()
-                .final_text
-                .as_deref(),
-            Some("after")
-        );
+        assert!(matches!(
+            loop_.run(model_request, &CancellationToken::default()),
+            Err(AgentLoopError::ContextOverflow)
+        ));
+    }
+
+    #[test]
+    fn cancelled_run_stops_before_provider_or_final_candidate() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let spill = test_spill(artifacts.path());
 
         let provider = Arc::new(ScriptedProvider::new(Vec::new())) as Arc<_>;
         let (_directory, store, session_id, profile_id, mut writer) = session();
@@ -1441,7 +1743,7 @@ mod tests {
             &credential,
             &ProcessTool,
             &spill,
-            &ConservativeCompactor,
+            &NoCompaction,
             &NoSteering,
             &mut writer,
             AgentLoopConfig::default(),
@@ -1452,7 +1754,8 @@ mod tests {
         ));
         drop(loop_);
         drop(writer);
-        assert!(store.load_index(&session_id).unwrap().is_empty());
+        let index = store.load_index(&session_id).unwrap();
+        assert!(index.is_empty());
     }
 
     #[test]
@@ -1488,7 +1791,7 @@ mod tests {
             &credential,
             &ProcessTool,
             &spill,
-            &ConservativeCompactor,
+            &NoCompaction,
             &NoSteering,
             &mut writer,
             config,
@@ -1527,6 +1830,75 @@ mod tests {
     }
 
     #[test]
+    fn tool_worker_crash_pairs_the_call_with_unknown_outcome_and_closes_the_step() {
+        let call_id = ToolCallId::new();
+        let provider = Arc::new(ScriptedProvider::new(vec![response(vec![
+            ModelEvent::ToolCallCompleted {
+                id: call_id.clone(),
+                name: "panic".into(),
+                arguments: json!({"write": true}),
+            },
+            ModelEvent::Finished {
+                reason: StopReason::ToolUse,
+            },
+        ])])) as Arc<_>;
+        let (_directory, store, session_id, profile_id, mut writer) = session();
+        let registry = registry(provider, &profile_id);
+        let artifacts = tempfile::tempdir().unwrap();
+        let spill = test_spill(artifacts.path());
+        let mut loop_ = AgentLoop::new(
+            &registry,
+            &profile_id,
+            &credential,
+            &PanickingTool,
+            &spill,
+            &NoCompaction,
+            &NoSteering,
+            &mut writer,
+            AgentLoopConfig::default(),
+        );
+        assert!(matches!(
+            loop_.run(
+                request(vec![tool_definition("panic", ToolBehavior::StateChanging)]),
+                &CancellationToken::default(),
+            ),
+            Err(AgentLoopError::ToolWorkerPanicked)
+        ));
+        drop(loop_);
+        drop(writer);
+        let manifest = store.manifest(&session_id).unwrap();
+        let ancestry = store
+            .load_index(&session_id)
+            .unwrap()
+            .ancestry(manifest.active_leaf.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(
+            ancestry
+                .iter()
+                .filter(|entry| matches!(
+                    &entry.payload,
+                    SessionEntryPayload::ToolResult {
+                        call_id: result_call,
+                        is_error: true,
+                        failure: Some(failure),
+                        ..
+                    } if result_call == &call_id
+                        && failure.error.code == "TOOL_OUTCOME_UNKNOWN"
+                        && failure.effect_state == ToolEffectState::Unknown
+                ))
+                .count(),
+            1
+        );
+        assert!(ancestry.iter().any(|entry| matches!(
+            entry.payload,
+            SessionEntryPayload::StepBoundary {
+                state: StepBoundaryState::Failed,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn twenty_seven_call_thirteen_error_replay_has_no_synthetic_user_or_retry_narration() {
         let mut responses = (0_u32..27)
             .map(|index| {
@@ -1555,7 +1927,7 @@ mod tests {
             &credential,
             &ProcessTool,
             &spill,
-            &ConservativeCompactor,
+            &NoCompaction,
             &NoSteering,
             &mut writer,
             AgentLoopConfig::default(),
@@ -1571,8 +1943,8 @@ mod tests {
             .unwrap();
         assert_eq!(result.turns, 28);
         assert_eq!(
-            result.final_text.as_deref(),
-            Some("one terminal replay answer")
+            final_candidate_text(&store, &session_id, &result.final_candidate_id),
+            "one terminal replay answer"
         );
         drop(loop_);
         drop(writer);
@@ -1703,7 +2075,7 @@ mod tests {
         let provider = Arc::new(
             OpenAiProvider::new(ProviderHttpConfig::new(&server.base_url).unwrap()).unwrap(),
         ) as Arc<_>;
-        let (_directory, _store, _session_id, profile_id, mut writer) = session();
+        let (_directory, store, session_id, profile_id, mut writer) = session();
         let registry = registry(provider, &profile_id);
         let artifacts = tempfile::tempdir().unwrap();
         let spill = test_spill(artifacts.path());
@@ -1715,18 +2087,19 @@ mod tests {
             &credential,
             &ProcessTool,
             &spill,
-            &ConservativeCompactor,
+            &NoCompaction,
             &NoSteering,
             &mut writer,
             AgentLoopConfig::default(),
         );
+        let result = loop_
+            .run(model_request, &CancellationToken::default())
+            .unwrap();
+        drop(loop_);
+        drop(writer);
         assert_eq!(
-            loop_
-                .run(model_request, &CancellationToken::default())
-                .unwrap()
-                .final_text
-                .as_deref(),
-            Some("from adapter")
+            final_candidate_text(&store, &session_id, &result.final_candidate_id),
+            "from adapter"
         );
     }
 }
