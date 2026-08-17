@@ -1002,7 +1002,7 @@ do_4   = "Expose bounded catalog, search, timeline, expand, compare, and exact-e
 do_5   = "Run source-authority, rebuild equivalence, correction dominance, deletion cleanup, prompt-injection, corruption, and cross-profile isolation tests"
 reqs   = ["25.1-25.6", "26.1-26.6", "44.1-44.5", "52.1-52.3", "53.1-53.2", "53.9-53.10"]
 requires = ["7.3", "7.4", "13.6"]
-touches = ["crates/memory/src/*.rs", "crates/session-store/src/lib.rs", "crates/agent-types/src/lib.rs"]
+touches = ["crates/memory/Cargo.toml", "crates/memory/src/*.rs"]
 
 [task.7.8]
 title  = "Lazy revision-bound MemoryWorld kernel capability"
