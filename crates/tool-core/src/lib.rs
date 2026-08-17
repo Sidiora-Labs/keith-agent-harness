@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use keith_agent_types::{EntityId, ToolCallId};
+use keith_agent_types::{
+    EntityId, ToolCallId, ToolEffectState, ToolErrorCategory, ToolFailure, ToolRecoveryAction,
+    ToolRecoveryActionKind,
+};
 use keith_provider_core::{CancellationToken, ToolBehavior as ProviderToolBehavior};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -116,20 +119,33 @@ pub struct ToolInvocation {
 pub struct ToolExecutionError {
     pub message: String,
     pub retryable: bool,
+    pub failure: Box<ToolFailure>,
 }
 
 impl ToolExecutionError {
     pub fn new(message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
-            message: message.into(),
+            failure: Box::new(ToolFailure::execution(message.clone(), false)),
+            message,
             retryable: false,
         }
     }
 
     pub fn retryable(message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
-            message: message.into(),
+            failure: Box::new(ToolFailure::execution(message.clone(), true)),
+            message,
             retryable: true,
+        }
+    }
+
+    pub fn typed(failure: ToolFailure) -> Self {
+        Self {
+            message: failure.error.detail.clone(),
+            retryable: failure.retry.automatic,
+            failure: Box::new(failure),
         }
     }
 }
@@ -266,6 +282,7 @@ pub struct ToolOutcome {
     pub state: TerminalState,
     pub output: Option<Vec<u8>>,
     pub attempts: u32,
+    pub failure: Option<ToolFailure>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -420,6 +437,13 @@ impl ToolManager {
                 state: TerminalState::Denied,
                 output: None,
                 attempts: 0,
+                failure: Some(terminal_failure(
+                    tool.definition(),
+                    ToolErrorCategory::InvalidArguments,
+                    "INVALID_ARGUMENTS",
+                    "arguments_failed_schema_validation",
+                    error,
+                )),
             });
         }
         if let Readiness::Unready { reason } = self.readiness(&tool)? {
@@ -436,6 +460,13 @@ impl ToolManager {
                     state: TerminalState::Denied,
                     output: None,
                     attempts: 0,
+                    failure: Some(terminal_failure(
+                        tool.definition(),
+                        ToolErrorCategory::PolicyDenied,
+                        "TOOL_POLICY_DENIED",
+                        "execution_policy_denied_tool",
+                        "execution policy denied the tool",
+                    )),
                 });
             }
             ExecutionDecision::Confirm => {
@@ -449,6 +480,13 @@ impl ToolManager {
                         state: TerminalState::Denied,
                         output: None,
                         attempts: 0,
+                        failure: Some(terminal_failure(
+                            tool.definition(),
+                            ToolErrorCategory::ConfirmationDeclined,
+                            "TOOL_CONFIRMATION_DECLINED",
+                            "confirmation_declined",
+                            "confirmation was declined",
+                        )),
                     });
                 }
             }
@@ -463,6 +501,13 @@ impl ToolManager {
                     state: TerminalState::Cancelled,
                     output: None,
                     attempts: attempt - 1,
+                    failure: Some(terminal_failure(
+                        tool.definition(),
+                        ToolErrorCategory::Cancelled,
+                        "TOOL_CANCELLED",
+                        "cancelled_before_attempt",
+                        "tool invocation was cancelled before an attempt started",
+                    )),
                 });
             }
             emitter.emit(ToolEventKind::Started { attempt });
@@ -480,6 +525,7 @@ impl ToolManager {
                         state: TerminalState::Succeeded,
                         output: Some(output),
                         attempts: attempt,
+                        failure: None,
                     });
                 }
                 AttemptResult::Completed(Ok(_)) => {
@@ -491,16 +537,29 @@ impl ToolManager {
                         state: TerminalState::OutputLimitExceeded,
                         output: None,
                         attempts: attempt,
+                        failure: Some(terminal_failure(
+                            tool.definition(),
+                            ToolErrorCategory::OutputLimit,
+                            "TOOL_OUTPUT_LIMIT_EXCEEDED",
+                            "output_exceeded_declared_limit",
+                            "tool output exceeded its declared limit",
+                        )),
                     });
                 }
                 AttemptResult::Completed(Err(error))
-                    if error.retryable && attempt < max_attempts => {}
+                    if error.retryable
+                        && attempt < max_attempts
+                        && (!tool.definition().behavior.writes_state
+                            || error.failure.effect_state == ToolEffectState::NotCommitted) => {}
                 AttemptResult::Completed(Err(error)) => {
-                    emitter.terminal(TerminalState::Failed, Some(error.message));
+                    emitter.terminal(TerminalState::Failed, Some(error.message.clone()));
+                    let mut failure = *error.failure;
+                    normalize_effect_state(tool.definition(), &mut failure);
                     return Ok(ToolOutcome {
                         state: TerminalState::Failed,
                         output: None,
                         attempts: attempt,
+                        failure: Some(failure),
                     });
                 }
                 AttemptResult::Cancelled => {
@@ -509,6 +568,13 @@ impl ToolManager {
                         state: TerminalState::Cancelled,
                         output: None,
                         attempts: attempt,
+                        failure: Some(terminal_failure(
+                            tool.definition(),
+                            ToolErrorCategory::Cancelled,
+                            "TOOL_CANCELLED",
+                            "cancelled_during_execution",
+                            "tool invocation was cancelled during execution",
+                        )),
                     });
                 }
                 AttemptResult::TimedOut => {
@@ -517,6 +583,13 @@ impl ToolManager {
                         state: TerminalState::TimedOut,
                         output: None,
                         attempts: attempt,
+                        failure: Some(terminal_failure(
+                            tool.definition(),
+                            ToolErrorCategory::Timeout,
+                            "TOOL_TIMED_OUT",
+                            "execution_deadline_exceeded",
+                            "tool execution exceeded its declared timeout",
+                        )),
                     });
                 }
                 AttemptResult::Disconnected => return Err(ToolManagerError::WorkerDisconnected),
@@ -695,11 +768,91 @@ impl ToolExecutor for ToolManager {
                 output: Some(output),
                 ..
             }) => Ok(output),
-            Ok(outcome) => Err(ToolExecutionError::new(format!(
-                "tool ended in {:?}",
-                outcome.state
+            Ok(outcome) => Err(ToolExecutionError::typed(outcome.failure.unwrap_or_else(
+                || {
+                    ToolFailure::not_committed(
+                        ToolErrorCategory::Internal,
+                        "TOOL_TERMINAL_FAILURE_MISSING",
+                        "terminal_failure_missing",
+                        format!("tool ended in {:?} without failure detail", outcome.state),
+                    )
+                },
             ))),
-            Err(error) => Err(ToolExecutionError::new(error.to_string())),
+            Err(error) => Err(ToolExecutionError::typed(ToolFailure::not_committed(
+                match &error {
+                    ToolManagerError::UnknownTool(_) | ToolManagerError::Schema(_) => {
+                        ToolErrorCategory::InvalidArguments
+                    }
+                    ToolManagerError::Unready(_) => ToolErrorCategory::NotReady,
+                    ToolManagerError::WorkerDisconnected => ToolErrorCategory::WorkerDisconnected,
+                    ToolManagerError::InvalidDefinition(_)
+                    | ToolManagerError::DuplicateTool(_)
+                    | ToolManagerError::LockPoisoned => ToolErrorCategory::Internal,
+                },
+                "TOOL_MANAGER_ERROR",
+                "tool_manager_rejected_invocation",
+                error.to_string(),
+            ))),
+        }
+    }
+}
+
+fn terminal_failure(
+    definition: &ToolDefinition,
+    category: ToolErrorCategory,
+    code: impl Into<String>,
+    reason: impl Into<String>,
+    detail: impl Into<String>,
+) -> ToolFailure {
+    let mut failure = ToolFailure::not_committed(category, code, reason, detail);
+    if definition.behavior.writes_state
+        && matches!(
+            category,
+            ToolErrorCategory::Cancelled
+                | ToolErrorCategory::Timeout
+                | ToolErrorCategory::OutputLimit
+                | ToolErrorCategory::Execution
+                | ToolErrorCategory::WorkerDisconnected
+                | ToolErrorCategory::Internal
+        )
+    {
+        failure.effect_state = ToolEffectState::Unknown;
+        failure.retry.automatic = false;
+        failure.retry.reason =
+            "The operation may have changed state; inspect state before any retry".into();
+        failure.recovery.insert(
+            0,
+            ToolRecoveryAction {
+                action: ToolRecoveryActionKind::InspectState,
+                description: "Inspect the target state before attempting this operation again"
+                    .into(),
+            },
+        );
+    }
+    failure
+}
+
+fn normalize_effect_state(definition: &ToolDefinition, failure: &mut ToolFailure) {
+    if !definition.behavior.writes_state {
+        failure.effect_state = ToolEffectState::NotCommitted;
+    }
+    if failure.effect_state == ToolEffectState::Unknown {
+        failure.retry.automatic = false;
+        failure.retry.reason =
+            "The operation may have changed state; inspect state before any retry".into();
+        if !failure
+            .recovery
+            .iter()
+            .any(|action| action.action == ToolRecoveryActionKind::InspectState)
+        {
+            failure.recovery.insert(
+                0,
+                ToolRecoveryAction {
+                    action: ToolRecoveryActionKind::InspectState,
+                    description: "Inspect the target state before attempting this operation again"
+                        .into(),
+                },
+            );
         }
     }
 }
@@ -1188,6 +1341,38 @@ mod tests {
     }
 
     #[test]
+    fn unknown_effect_state_changing_failure_is_not_automatically_repeated() {
+        let mut manager = manager(ToolManagerConfig {
+            max_safe_retries: 2,
+            ..ToolManagerConfig::default()
+        });
+        let mut candidate = ConformanceTool::new("unknown-write", Mode::RetryOnce);
+        candidate.definition.behavior.writes_state = true;
+        let tool = Arc::new(candidate);
+        let attempts = Arc::clone(&tool);
+        manager.register(tool).unwrap();
+        let outcome = manager
+            .invoke(
+                invocation("unknown-write", json!({"text": "one attempt"})),
+                &CancellationToken::default(),
+            )
+            .unwrap();
+        assert_eq!(attempts.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(outcome.attempts, 1);
+        let failure = outcome.failure.unwrap();
+        assert_eq!(failure.effect_state, ToolEffectState::Unknown);
+        assert!(!failure.retry.automatic);
+        assert_eq!(failure.status, keith_agent_types::ToolFailureStatus::Error);
+        assert!(!failure.success);
+        assert!(
+            failure
+                .recovery
+                .iter()
+                .any(|action| action.action == ToolRecoveryActionKind::InspectState)
+        );
+    }
+
+    #[test]
     fn timeout_output_limit_and_failure_are_distinct_terminal_states() {
         let mut manager = manager(ToolManagerConfig {
             cancellation_poll: Duration::from_millis(2),
@@ -1199,18 +1384,19 @@ mod tests {
         oversized.definition.output_limit_bytes = 4;
         manager.register(Arc::new(timeout)).unwrap();
         manager.register(Arc::new(oversized)).unwrap();
-        manager
-            .register(Arc::new(ConformanceTool::new("failed", Mode::Fail)))
+        let mut failed_tool = ConformanceTool::new("failed", Mode::Fail);
+        failed_tool.definition.behavior.writes_state = true;
+        manager.register(Arc::new(failed_tool)).unwrap();
+        let timeout = manager
+            .invoke(
+                invocation("timeout", json!({"text": "x"})),
+                &CancellationToken::default(),
+            )
             .unwrap();
+        assert_eq!(timeout.state, TerminalState::TimedOut);
         assert_eq!(
-            manager
-                .invoke(
-                    invocation("timeout", json!({"text": "x"})),
-                    &CancellationToken::default()
-                )
-                .unwrap()
-                .state,
-            TerminalState::TimedOut
+            timeout.failure.as_ref().unwrap().effect_state,
+            ToolEffectState::NotCommitted
         );
         assert_eq!(
             manager
@@ -1222,16 +1408,39 @@ mod tests {
                 .state,
             TerminalState::OutputLimitExceeded
         );
+        let failed = manager
+            .invoke(
+                invocation("failed", json!({"text": "x"})),
+                &CancellationToken::default(),
+            )
+            .unwrap();
+        assert_eq!(failed.state, TerminalState::Failed);
         assert_eq!(
-            manager
-                .invoke(
-                    invocation("failed", json!({"text": "x"})),
-                    &CancellationToken::default()
-                )
-                .unwrap()
-                .state,
-            TerminalState::Failed
+            failed.failure.as_ref().unwrap().error.code,
+            "TOOL_EXECUTION_FAILED"
         );
+        assert_eq!(
+            failed.failure.as_ref().unwrap().effect_state,
+            ToolEffectState::Unknown
+        );
+        assert!(!failed.failure.as_ref().unwrap().retry.automatic);
+        assert!(
+            failed
+                .failure
+                .as_ref()
+                .unwrap()
+                .recovery
+                .iter()
+                .any(|action| { action.action == ToolRecoveryActionKind::InspectState })
+        );
+        let surfaced = ToolExecutor::execute(
+            &manager,
+            &invocation("failed", json!({"text": "x"})),
+            &CancellationToken::default(),
+        )
+        .unwrap_err();
+        assert_eq!(surfaced.message, "execution failed");
+        assert_eq!(surfaced.failure.error.code, "TOOL_EXECUTION_FAILED");
     }
 
     #[test]

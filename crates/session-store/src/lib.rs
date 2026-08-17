@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 use keith_agent_types::{
-    ArtifactId, CURRENT_SCHEMA_VERSION, ChildId, EntityId, EntryId, Generation, GoalId, ProfileId,
-    Revision, RootTreeId, SchemaVersion, SessionId, ToolCallId, UtcTimestamp, WorkerId,
-    WorkspaceId, canonical_json_bytes,
+    ActionId, ArtifactId, CURRENT_SCHEMA_VERSION, ChildId, EntityId, EntryId, Generation, GoalId,
+    ProfileId, Revision, RootTreeId, SchemaVersion, SessionId, ToolCallId, ToolFailure, TurnId,
+    UtcTimestamp, WorkerId, WorkspaceId, canonical_json_bytes,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -179,6 +179,35 @@ pub struct StoredMessage {
     pub provider_metadata: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnTerminalStatus {
+    Completed,
+    Failed,
+    Cancelled,
+    Exhausted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoritativeTurnSnapshot {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub final_id: EntryId,
+    pub delivery_outbox_id: EntryId,
+    pub terminal_id: EntryId,
+    pub status: TurnTerminalStatus,
+    pub execution_succeeded: bool,
+    pub final_created: bool,
+    pub artifacts_persisted: bool,
+    pub delivery_enqueued: bool,
+    pub delivery_acknowledged: bool,
+    pub action_id: Option<ActionId>,
+    pub artifact_ids: Vec<ArtifactId>,
+    pub assistant_final: StoredMessage,
+    pub detail: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "payload")]
 pub enum SessionEntryPayload {
@@ -187,6 +216,19 @@ pub enum SessionEntryPayload {
     },
     AssistantMessage {
         message: StoredMessage,
+    },
+    AssistantActivity {
+        turn_id: TurnId,
+        message: StoredMessage,
+    },
+    AssistantFinal {
+        turn_id: TurnId,
+        message: StoredMessage,
+    },
+    ControllerGuidance {
+        turn_id: TurnId,
+        source_id: String,
+        text: String,
     },
     ToolCall {
         call_id: ToolCallId,
@@ -197,6 +239,31 @@ pub enum SessionEntryPayload {
         call_id: ToolCallId,
         content: Vec<ContentBlock>,
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<ToolFailure>,
+    },
+    TurnDeliveryOutbox {
+        turn_id: TurnId,
+        final_id: EntryId,
+        action_id: Option<ActionId>,
+        artifact_ids: Vec<ArtifactId>,
+    },
+    TerminalTurn {
+        turn_id: TurnId,
+        final_id: EntryId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery_outbox_id: Option<EntryId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authoritative_snapshot_id: Option<EntryId>,
+        status: TurnTerminalStatus,
+        execution_succeeded: bool,
+        final_created: bool,
+        artifacts_persisted: bool,
+        delivery_enqueued: bool,
+        detail: Option<String>,
+    },
+    AuthoritativeSnapshot {
+        snapshot: AuthoritativeTurnSnapshot,
     },
     ModelChanged {
         provider: String,
@@ -439,8 +506,14 @@ impl SessionIndex {
                 }
                 SessionEntryPayload::UserMessage { .. }
                 | SessionEntryPayload::AssistantMessage { .. }
+                | SessionEntryPayload::AssistantActivity { .. }
+                | SessionEntryPayload::AssistantFinal { .. }
+                | SessionEntryPayload::ControllerGuidance { .. }
                 | SessionEntryPayload::ToolCall { .. }
                 | SessionEntryPayload::ToolResult { .. }
+                | SessionEntryPayload::TurnDeliveryOutbox { .. }
+                | SessionEntryPayload::TerminalTurn { .. }
+                | SessionEntryPayload::AuthoritativeSnapshot { .. }
                 | SessionEntryPayload::BranchSummary { .. }
                 | SessionEntryPayload::GoalChanged { .. }
                 | SessionEntryPayload::PlanChanged { .. }
@@ -725,6 +798,8 @@ pub enum SessionStoreError {
     CorruptHistory { line: usize, reason: String },
     #[error("compaction configuration or output is invalid: {0}")]
     InvalidCompaction(String),
+    #[error("terminal turn is invalid: {0}")]
+    InvalidTerminalTurn(String),
     #[error("compaction selected leaf changed before commit")]
     StaleCompaction,
     #[error("profile snapshot is invalid: {0}")]
@@ -1177,6 +1252,243 @@ impl SessionWriter {
         Ok(entry)
     }
 
+    /// Atomically appends the final, delivery intent, authoritative snapshot, and terminal.
+    /// Repeating the same turn finalization repairs publication and returns the committed pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the history is inconsistent or the pair cannot be durably appended.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn append_finalized_turn(
+        &mut self,
+        timestamp: UtcTimestamp,
+        turn_id: TurnId,
+        message: StoredMessage,
+        status: TurnTerminalStatus,
+        execution_succeeded: bool,
+        artifacts_persisted: bool,
+        action_id: Option<ActionId>,
+        artifact_ids: Vec<ArtifactId>,
+        detail: Option<String>,
+    ) -> Result<(SessionEntry, SessionEntry), SessionStoreError> {
+        self.ensure_writable()?;
+        let history_path = self.directory.join(HISTORY_FILE);
+        let mut index = parse_history_for_finalization(&history_path)?;
+        if let Some(terminal) = index.entries.values().find(|entry| {
+            matches!(
+                &entry.payload,
+                SessionEntryPayload::TerminalTurn {
+                    turn_id: existing,
+                    ..
+                } if existing == &turn_id
+            )
+        }).cloned() {
+            let SessionEntryPayload::TerminalTurn {
+                final_id,
+                delivery_outbox_id,
+                authoritative_snapshot_id,
+                ..
+            } = &terminal.payload
+            else {
+                unreachable!("terminal predicate selected a terminal payload")
+            };
+            let final_entry = index
+                .entries
+                .get(final_id)
+                .ok_or_else(|| SessionStoreError::MissingEntry(final_id.clone()))?;
+            if !matches!(
+                &final_entry.payload,
+                SessionEntryPayload::AssistantFinal {
+                    turn_id: final_turn,
+                    ..
+                } if final_turn == &turn_id
+            ) {
+                return Err(SessionStoreError::InvalidTerminalTurn(
+                    "terminal final_id does not reference its turn's assistant final".into(),
+                ));
+            }
+            let outbox_id = delivery_outbox_id.as_ref().ok_or_else(|| {
+                SessionStoreError::InvalidTerminalTurn(
+                    "terminal does not reference a durable delivery outbox record".into(),
+                )
+            })?;
+            let outbox = index
+                .entries
+                .get(outbox_id)
+                .ok_or_else(|| SessionStoreError::MissingEntry(outbox_id.clone()))?;
+            if !matches!(
+                &outbox.payload,
+                SessionEntryPayload::TurnDeliveryOutbox {
+                    turn_id: outbox_turn,
+                    final_id: outbox_final,
+                    ..
+                } if outbox_turn == &turn_id && outbox_final == final_id
+            ) {
+                return Err(SessionStoreError::InvalidTerminalTurn(
+                    "terminal outbox does not reference its turn and assistant final".into(),
+                ));
+            }
+            let authoritative_snapshot = authoritative_turn_snapshot(
+                &self.manifest.session_id,
+                final_entry,
+                outbox,
+                &terminal,
+            )?;
+            let published_leaf = if let Some(snapshot_id) = authoritative_snapshot_id {
+                let snapshot_entry = index
+                    .entries
+                    .get(snapshot_id)
+                    .ok_or_else(|| SessionStoreError::MissingEntry(snapshot_id.clone()))?;
+                if !matches!(
+                    &snapshot_entry.payload,
+                    SessionEntryPayload::AuthoritativeSnapshot { snapshot }
+                        if snapshot == &authoritative_snapshot
+                ) {
+                    return Err(SessionStoreError::InvalidTerminalTurn(
+                        "terminal authoritative snapshot does not match its finalized turn".into(),
+                    ));
+                }
+                terminal.id.clone()
+            } else if let Some(snapshot_entry) = index.entries.values().find(|entry| {
+                matches!(
+                    &entry.payload,
+                    SessionEntryPayload::AuthoritativeSnapshot { snapshot }
+                        if snapshot.terminal_id == terminal.id
+                )
+            }) {
+                if !matches!(
+                    &snapshot_entry.payload,
+                    SessionEntryPayload::AuthoritativeSnapshot { snapshot }
+                        if snapshot == &authoritative_snapshot
+                ) {
+                    return Err(SessionStoreError::InvalidTerminalTurn(
+                        "repaired authoritative snapshot does not match its finalized turn".into(),
+                    ));
+                }
+                snapshot_entry.id.clone()
+            } else {
+                self.append(
+                    Some(terminal.id.clone()),
+                    timestamp,
+                    SessionEntryPayload::AuthoritativeSnapshot {
+                        snapshot: authoritative_snapshot,
+                    },
+                )?
+                .id
+            };
+            if self.manifest.active_leaf.as_ref() != Some(&published_leaf) {
+                let mut next_manifest = self.manifest.clone();
+                next_manifest.active_leaf = Some(published_leaf);
+                write_manifest(&self.directory, &next_manifest)?;
+                self.manifest = next_manifest;
+            }
+            return Ok((final_entry.clone(), terminal.clone()));
+        }
+        let existing_final = index.entries.values().find(|entry| {
+            matches!(
+                &entry.payload,
+                SessionEntryPayload::AssistantFinal {
+                    turn_id: existing,
+                    ..
+                } if existing == &turn_id
+            )
+        });
+        let mut pending = Vec::new();
+        let final_entry = if let Some(existing) = existing_final {
+            existing.clone()
+        } else {
+            let entry = SessionEntry::new(
+                EntryId::new(),
+                self.manifest.active_leaf.clone(),
+                timestamp,
+                SessionEntryPayload::AssistantFinal {
+                    turn_id: turn_id.clone(),
+                    message,
+                },
+            )?;
+            index.insert(entry.clone())?;
+            pending.push(entry.clone());
+            entry
+        };
+        let existing_outbox = index.entries.values().find(|entry| {
+            matches!(
+                &entry.payload,
+                SessionEntryPayload::TurnDeliveryOutbox {
+                    turn_id: existing,
+                    final_id,
+                    ..
+                } if existing == &turn_id && final_id == &final_entry.id
+            )
+        });
+        let outbox_entry = if let Some(existing) = existing_outbox {
+            existing.clone()
+        } else {
+            let entry = SessionEntry::new(
+                EntryId::new(),
+                Some(final_entry.id.clone()),
+                timestamp,
+                SessionEntryPayload::TurnDeliveryOutbox {
+                    turn_id: turn_id.clone(),
+                    final_id: final_entry.id.clone(),
+                    action_id,
+                    artifact_ids,
+                },
+            )?;
+            index.insert(entry.clone())?;
+            pending.push(entry.clone());
+            entry
+        };
+        let authoritative_snapshot_id = EntryId::new();
+        let terminal_id = EntryId::new();
+        let terminal_entry = SessionEntry::new(
+            terminal_id,
+            Some(authoritative_snapshot_id.clone()),
+            timestamp,
+            SessionEntryPayload::TerminalTurn {
+                turn_id: turn_id.clone(),
+                final_id: final_entry.id.clone(),
+                delivery_outbox_id: Some(outbox_entry.id.clone()),
+                authoritative_snapshot_id: Some(authoritative_snapshot_id.clone()),
+                status,
+                execution_succeeded,
+                final_created: true,
+                artifacts_persisted,
+                delivery_enqueued: true,
+                detail: detail.clone(),
+            },
+        )?;
+        let authoritative_snapshot_entry = SessionEntry::new(
+            authoritative_snapshot_id,
+            Some(outbox_entry.id.clone()),
+            timestamp,
+            SessionEntryPayload::AuthoritativeSnapshot {
+                snapshot: authoritative_turn_snapshot(
+                    &self.manifest.session_id,
+                    &final_entry,
+                    &outbox_entry,
+                    &terminal_entry,
+                )?,
+            },
+        )?;
+        index.insert(authoritative_snapshot_entry.clone())?;
+        pending.push(authoritative_snapshot_entry);
+        index.insert(terminal_entry.clone())?;
+        pending.push(terminal_entry.clone());
+        let mut bytes = Vec::new();
+        for entry in pending {
+            bytes.extend(canonical_json_bytes(&entry)?);
+            bytes.push(b'\n');
+        }
+        let mut history = OpenOptions::new().append(true).open(&history_path)?;
+        history.write_all(&bytes)?;
+        history.sync_all()?;
+        let mut next_manifest = self.manifest.clone();
+        next_manifest.active_leaf = Some(terminal_entry.id.clone());
+        write_manifest(&self.directory, &next_manifest)?;
+        self.manifest = next_manifest;
+        Ok((final_entry, terminal_entry))
+    }
+
     /// # Errors
     ///
     /// Returns an error when the active ancestry is corrupt or the policy is invalid.
@@ -1338,6 +1650,78 @@ impl SessionWriter {
     }
 }
 
+fn authoritative_turn_snapshot(
+    session_id: &SessionId,
+    final_entry: &SessionEntry,
+    outbox_entry: &SessionEntry,
+    terminal_entry: &SessionEntry,
+) -> Result<AuthoritativeTurnSnapshot, SessionStoreError> {
+    let SessionEntryPayload::AssistantFinal {
+        turn_id: final_turn,
+        message,
+    } = &final_entry.payload
+    else {
+        return Err(SessionStoreError::InvalidTerminalTurn(
+            "authoritative snapshot final is not an assistant final".into(),
+        ));
+    };
+    let SessionEntryPayload::TurnDeliveryOutbox {
+        turn_id: outbox_turn,
+        final_id: outbox_final,
+        action_id,
+        artifact_ids,
+    } = &outbox_entry.payload
+    else {
+        return Err(SessionStoreError::InvalidTerminalTurn(
+            "authoritative snapshot outbox is not a turn delivery outbox".into(),
+        ));
+    };
+    let SessionEntryPayload::TerminalTurn {
+        turn_id,
+        final_id,
+        delivery_outbox_id,
+        status,
+        execution_succeeded,
+        final_created,
+        artifacts_persisted,
+        delivery_enqueued,
+        detail,
+        ..
+    } = &terminal_entry.payload
+    else {
+        return Err(SessionStoreError::InvalidTerminalTurn(
+            "authoritative snapshot terminal is not a terminal turn".into(),
+        ));
+    };
+    if final_turn != turn_id
+        || outbox_turn != turn_id
+        || final_id != &final_entry.id
+        || outbox_final != final_id
+        || delivery_outbox_id.as_ref() != Some(&outbox_entry.id)
+    {
+        return Err(SessionStoreError::InvalidTerminalTurn(
+            "authoritative snapshot records do not describe one finalized turn".into(),
+        ));
+    }
+    Ok(AuthoritativeTurnSnapshot {
+        session_id: session_id.clone(),
+        turn_id: turn_id.clone(),
+        final_id: final_id.clone(),
+        delivery_outbox_id: outbox_entry.id.clone(),
+        terminal_id: terminal_entry.id.clone(),
+        status: *status,
+        execution_succeeded: *execution_succeeded,
+        final_created: *final_created,
+        artifacts_persisted: *artifacts_persisted,
+        delivery_enqueued: *delivery_enqueued,
+        delivery_acknowledged: false,
+        action_id: action_id.clone(),
+        artifact_ids: artifact_ids.clone(),
+        assistant_final: message.clone(),
+        detail: detail.clone(),
+    })
+}
+
 impl Drop for SessionWriter {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.lock_file);
@@ -1406,6 +1790,30 @@ fn parse_complete_history(path: &Path) -> Result<SessionIndex, SessionStoreError
         });
     }
     Ok(inspection.index)
+}
+
+fn parse_history_for_finalization(path: &Path) -> Result<SessionIndex, SessionStoreError> {
+    let bytes = fs::read(path)?;
+    let inspection = inspect_bytes(&bytes);
+    if inspection.issues.is_empty() {
+        return Ok(inspection.index);
+    }
+    if inspection.issues.len() == 1 && inspection.issues[0].final_unterminated {
+        let history = OpenOptions::new().write(true).open(path)?;
+        history.set_len(u64::try_from(inspection.valid_bytes).map_err(|_| {
+            SessionStoreError::CorruptHistory {
+                line: inspection.issues[0].line,
+                reason: "history length exceeds supported range".into(),
+            }
+        })?)?;
+        history.sync_all()?;
+        return Ok(inspection.index);
+    }
+    let issue = &inspection.issues[0];
+    Err(SessionStoreError::CorruptHistory {
+        line: issue.line,
+        reason: issue.reason.clone(),
+    })
 }
 
 fn validate_compaction_policy(policy: CompactionPolicy) -> Result<(), SessionStoreError> {
@@ -1717,6 +2125,300 @@ mod tests {
         let index = store.load_index(&session_id).unwrap();
         assert_eq!(index.children_of(Some(&root.id)).len(), 2);
         assert_eq!(index.len(), 3);
+    }
+
+    #[test]
+    fn terminal_finalization_is_exactly_once_and_references_its_final() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+        writer
+            .append(
+                None,
+                UtcTimestamp::UNIX_EPOCH,
+                message("accepted user input"),
+            )
+            .unwrap();
+        let turn_id = TurnId::new();
+        let final_message = StoredMessage {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "final answer".into(),
+            }],
+            provider_metadata: BTreeMap::new(),
+        };
+        let first = writer
+            .append_finalized_turn(
+                UtcTimestamp::UNIX_EPOCH,
+                turn_id.clone(),
+                final_message.clone(),
+                TurnTerminalStatus::Completed,
+                true,
+                true,
+                None,
+                Vec::new(),
+                None,
+            )
+            .unwrap();
+        let replay = writer
+            .append_finalized_turn(
+                UtcTimestamp::UNIX_EPOCH,
+                turn_id.clone(),
+                final_message,
+                TurnTerminalStatus::Completed,
+                true,
+                true,
+                None,
+                Vec::new(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(first, replay);
+        let ancestry = writer.active_ancestry().unwrap();
+        let finals = ancestry
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.payload,
+                    SessionEntryPayload::AssistantFinal {
+                        turn_id: existing,
+                        ..
+                    } if existing == &turn_id
+                )
+            })
+            .collect::<Vec<_>>();
+        let terminals = ancestry
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.payload,
+                    SessionEntryPayload::TerminalTurn {
+                        turn_id: existing,
+                        ..
+                    } if existing == &turn_id
+                )
+            })
+            .collect::<Vec<_>>();
+        let outboxes = ancestry
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.payload,
+                    SessionEntryPayload::TurnDeliveryOutbox {
+                        turn_id: existing,
+                        ..
+                    } if existing == &turn_id
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(finals.len(), 1);
+        assert_eq!(outboxes.len(), 1);
+        assert_eq!(terminals.len(), 1);
+        assert!(matches!(
+            &terminals[0].payload,
+            SessionEntryPayload::TerminalTurn {
+                final_id,
+                delivery_outbox_id: Some(outbox_id),
+                delivery_enqueued: true,
+                ..
+            } if final_id == &finals[0].id && outbox_id == &outboxes[0].id
+        ));
+    }
+
+    #[test]
+    fn legacy_successful_tool_result_serialization_does_not_gain_a_failure_field() {
+        let payload = SessionEntryPayload::ToolResult {
+            call_id: ToolCallId::new(),
+            content: vec![ContentBlock::Text {
+                text: "succeeded".into(),
+            }],
+            is_error: false,
+            failure: None,
+        };
+        let encoded = serde_json::to_value(&payload).unwrap();
+        assert!(encoded.get("failure").is_none());
+        let decoded: SessionEntryPayload = serde_json::from_value(encoded).unwrap();
+        assert!(matches!(
+            decoded,
+            SessionEntryPayload::ToolResult { failure: None, .. }
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn finalization_repairs_an_unterminated_batch_without_duplicate_final() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+        let accepted = writer
+            .append(
+                None,
+                UtcTimestamp::UNIX_EPOCH,
+                message("accepted user input"),
+            )
+            .unwrap();
+        let turn_id = TurnId::new();
+        let final_message = StoredMessage {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "recovered final".into(),
+            }],
+            provider_metadata: BTreeMap::new(),
+        };
+        let final_entry = SessionEntry::new(
+            EntryId::new(),
+            Some(accepted.id),
+            UtcTimestamp::UNIX_EPOCH,
+            SessionEntryPayload::AssistantFinal {
+                turn_id: turn_id.clone(),
+                message: final_message.clone(),
+            },
+        )
+        .unwrap();
+        let incomplete_outbox = SessionEntry::new(
+            EntryId::new(),
+            Some(final_entry.id.clone()),
+            UtcTimestamp::UNIX_EPOCH,
+            SessionEntryPayload::TurnDeliveryOutbox {
+                turn_id: turn_id.clone(),
+                final_id: final_entry.id.clone(),
+                action_id: None,
+                artifact_ids: Vec::new(),
+            },
+        )
+        .unwrap();
+        let mut bytes = canonical_json_bytes(&final_entry).unwrap();
+        bytes.push(b'\n');
+        let partial = canonical_json_bytes(&incomplete_outbox).unwrap();
+        bytes.extend(&partial[..partial.len() / 2]);
+        let mut history = OpenOptions::new()
+            .append(true)
+            .open(writer.directory.join(HISTORY_FILE))
+            .unwrap();
+        history.write_all(&bytes).unwrap();
+        history.sync_all().unwrap();
+
+        writer
+            .append_finalized_turn(
+                UtcTimestamp::UNIX_EPOCH,
+                turn_id.clone(),
+                final_message,
+                TurnTerminalStatus::Failed,
+                false,
+                true,
+                None,
+                Vec::new(),
+                Some("recovered after interrupted finalization".into()),
+            )
+            .unwrap();
+        let ancestry = writer.active_ancestry().unwrap();
+        assert_eq!(
+            ancestry
+                .iter()
+                .filter(|entry| matches!(
+                    &entry.payload,
+                    SessionEntryPayload::AssistantFinal {
+                        turn_id: existing,
+                        ..
+                    } if existing == &turn_id
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            ancestry
+                .iter()
+                .filter(|entry| matches!(
+                    &entry.payload,
+                    SessionEntryPayload::TurnDeliveryOutbox {
+                        turn_id: existing,
+                        ..
+                    } if existing == &turn_id
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            ancestry
+                .iter()
+                .filter(|entry| matches!(
+                    &entry.payload,
+                    SessionEntryPayload::TerminalTurn {
+                        turn_id: existing,
+                        ..
+                    } if existing == &turn_id
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn finalization_republishes_a_terminal_hidden_by_a_stale_manifest() {
+        let directory = tempdir().unwrap();
+        let store = SessionStore::open(directory.path()).unwrap();
+        let session_id = SessionId::new();
+        store.create(new_session(session_id.clone())).unwrap();
+        let (accepted_id, turn_id, final_message, terminal_id) = {
+            let mut writer = store.acquire_writer(&session_id, identity(1)).unwrap();
+            let accepted = writer
+                .append(
+                    None,
+                    UtcTimestamp::UNIX_EPOCH,
+                    message("accepted user input"),
+                )
+                .unwrap();
+            let turn_id = TurnId::new();
+            let final_message = StoredMessage {
+                role: MessageRole::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "durable final".into(),
+                }],
+                provider_metadata: BTreeMap::new(),
+            };
+            let (_, terminal) = writer
+                .append_finalized_turn(
+                    UtcTimestamp::UNIX_EPOCH,
+                    turn_id.clone(),
+                    final_message.clone(),
+                    TurnTerminalStatus::Completed,
+                    true,
+                    true,
+                    None,
+                    Vec::new(),
+                    None,
+                )
+                .unwrap();
+            (accepted.id, turn_id, final_message, terminal.id)
+        };
+        let session_directory = store.session_directory(&session_id).unwrap();
+        let mut stale = read_manifest(&session_directory).unwrap();
+        stale.active_leaf = Some(accepted_id);
+        write_manifest(&session_directory, &stale).unwrap();
+
+        let mut writer = store.acquire_writer(&session_id, identity(2)).unwrap();
+        writer
+            .append_finalized_turn(
+                UtcTimestamp::UNIX_EPOCH,
+                turn_id,
+                final_message,
+                TurnTerminalStatus::Completed,
+                true,
+                true,
+                None,
+                Vec::new(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(writer.manifest().active_leaf.as_ref(), Some(&terminal_id));
+        assert_eq!(
+            store.manifest(&session_id).unwrap().active_leaf.as_ref(),
+            Some(&terminal_id)
+        );
     }
 
     #[test]

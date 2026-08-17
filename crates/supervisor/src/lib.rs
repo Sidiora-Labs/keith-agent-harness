@@ -11,7 +11,7 @@ use keith_agent_types::{EntityId, Generation, RootTreeId, SessionId, UtcTimestam
 use keith_connection::{
     LocalStream, connect_local, set_local_read_timeout, set_local_write_timeout,
 };
-use keith_runtime_api::{RuntimeRequest, RuntimeResponse};
+use keith_runtime_api::{RuntimeEvent, RuntimeRequest, RuntimeResponse};
 use keith_worker_runtime::{
     LeaseError, LeaseGrant, LeaseManager, PrivateMessage, PrivateProtocolError, PrivateTransport,
     WorkerRegistration, WorkerRunState, read_registration, registration_path,
@@ -429,6 +429,21 @@ impl WorkerSupervisor {
         generation: Generation,
         request: RuntimeRequest,
     ) -> Result<RuntimeResponse, SupervisorError> {
+        self.execute_streaming(root_tree_id, generation, request, &mut |_| {})
+    }
+
+    /// Executes a request and forwards its ordered runtime events before returning the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale ownership, private transport loss, or response mismatch.
+    pub fn execute_streaming(
+        &mut self,
+        root_tree_id: &RootTreeId,
+        generation: Generation,
+        request: RuntimeRequest,
+        events: &mut dyn FnMut(RuntimeEvent),
+    ) -> Result<RuntimeResponse, SupervisorError> {
         self.validate_route(root_tree_id, generation)?;
         let worker = self
             .workers
@@ -458,6 +473,13 @@ impl WorkerSupervisor {
                     response,
                 }) if response_id == request_id => return Ok(*response),
                 Ok(PrivateMessage::ExecutionResult { .. }) => {
+                    return Err(SupervisorError::MismatchedRuntimeResponse);
+                }
+                Ok(PrivateMessage::ExecutionEvent {
+                    request_id: event_request_id,
+                    event,
+                }) if event_request_id == request_id => events(*event),
+                Ok(PrivateMessage::ExecutionEvent { .. }) => {
                     return Err(SupervisorError::MismatchedRuntimeResponse);
                 }
                 Ok(PrivateMessage::Heartbeat { at }) => {
@@ -522,6 +544,7 @@ impl WorkerSupervisor {
                                 | PrivateMessage::Ready { .. }
                                 | PrivateMessage::Execute { .. }
                                 | PrivateMessage::ExecutionResult { .. }
+                                | PrivateMessage::ExecutionEvent { .. }
                                 | PrivateMessage::CancelActive { .. }
                                 | PrivateMessage::CancellationResult { .. }
                                 | PrivateMessage::ShutdownAck

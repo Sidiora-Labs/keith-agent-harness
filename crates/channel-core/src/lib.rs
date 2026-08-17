@@ -597,7 +597,14 @@ impl<T: AgentTransport> AgentConnection<T> {
                 WireMessage::CommandResult(_) => {
                     return Err(AgentConnectionError::MismatchedResult);
                 }
-                WireMessage::Event(event) => self.pending_events.push_back(event),
+                message
+                @ (WireMessage::Event(_)
+                | WireMessage::Snapshot(_)
+                | WireMessage::Terminal(_)) => {
+                    if let Some(event) = message.into_event() {
+                        self.pending_events.push_back(event);
+                    }
+                }
                 WireMessage::ClientHello(_)
                 | WireMessage::ServerHello(_)
                 | WireMessage::Command(_) => return Err(AgentConnectionError::Handshake),

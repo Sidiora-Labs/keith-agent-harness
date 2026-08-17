@@ -85,6 +85,7 @@ fn chromium_navigation_refresh_reconnect_restart_and_mutations_are_real() {
         mutation_limit_per_second: 64,
         daemon_timeout: Duration::from_secs(2),
         openai_compatibility: None,
+        platform_compatibility: None,
     })
     .unwrap();
     let task = runtime.spawn(server.serve_listener(listener));
@@ -371,6 +372,7 @@ fn snapshot(profile: &ProfileId, session: &SessionId, root: &RootTreeId) -> Sess
             next_wake: None,
             safe_error: None,
         },
+        terminal: None,
         revision: Revision::ZERO,
     }
 }

@@ -659,3 +659,18 @@ Keith Agent combines the Delta-1 supervised recursive runtime with the Gamma-3 a
 6. BEARER credentials SHALL be configured by named secret environment reference, compared without value-dependent equality, redacted from diagnostics, and required on every compatibility route; non-loopback exposure SHALL require explicit operator acknowledgement.
 7. A real-process conformance suite SHALL exercise model discovery, authenticated JSON and streaming turns, durable continuation, multiple profiles/conversations, malformed and oversized requests, unsupported features, disconnect/restart recovery, native-client coexistence, and OpenAI-compatible client configuration without secret leakage.
 
+## Requirement 52: Typed context provenance, honest tool failure, and mandatory turn finalization
+
+**User Story:** As a user whose action Keith has durably accepted, I want context identity and turn completion enforced by the runtime, so that injected state cannot impersonate me and failures cannot leave an acknowledged turn unanswered.
+
+### Acceptance Criteria
+
+1. EVERY model-visible context record SHALL carry session, turn, entry, source, provenance, current-turn, persistence-policy, and model-visibility metadata; provider role `user` SHALL be emitted if and only if provenance is UserIngress.
+2. SYSTEM and developer policy, session contract, active goal, marked past context or compaction checkpoint, exact active thread tail, current-turn tool calls/results, active user entry ID, and the verbatim last user message SHALL be compiled as distinct typed request sections; the active user message SHALL remain outside compaction.
+3. COMPACTION, memory, retrieved knowledge, controller guidance, child results, and retry guidance SHALL retain explicit non-user provenance and SHALL NOT deserialize, persist, or re-enter memory as UserIngress.
+4. A failed tool invocation SHALL remain a tool result paired by call ID and SHALL preserve status, success false, typed error category/code/reason/detail, retry directive, effect state, and recovery actions.
+5. THE repetition fingerprint SHALL contain tool, canonical arguments, error category, error code, and effect state; unknown effects SHALL require state inspection before retry and an exhausted identical-failure budget SHALL choose an alternative or finalize without synthetic user guidance.
+6. EVERY durably accepted user action SHALL atomically commit exactly one terminal assistant final, artifact references, terminal status referencing that final ID, authoritative snapshot, and durable delivery outbox item; provider/tool failure SHALL use a deterministic honest local finalizer.
+7. EXECUTION success, final creation, artifact persistence, terminal status, and delivery acknowledgement SHALL be tracked independently; disconnect SHALL NOT convert a produced final into command rejection, and reconnect SHALL replay the same authoritative state until acknowledgement.
+8. A replay and fault suite SHALL cover the 27-call/13-error regression, provenance deserialization denial, repeated compaction and restart, failures around tool/final/snapshot/outbox boundaries, unknown-effect writes, provider outage, artifact delivery, and disconnect/reconnect with exactly one final answer.
+

@@ -17,12 +17,14 @@ signal-hook.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+keith-agent-web = { path = "../agent-web" }
 keith-agent-types = { path = "../../crates/agent-types" }
 keith-connection = { path = "../../crates/connection" }
 keith-credentials = { path = "../../crates/credentials" }
 keith-protocol = { path = "../../crates/protocol" }
 nix.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
 
 [[bin]]
 name = "agentd"

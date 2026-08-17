@@ -9,8 +9,8 @@ mod server;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::{
-    CredentialKeySource, OpenAiCompatibilityConfig, ServerArguments, ServerError, WebServer,
-    WebServerConfig,
+    CredentialKeySource, OpenAiCompatibilityConfig, PlatformCompatibilityConfig, ServerArguments,
+    ServerError, WebServer, WebServerConfig,
 };
 
 use std::fmt::Write as _;
@@ -200,7 +200,7 @@ fn surface_panel(surface: Surface, profile: &str, csrf: &str) -> String {
 
 fn domain_form(kind: &str, label: &str, placeholder: &str) -> String {
     format!(
-        "<form class=\"domain-command\" data-kind=\"{kind}\"><label>{label}<textarea name=\"value\" maxlength=\"65536\" placeholder=\"{placeholder}\" required></textarea></label><button type=\"button\">Apply</button></form>"
+        "<div class=\"projection\" aria-live=\"polite\"></div><form class=\"domain-command\" data-kind=\"{kind}\"><label>{label}<textarea name=\"value\" maxlength=\"65536\" placeholder=\"{placeholder}\" required></textarea></label><button type=\"button\">Apply</button></form>"
     )
 }
 
@@ -247,6 +247,11 @@ mod tests {
         }
         for domain in ["goal", "child", "schedule", "memory", "export"] {
             assert!(html.contains(&format!("data-kind=\"{domain}\"")));
+        }
+        for surface in ["goals", "children", "schedules", "memory", "artifacts"] {
+            assert!(html.contains(&format!(
+                "data-panel=\"{surface}\" aria-labelledby=\"nav-{surface}\" tabindex=\"-1\" hidden><h2>"
+            )));
         }
         for accessible_path in [
             "class=\"skip-link\"",

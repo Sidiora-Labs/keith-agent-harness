@@ -137,7 +137,10 @@ impl AgentConnectionClient {
                 WireMessage::CommandResult(_) => {
                     return Err(TuiConnectionError::UnexpectedCommandResult);
                 }
-                message @ WireMessage::Event(_) => on_message(message),
+                message
+                @ (WireMessage::Event(_)
+                | WireMessage::Snapshot(_)
+                | WireMessage::Terminal(_)) => on_message(message),
                 WireMessage::ServerHello(_)
                 | WireMessage::ClientHello(_)
                 | WireMessage::Command(_) => {}

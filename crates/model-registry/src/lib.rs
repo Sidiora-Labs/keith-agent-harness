@@ -5,8 +5,9 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use keith_agent_types::ProfileId;
 use keith_provider_core::{
-    CancellationToken, ModelDescriptor, ModelEvent, ModelEventSink, ModelProvider, ModelRequest,
-    ProviderCredential, ProviderError, ProviderErrorKind, StreamControl, Usage,
+    CancellationToken, ContextContractError, ModelDescriptor, ModelEvent, ModelEventSink,
+    ModelProvider, ModelRequest, ProviderCredential, ProviderError, ProviderErrorKind,
+    StreamControl, Usage,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -98,6 +99,8 @@ pub enum RegistryError {
     MissingProfile(ProfileId),
     #[error("model route is invalid: {0}")]
     InvalidRoute(String),
+    #[error("model request context contract is invalid: {0}")]
+    InvalidContext(#[from] ContextContractError),
     #[error("provider failed: {0}")]
     Provider(#[from] ProviderError),
 }
@@ -300,6 +303,9 @@ impl ModelRegistry {
         cancellation: &CancellationToken,
         sink: &mut dyn ModelEventSink,
     ) -> Result<ProviderAttempt, RegistryError> {
+        request
+            .context
+            .validate(&request.system, &request.messages)?;
         let route = self.resolve(profile_id, purpose)?;
         let last_index = route.candidates.len().saturating_sub(1);
         for (index, candidate) in route.candidates.into_iter().enumerate() {
@@ -505,20 +511,24 @@ mod tests {
     }
 
     fn request() -> ModelRequest {
+        let system = Vec::new();
+        let messages = vec![keith_provider_core::Message {
+            role: keith_provider_core::MessageRole::User,
+            content: vec![keith_provider_core::ContentBlock::Text {
+                text: "hello".into(),
+            }],
+        }];
+        let context = keith_provider_core::RequestContext::synthetic(&system, &messages);
         ModelRequest {
             request_id: keith_agent_types::EntityId::new(),
             model: "route-overwrites-this".into(),
-            system: Vec::new(),
-            messages: vec![keith_provider_core::Message {
-                role: keith_provider_core::MessageRole::User,
-                content: vec![keith_provider_core::ContentBlock::Text {
-                    text: "hello".into(),
-                }],
-            }],
+            system,
+            messages,
             tools: Vec::new(),
             max_output_tokens: Some(100),
             temperature: None,
             reasoning_effort: None,
+            context,
         }
     }
 

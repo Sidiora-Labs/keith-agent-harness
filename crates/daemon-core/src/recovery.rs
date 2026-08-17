@@ -699,6 +699,8 @@ mod tests {
             stable_key: "channel-send-1".into(),
             profile_id: ProfileId::new(),
             session_id: SessionId::new(),
+            turn_id: None,
+            final_id: None,
             source: DeliverySource::Interactive(EntityId::new()),
             route: ReplyRoute {
                 channel: "test".into(),

@@ -469,6 +469,13 @@
     - Run workers, channel bursts, recursive trees, schedules, rebuilds, output floods, slow/disconnected viewers, and reconnect load
     - Publish hardware, configuration, workload, percentiles, exclusions, and failure behavior
     - _Requirements: 48.1-48.6_
+  - [-] 13.6 Typed context provenance, tool failures, and mandatory turn finalizer
+    - Define typed context provenance and metadata, compile model requests by section, and enforce provider role user iff provenance is UserIngress
+    - Preserve typed tool errors, retry directives, effect state, recovery actions, and canonical repetition fingerprints without synthetic user guidance
+    - Separate assistant activity from terminal finals and implement one mandatory atomic finalizer for every durably accepted user action
+    - Persist final, artifacts, terminal status, authoritative snapshot, and delivery outbox independently from stream delivery and acknowledgement
+    - Run replay, provenance, repeated compaction/restart, boundary fault, unknown-effect, provider-down, artifact, and reconnect qualification
+    - _Requirements: 7.1-7.7, 8.1-8.6, 10.1-10.7, 13.1-13.6, 35.1-35.6, 42.1-42.6, 52.1-52.8_
 
 ## Phase 14 — Keith Agent Production Acceptance
 
@@ -542,7 +549,7 @@
     { "id": 20, "tasks": ["11.5", "12.1", "12.4"] },
     { "id": 21, "tasks": ["12.2", "12.3", "13.1"] },
     { "id": 22, "tasks": ["12.5", "13.2"] },
-    { "id": 23, "tasks": ["13.3", "13.4", "13.5"] },
+    { "id": 23, "tasks": ["13.3", "13.4", "13.5", "13.6"] },
     { "id": 24, "tasks": ["14.1", "14.2", "14.3"] },
     { "id": 25, "tasks": ["14.4", "14.5"] },
     { "id": 26, "tasks": ["14.6"] }

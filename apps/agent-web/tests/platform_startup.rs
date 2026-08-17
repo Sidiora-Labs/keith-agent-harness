@@ -3,7 +3,9 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use keith_agent_web::{OpenAiCompatibilityConfig, WebServer, WebServerConfig};
+use keith_agent_web::{
+    OpenAiCompatibilityConfig, PlatformCompatibilityConfig, WebServer, WebServerConfig,
+};
 use keith_credentials::MasterKey;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -28,6 +30,11 @@ async fn platform_web_startup_serves_browser_and_guarded_compatibility_boundarie
         daemon_timeout: Duration::from_secs(1),
         openai_compatibility: Some(OpenAiCompatibilityConfig {
             api_key: b"platform-openai-compatibility-key".to_vec(),
+            allow_non_loopback: false,
+            max_in_flight: 2,
+        }),
+        platform_compatibility: Some(PlatformCompatibilityConfig {
+            api_key: b"platform-native-compatibility-key".to_vec(),
             allow_non_loopback: false,
             max_in_flight: 2,
         }),
@@ -57,6 +64,8 @@ async fn platform_web_startup_serves_browser_and_guarded_compatibility_boundarie
     .await;
     assert!(unavailable.starts_with("HTTP/1.1 503 Service Unavailable"));
     assert!(unavailable.contains("keith_native_api_unavailable"));
+
+    assert_native_platform_boundary(address).await;
 
     let advisory_body = br#"{"model":"keith","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"openwebui_search","description":"Search through the client UI","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}}],"tool_choice":"auto"}"#;
     let advisory = request(
@@ -107,6 +116,41 @@ async fn platform_web_startup_serves_browser_and_guarded_compatibility_boundarie
     let _ = task.await;
     assert!(oversized.starts_with("HTTP/1.1 413 Payload Too Large"));
     assert!(oversized.contains("request_too_large"));
+}
+
+async fn assert_native_platform_boundary(address: std::net::SocketAddr) {
+    let unauthenticated = request(
+        address,
+        b"GET /platform/v1/catalog HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            .to_vec(),
+    )
+    .await;
+    assert!(unauthenticated.starts_with("HTTP/1.1 401 Unauthorized"));
+    assert!(unauthenticated.contains("authentication_error"));
+
+    let unavailable = request(
+        address,
+        b"GET /platform/v1/catalog HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer platform-native-compatibility-key\r\nConnection: close\r\n\r\n".to_vec(),
+    )
+    .await;
+    assert!(unavailable.starts_with("HTTP/1.1 503 Service Unavailable"));
+    assert!(unavailable.contains("keith_unavailable"));
+
+    let oversized_body = vec![b' '; 257 * 1024];
+    let oversized = request(
+        address,
+        format!(
+            "POST /platform/v1/profiles/profile-a/commands HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer platform-native-compatibility-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            oversized_body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(oversized_body)
+        .collect(),
+    )
+    .await;
+    assert!(oversized.starts_with("HTTP/1.1 413 Payload Too Large"));
+    assert!(oversized.contains("payload_too_large"));
 }
 
 async fn request(address: std::net::SocketAddr, request: Vec<u8>) -> String {

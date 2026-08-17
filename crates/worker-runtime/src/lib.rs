@@ -20,7 +20,7 @@ use keith_connection::{
     set_local_listener_nonblocking, set_local_read_timeout, set_local_write_timeout,
 };
 use keith_framing::{FrameError, LengthDelimitedCodec};
-use keith_runtime_api::{CommandRuntime, RuntimeRequest, RuntimeResponse};
+use keith_runtime_api::{CommandRuntime, RuntimeEvent, RuntimeRequest, RuntimeResponse};
 use keith_state_store::{EmbeddedStore, FileBackupHook, StoreError};
 use keith_state_store_core::{
     AtomicStateRepository, Collection, RecordMutation, VersionedRecord, WritePrecondition,
@@ -85,6 +85,10 @@ pub enum PrivateMessage {
     ExecutionResult {
         request_id: EntityId,
         response: Box<RuntimeResponse>,
+    },
+    ExecutionEvent {
+        request_id: EntityId,
+        event: Box<RuntimeEvent>,
     },
     CancelActive {
         request_id: EntityId,
@@ -771,7 +775,7 @@ fn run_worker_inner(
     let mut shutdown_deadline = None;
     let mut active_request = None;
     let (work_sender, work_receiver) = mpsc::sync_channel(1);
-    let (result_sender, result_receiver) = mpsc::sync_channel(1);
+    let (result_sender, result_receiver) = mpsc::sync_channel(256);
     let runtime = runtime.map(Arc::<dyn CommandRuntime>::from);
     let executor_runtime = runtime.clone();
     let executor = thread::spawn(move || {
@@ -839,7 +843,7 @@ fn service_control(
     grant: &LeaseGrant,
     runtime: Option<&Arc<dyn CommandRuntime>>,
     work_sender: &SyncSender<RuntimeWork>,
-    result_receiver: &Receiver<RuntimeWorkResult>,
+    result_receiver: &Receiver<RuntimeWorkOutput>,
     active_request: &mut Option<EntityId>,
 ) -> Result<Option<UtcTimestamp>, WorkerRuntimeError> {
     if control.is_some() {
@@ -935,25 +939,38 @@ fn service_control(
 
 fn forward_completed_work(
     connection: &mut PrivateTransport<LocalStream>,
-    result_receiver: &Receiver<RuntimeWorkResult>,
+    result_receiver: &Receiver<RuntimeWorkOutput>,
     active_request: &mut Option<EntityId>,
 ) -> Result<(), WorkerRuntimeError> {
-    match result_receiver.try_recv() {
-        Ok(result) => {
-            if active_request.as_ref() == Some(&result.request_id) {
-                connection.send(PrivateMessage::ExecutionResult {
-                    request_id: result.request_id,
-                    response: Box::new(result.response),
-                })?;
-                *active_request = None;
+    loop {
+        match result_receiver.try_recv() {
+            Ok(RuntimeWorkOutput::Event { request_id, event }) => {
+                if active_request.as_ref() == Some(&request_id) {
+                    connection.send(PrivateMessage::ExecutionEvent {
+                        request_id,
+                        event: Box::new(event),
+                    })?;
+                }
             }
+            Ok(RuntimeWorkOutput::Result {
+                request_id,
+                response,
+            }) => {
+                if active_request.as_ref() == Some(&request_id) {
+                    connection.send(PrivateMessage::ExecutionResult {
+                        request_id,
+                        response: Box::new(response),
+                    })?;
+                    *active_request = None;
+                }
+            }
+            Err(TryRecvError::Disconnected) if active_request.is_some() => {
+                return Err(WorkerRuntimeError::Runtime(
+                    "runtime executor stopped during a request".into(),
+                ));
+            }
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
         }
-        Err(TryRecvError::Disconnected) if active_request.is_some() => {
-            return Err(WorkerRuntimeError::Runtime(
-                "runtime executor stopped during a request".into(),
-            ));
-        }
-        Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
     }
     Ok(())
 }
@@ -990,29 +1007,44 @@ struct RuntimeWork {
     request: RuntimeRequest,
 }
 
-struct RuntimeWorkResult {
-    request_id: EntityId,
-    response: RuntimeResponse,
+enum RuntimeWorkOutput {
+    Event {
+        request_id: EntityId,
+        event: RuntimeEvent,
+    },
+    Result {
+        request_id: EntityId,
+        response: RuntimeResponse,
+    },
 }
 
 fn runtime_executor(
     runtime: Option<&dyn CommandRuntime>,
     receiver: &Receiver<RuntimeWork>,
-    sender: &SyncSender<RuntimeWorkResult>,
+    sender: &SyncSender<RuntimeWorkOutput>,
 ) {
     while let Ok(work) = receiver.recv() {
+        let request_id = work.request_id;
+        let event_sender = sender.clone();
+        let event_request_id = request_id.clone();
+        let mut events = move |event| {
+            let _ = event_sender.send(RuntimeWorkOutput::Event {
+                request_id: event_request_id.clone(),
+                event,
+            });
+        };
         let response = runtime.map_or_else(
             || RuntimeResponse::Failed("worker runtime is not configured".into()),
             |runtime| {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    work.request.execute(runtime)
+                    work.request.execute_with_events(runtime, &mut events)
                 }))
                 .unwrap_or_else(|_| RuntimeResponse::Failed("worker runtime panicked".into()))
             },
         );
         if sender
-            .send(RuntimeWorkResult {
-                request_id: work.request_id,
+            .send(RuntimeWorkOutput::Result {
+                request_id,
                 response,
             })
             .is_err()

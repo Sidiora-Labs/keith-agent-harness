@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use keith_agent_types::{ClientId, Generation, ProfileId, RootTreeId, SessionId, UtcTimestamp};
+use keith_agent_types::{
+    ArtifactId, ClientId, Generation, MessageId, ProfileId, RootTreeId, SessionId, ToolCallId,
+    TurnId, UtcTimestamp,
+};
 use keith_protocol::{
     ClientCommand, CommandResult, CreateSession, ModelSelection, ProfileSummary, SessionSnapshot,
     SessionState, SubmitPrompt,
@@ -64,8 +67,90 @@ pub enum RuntimeResponse {
     Failed(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAgentOutcome {
+    Completed,
+    Cancelled,
+    Exhausted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "event", content = "payload")]
+pub enum RuntimeEventKind {
+    AgentStarted,
+    TurnStarted {
+        number: u32,
+    },
+    AssistantStarted {
+        message_id: MessageId,
+    },
+    AssistantDelta {
+        message_id: MessageId,
+        text: String,
+    },
+    AssistantCompleted {
+        message_id: MessageId,
+        complete: bool,
+    },
+    ToolStarted {
+        call_id: ToolCallId,
+        name: String,
+    },
+    ToolCompleted {
+        call_id: ToolCallId,
+        name: String,
+        is_error: bool,
+        artifact_id: Option<ArtifactId>,
+    },
+    StrategyChanged {
+        reason: String,
+    },
+    TurnEnded,
+    AgentEnded {
+        outcome: RuntimeAgentOutcome,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeEvent {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub sequence: u64,
+    pub kind: RuntimeEventKind,
+}
+
+pub trait RuntimeEventSink: Send {
+    fn emit(&mut self, event: RuntimeEvent);
+}
+
+impl<F> RuntimeEventSink for F
+where
+    F: FnMut(RuntimeEvent) + Send,
+{
+    fn emit(&mut self, event: RuntimeEvent) {
+        self(event);
+    }
+}
+
+#[derive(Default)]
+pub struct NoRuntimeEvents;
+
+impl RuntimeEventSink for NoRuntimeEvents {
+    fn emit(&mut self, _event: RuntimeEvent) {}
+}
+
 impl RuntimeRequest {
     pub fn execute(&self, runtime: &dyn CommandRuntime) -> RuntimeResponse {
+        self.execute_with_events(runtime, &mut NoRuntimeEvents)
+    }
+
+    pub fn execute_with_events(
+        &self,
+        runtime: &dyn CommandRuntime,
+        events: &mut dyn RuntimeEventSink,
+    ) -> RuntimeResponse {
         let response = match self {
             Self::Profiles => runtime.profiles().map(RuntimeResponse::Profiles),
             Self::Sessions => runtime.sessions().map(RuntimeResponse::Sessions),
@@ -87,7 +172,7 @@ impl RuntimeRequest {
                 .select_model(selection)
                 .map(|()| RuntimeResponse::Complete),
             Self::RunPrompt { prompt, generation } => runtime
-                .run_prompt(prompt, *generation)
+                .run_prompt_streaming(prompt, *generation, events)
                 .map(|snapshot| RuntimeResponse::Snapshot(Box::new(snapshot))),
             Self::Snapshot {
                 session_id,
@@ -134,6 +219,15 @@ pub trait CommandRuntime: Send + Sync {
         prompt: &SubmitPrompt,
         generation: Generation,
     ) -> Result<SessionSnapshot, String>;
+    fn run_prompt_streaming(
+        &self,
+        prompt: &SubmitPrompt,
+        generation: Generation,
+        events: &mut dyn RuntimeEventSink,
+    ) -> Result<SessionSnapshot, String> {
+        let _ = events;
+        self.run_prompt(prompt, generation)
+    }
     fn cancel_active(&self, session_id: &SessionId) -> Result<bool, String>;
     fn snapshot(
         &self,

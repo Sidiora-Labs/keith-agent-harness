@@ -405,6 +405,159 @@ pub struct CommonError {
     pub retryable: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolErrorCategory {
+    InvalidArguments,
+    PolicyDenied,
+    ConfirmationDeclined,
+    NotReady,
+    Cancelled,
+    Timeout,
+    OutputLimit,
+    #[serde(rename = "provider_4xx")]
+    Provider4xx,
+    #[serde(rename = "provider_5xx")]
+    Provider5xx,
+    Unavailable,
+    Execution,
+    WorkerDisconnected,
+    Internal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffectState {
+    NotCommitted,
+    Committed,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolFailureStatus {
+    Error,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolErrorDetail {
+    pub category: ToolErrorCategory,
+    pub code: String,
+    pub reason: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRetryDirective {
+    pub automatic: bool,
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRecoveryActionKind {
+    InspectState,
+    Retry,
+    UseAlternative,
+    InformUser,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRecoveryAction {
+    pub action: ToolRecoveryActionKind,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolFailure {
+    pub status: ToolFailureStatus,
+    #[serde(deserialize_with = "deserialize_tool_failure_success")]
+    pub success: bool,
+    pub error: ToolErrorDetail,
+    pub retry: ToolRetryDirective,
+    pub effect_state: ToolEffectState,
+    pub recovery: Vec<ToolRecoveryAction>,
+}
+
+fn deserialize_tool_failure_success<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let success = bool::deserialize(deserializer)?;
+    if success {
+        return Err(serde::de::Error::custom(
+            "a tool failure must deserialize with success=false",
+        ));
+    }
+    Ok(false)
+}
+
+impl ToolFailure {
+    pub fn execution(detail: impl Into<String>, automatic_retry: bool) -> Self {
+        let detail = detail.into();
+        Self {
+            status: ToolFailureStatus::Error,
+            success: false,
+            error: ToolErrorDetail {
+                category: ToolErrorCategory::Execution,
+                code: "TOOL_EXECUTION_FAILED".into(),
+                reason: "tool_execution_failed".into(),
+                detail,
+            },
+            retry: ToolRetryDirective {
+                automatic: automatic_retry,
+                reason: if automatic_retry {
+                    "The tool declared this failure safe for automatic retry".into()
+                } else {
+                    "The tool did not declare this failure safe for automatic retry".into()
+                },
+            },
+            effect_state: ToolEffectState::Unknown,
+            recovery: vec![
+                ToolRecoveryAction {
+                    action: ToolRecoveryActionKind::InspectState,
+                    description: "Inspect external state before retrying the operation".into(),
+                },
+                ToolRecoveryAction {
+                    action: ToolRecoveryActionKind::InformUser,
+                    description: "Explain the failure and any incomplete work".into(),
+                },
+            ],
+        }
+    }
+
+    pub fn not_committed(
+        category: ToolErrorCategory,
+        code: impl Into<String>,
+        reason: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: ToolFailureStatus::Error,
+            success: false,
+            error: ToolErrorDetail {
+                category,
+                code: code.into(),
+                reason: reason.into(),
+                detail: detail.into(),
+            },
+            retry: ToolRetryDirective {
+                automatic: false,
+                reason: "Automatic retry was not authorized for this failure".into(),
+            },
+            effect_state: ToolEffectState::NotCommitted,
+            recovery: vec![ToolRecoveryAction {
+                action: ToolRecoveryActionKind::InformUser,
+                description: "Explain the failure and any incomplete work".into(),
+            }],
+        }
+    }
+}
+
 impl CommonError {
     pub fn new(code: ErrorCode, message: impl Into<String>, retryable: bool) -> Self {
         Self {
@@ -483,6 +636,7 @@ pub struct CommonTypesSchema {
     pub generation: Generation,
     pub revision: Revision,
     pub sequence: Sequence,
+    pub tool_failure: ToolFailure,
 }
 
 /// # Errors
@@ -570,6 +724,47 @@ mod tests {
 
         let error = r#"{"version":{"major":1,"minor":0},"code":"future_error","message":"no","retryable":false}"#;
         assert!(serde_json::from_str::<CommonError>(error).is_err());
+    }
+
+    #[test]
+    fn tool_failure_round_trips_status_success_error_retry_effect_and_recovery() {
+        let encoded = r#"{
+            "status":"error",
+            "success":false,
+            "error":{
+                "category":"provider_5xx",
+                "code":"HTTP_502",
+                "reason":"server_timed_out",
+                "detail":"Upstream server timed out before returning a response"
+            },
+            "retry":{
+                "automatic":false,
+                "reason":"The tool declared this failure unsafe for an identical retry"
+            },
+            "effect_state":"not_committed",
+            "recovery":[{
+                "action":"use_alternative",
+                "description":"Use browser or another authoritative source"
+            }]
+        }"#;
+        let failure: ToolFailure = serde_json::from_str(encoded).unwrap();
+        assert_eq!(failure.status, ToolFailureStatus::Error);
+        assert!(!failure.success);
+        assert_eq!(failure.error.category, ToolErrorCategory::Provider5xx);
+        assert_eq!(failure.error.code, "HTTP_502");
+        assert!(!failure.retry.automatic);
+        assert_eq!(failure.effect_state, ToolEffectState::NotCommitted);
+        assert_eq!(
+            failure.recovery[0].action,
+            ToolRecoveryActionKind::UseAlternative
+        );
+        let value = serde_json::to_value(&failure).unwrap();
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["success"], false);
+
+        let mut invalid = value;
+        invalid["success"] = json!(true);
+        assert!(serde_json::from_value::<ToolFailure>(invalid).is_err());
     }
 
     #[test]

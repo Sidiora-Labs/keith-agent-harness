@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -42,8 +42,10 @@ use crate::security::{BrowserSecurity, SecurityError};
 use crate::{APP_CSS, login_page, shell_page};
 
 mod openai_compat;
+mod platform_compat;
 
 pub use openai_compat::OpenAiCompatibilityConfig;
+pub use platform_compat::PlatformCompatibilityConfig;
 
 const MAX_BROWSER_BODY_BYTES: usize = 128 * 1024;
 const EVENT_QUEUE_CAPACITY: usize = 256;
@@ -62,6 +64,7 @@ pub struct WebServerConfig {
     pub mutation_limit_per_second: usize,
     pub daemon_timeout: Duration,
     pub openai_compatibility: Option<OpenAiCompatibilityConfig>,
+    pub platform_compatibility: Option<PlatformCompatibilityConfig>,
 }
 
 impl std::fmt::Debug for WebServerConfig {
@@ -82,6 +85,13 @@ impl std::fmt::Debug for WebServerConfig {
                 "openai_compatibility",
                 &self
                     .openai_compatibility
+                    .as_ref()
+                    .map(|_| "[CONFIGURED, SECRET REDACTED]"),
+            )
+            .field(
+                "platform_compatibility",
+                &self
+                    .platform_compatibility
                     .as_ref()
                     .map(|_| "[CONFIGURED, SECRET REDACTED]"),
             )
@@ -131,6 +141,8 @@ struct AppState {
     exact_origin: String,
     asset_root: PathBuf,
     openai_compatibility: Option<Arc<openai_compat::OpenAiCompatibility>>,
+    platform_compatibility: Option<Arc<platform_compat::PlatformCompatibility>>,
+    catalog_cache: Arc<Mutex<Option<(Vec<ProfileSummary>, Vec<SessionSummary>)>>>,
 }
 
 pub struct WebServer {
@@ -160,6 +172,13 @@ impl WebServer {
             .transpose()
             .map_err(ServerError::Configuration)?
             .map(Arc::new);
+        let platform_compatibility = config
+            .platform_compatibility
+            .take()
+            .map(platform_compat::PlatformCompatibility::new)
+            .transpose()
+            .map_err(ServerError::Configuration)?
+            .map(Arc::new);
         let credential_store =
             EncryptedCredentialStore::open(&config.credential_root, config.credential_key)?;
         Ok(Self {
@@ -173,6 +192,8 @@ impl WebServer {
                 exact_origin: config.exact_origin,
                 asset_root: config.asset_root,
                 openai_compatibility,
+                platform_compatibility,
+                catalog_cache: Arc::new(Mutex::new(None)),
             },
             bind: config.bind,
         })
@@ -198,6 +219,20 @@ impl WebServer {
             .route(
                 "/v1/chat/completions",
                 post(openai_compat::chat_completions),
+            )
+            .route("/platform/v1/health", get(platform_compat::health))
+            .route("/platform/v1/catalog", get(platform_compat::catalog))
+            .route(
+                "/platform/v1/capabilities",
+                get(platform_compat::capabilities),
+            )
+            .route(
+                "/platform/v1/profiles/{profile}/commands",
+                post(platform_compat::command),
+            )
+            .route(
+                "/platform/v1/events/{profile}/{session}",
+                get(platform_compat::events),
             )
             .layer(DefaultBodyLimit::max(MAX_BROWSER_BODY_BYTES))
             .with_state(self.state.clone())
@@ -372,6 +407,16 @@ impl ServerArguments {
                 allow_non_loopback: self.openai_allow_non_loopback,
                 max_in_flight: 16,
             });
+        let platform_allow_non_loopback = std::env::var_os("KEITH_PLATFORM_ALLOW_NON_LOOPBACK")
+            .map(|value| parse_boolean(&value.to_string_lossy()))
+            .transpose()?
+            .unwrap_or(false);
+        let platform_compatibility =
+            std::env::var_os("KEITH_PLATFORM_API_KEY").map(|value| PlatformCompatibilityConfig {
+                api_key: value.into_encoded_bytes(),
+                allow_non_loopback: platform_allow_non_loopback,
+                max_in_flight: 32,
+            });
         Ok(WebServerConfig {
             bind: self.bind,
             exact_origin: self.exact_origin,
@@ -384,6 +429,7 @@ impl ServerArguments {
             mutation_limit_per_second: 24,
             daemon_timeout: Duration::from_secs(180),
             openai_compatibility,
+            platform_compatibility,
         })
     }
 }
@@ -417,7 +463,16 @@ async fn create_session(
     }
 }
 
-async fn app(State(state): State<AppState>, headers: HeaderMap) -> Response {
+#[derive(Default, Deserialize)]
+struct AppSelection {
+    session: Option<String>,
+}
+
+async fn app(
+    State(state): State<AppState>,
+    Query(selection): Query<AppSelection>,
+    headers: HeaderMap,
+) -> Response {
     let Ok(authenticated) = state.security.authenticate(&headers) else {
         return Redirect::to("/login").into_response();
     };
@@ -428,12 +483,28 @@ async fn app(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let bridge = state.bridge.clone();
     let catalog = tokio::task::spawn_blocking(move || bridge.catalog()).await;
     match catalog {
-        Ok(Ok((profiles, sessions))) => html_response(shell_page(&csrf, &profiles, &sessions)),
+        Ok(Ok((profiles, mut sessions))) => {
+            prioritize_session(&mut sessions, selection.session.as_deref());
+            html_response(shell_page(&csrf, &profiles, &sessions))
+        }
         Ok(Err(error)) => safe_error(StatusCode::SERVICE_UNAVAILABLE, &error.to_string()),
         Err(_) => safe_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "agent connection unavailable",
         ),
+    }
+}
+
+fn prioritize_session(sessions: &mut Vec<SessionSummary>, requested: Option<&str>) {
+    let Some(requested) = requested.and_then(|value| value.parse::<SessionId>().ok()) else {
+        return;
+    };
+    if let Some(index) = sessions
+        .iter()
+        .position(|session| session.session_id == requested)
+    {
+        let selected = sessions.remove(index);
+        sessions.insert(0, selected);
     }
 }
 
@@ -670,6 +741,10 @@ struct NativeClient {
 }
 
 impl DaemonBridge {
+    fn capabilities(&self) -> Result<BTreeSet<Feature>, BridgeError> {
+        Ok(self.connect()?.server_hello.supported_features)
+    }
+
     fn catalog(&self) -> Result<(Vec<ProfileSummary>, Vec<SessionSummary>), BridgeError> {
         let mut client = self.connect()?;
         let sessions = client.sessions(None)?;
@@ -765,7 +840,11 @@ impl DaemonBridge {
         client.transport.send(&WireMessage::Command(envelope))?;
         loop {
             match client.transport.receive() {
-                Ok(message @ WireMessage::Event(_)) => send_bounded(output, &message)?,
+                Ok(
+                    message @ (WireMessage::Event(_)
+                    | WireMessage::Snapshot(_)
+                    | WireMessage::Terminal(_)),
+                ) => send_bounded(output, &message)?,
                 Ok(WireMessage::CommandResult(result)) if result.command_id == command_id => {
                     let message = WireMessage::CommandResult(result);
                     send_bounded(output, &message)?;
@@ -783,7 +862,11 @@ impl DaemonBridge {
         }
         while !output.is_closed() {
             match client.transport.receive() {
-                Ok(message @ WireMessage::Event(_)) => send_bounded(output, &message)?,
+                Ok(
+                    message @ (WireMessage::Event(_)
+                    | WireMessage::Snapshot(_)
+                    | WireMessage::Terminal(_)),
+                ) => send_bounded(output, &message)?,
                 Ok(_) => {}
                 Err(keith_connection::ConnectionError::Closed) => return Ok(()),
                 Err(error) if connection_timed_out(&error) => {}
@@ -847,9 +930,14 @@ impl NativeClient {
         }
     }
 
-    fn execute(
+    fn execute(&mut self, envelope: CommandEnvelope) -> Result<CommandResultEnvelope, BridgeError> {
+        self.execute_streaming(envelope, &mut |_| {})
+    }
+
+    fn execute_streaming(
         &mut self,
         mut envelope: CommandEnvelope,
+        events: &mut dyn FnMut(WireMessage),
     ) -> Result<CommandResultEnvelope, BridgeError> {
         envelope.protocol = self.protocol;
         envelope.client_id.clone_from(&self.client_id);
@@ -860,7 +948,9 @@ impl NativeClient {
                 WireMessage::CommandResult(result) if result.command_id == command_id => {
                     return Ok(result);
                 }
-                WireMessage::Event(_) => {}
+                message @ (WireMessage::Event(_)
+                | WireMessage::Snapshot(_)
+                | WireMessage::Terminal(_)) => events(message),
                 _ => return Err(BridgeError::Response),
             }
         }
@@ -1012,6 +1102,14 @@ fn validate_config(config: &WebServerConfig) -> Result<(), ServerError> {
         || config.daemon_timeout.is_zero()
         || config
             .openai_compatibility
+            .as_ref()
+            .is_some_and(|compatibility| {
+                compatibility.api_key.len() < 32
+                    || compatibility.max_in_flight == 0
+                    || (!config.bind.ip().is_loopback() && !compatibility.allow_non_loopback)
+            })
+        || config
+            .platform_compatibility
             .as_ref()
             .is_some_and(|compatibility| {
                 compatibility.api_key.len() < 32
@@ -1203,6 +1301,32 @@ mod tests {
     }
 
     #[test]
+    fn requested_session_is_prioritized_only_when_it_exists() {
+        let profile_id = ProfileId::new();
+        let first = SessionSummary {
+            session_id: SessionId::new(),
+            root_tree_id: keith_agent_types::RootTreeId::new(),
+            profile_id: profile_id.clone(),
+            title: Some("first".into()),
+            state: keith_protocol::SessionState::Ready,
+            updated_at: UtcTimestamp::UNIX_EPOCH,
+        };
+        let selected = SessionSummary {
+            session_id: SessionId::new(),
+            root_tree_id: keith_agent_types::RootTreeId::new(),
+            profile_id,
+            title: Some("selected".into()),
+            state: keith_protocol::SessionState::Ready,
+            updated_at: UtcTimestamp::UNIX_EPOCH,
+        };
+        let mut sessions = vec![first.clone(), selected.clone()];
+        prioritize_session(&mut sessions, Some(&selected.session_id.to_string()));
+        assert_eq!(sessions[0].session_id, selected.session_id);
+        prioritize_session(&mut sessions, Some("not-a-session"));
+        assert_eq!(sessions[0].session_id, selected.session_id);
+    }
+
+    #[test]
     fn configuration_debug_and_key_errors_do_not_expose_secrets() {
         let config = WebServerConfig {
             bind: "127.0.0.1:7341".parse().unwrap(),
@@ -1220,6 +1344,11 @@ mod tests {
                 allow_non_loopback: false,
                 max_in_flight: 2,
             }),
+            platform_compatibility: Some(PlatformCompatibilityConfig {
+                api_key: b"platform-compatibility-diagnostic-secret".to_vec(),
+                allow_non_loopback: false,
+                max_in_flight: 2,
+            }),
         };
         assert!(!format!("{config:?}").contains("diagnostic-secret"));
         assert!(decode_key(b"not-a-key").unwrap_err().contains("64"));
@@ -1228,6 +1357,11 @@ mod tests {
         assert!(validate_config(&exposed).is_err());
         exposed
             .openai_compatibility
+            .as_mut()
+            .unwrap()
+            .allow_non_loopback = true;
+        exposed
+            .platform_compatibility
             .as_mut()
             .unwrap()
             .allow_non_loopback = true;

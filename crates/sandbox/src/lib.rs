@@ -3,6 +3,8 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +56,10 @@ impl SandboxStatus {
 #[cfg(target_os = "linux")]
 fn detect_platform() -> SandboxStatus {
     let launcher = first_executable(&["/usr/bin/bwrap", "/bin/bwrap"]);
-    if launcher.is_some() {
+    let launcher_failure = launcher
+        .as_deref()
+        .and_then(|candidate| bubblewrap_probe(candidate).err());
+    if launcher.is_some() && launcher_failure.is_none() {
         SandboxStatus {
             backend: SandboxBackend::LinuxBubblewrap,
             level: IsolationLevel::Strong,
@@ -67,6 +72,10 @@ fn detect_platform() -> SandboxStatus {
             reduced_reasons: Vec::new(),
         }
     } else {
+        let reason = launcher_failure.map_or_else(
+            || "bubblewrap is unavailable; filesystem and network isolation are reduced".into(),
+            |detail| format!("bubblewrap isolation probe failed: {detail}"),
+        );
         SandboxStatus {
             backend: SandboxBackend::LinuxProcessGroup,
             level: IsolationLevel::Reduced,
@@ -76,10 +85,38 @@ fn detect_platform() -> SandboxStatus {
             network_isolation: false,
             cpu_limit: first_executable(&["/usr/bin/prlimit", "/bin/prlimit"]).is_some(),
             memory_limit: first_executable(&["/usr/bin/prlimit", "/bin/prlimit"]).is_some(),
-            reduced_reasons: vec![
-                "bubblewrap is unavailable; filesystem and network isolation are reduced".into(),
-            ],
+            reduced_reasons: vec![reason],
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bubblewrap_probe(launcher: &Path) -> Result<(), String> {
+    let output = Command::new(launcher)
+        .args([
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-all",
+            "--ro-bind",
+            "/",
+            "/",
+            "--",
+            "/usr/bin/true",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr);
+    let detail = detail.trim();
+    if detail.is_empty() {
+        Err(format!("launcher exited with {}", output.status))
+    } else {
+        Err(detail.chars().take(512).collect())
     }
 }
 

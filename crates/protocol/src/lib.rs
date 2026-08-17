@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use keith_agent_types::{
     ActionId, ArtifactId, CURRENT_PROTOCOL_VERSION, ChildId, ClientId, CommandId, CommitmentId,
     CommonError, DeliveryId, EntityId, EntryId, Generation, GoalId, JobId, KernelId, MessageId,
-    ProfileId, ProtocolVersion, Revision, RootTreeId, Sequence, SessionId, ToolCallId,
+    ProfileId, ProtocolVersion, Revision, RootTreeId, Sequence, SessionId, ToolCallId, TurnId,
     UtcTimestamp, WorkspaceId,
 };
 use schemars::JsonSchema;
@@ -493,7 +493,33 @@ pub struct SessionSnapshot {
     pub memory_changes: Vec<MemoryChangeProjection>,
     pub usage: UsageProjection,
     pub presence: PresenceProjection,
+    #[serde(default)]
+    pub terminal: Option<TurnTerminalProjection>,
     pub revision: Revision,
+}
+
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnTerminalStatus {
+    Completed,
+    Failed,
+    Cancelled,
+    Exhausted,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct TurnTerminalProjection {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub final_id: EntryId,
+    pub status: TurnTerminalStatus,
+    pub execution_succeeded: bool,
+    pub final_created: bool,
+    pub artifacts_persisted: bool,
+    pub delivery_enqueued: bool,
+    pub delivery_acknowledged: bool,
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -588,8 +614,49 @@ pub struct ScheduleProjection {
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
 pub struct ToolProjection {
     pub tool_call_id: ToolCallId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
     pub state: String,
     pub terminal: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentActivityOutcome {
+    Completed,
+    Cancelled,
+    Exhausted,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "activity", content = "payload")]
+pub enum AgentActivityKind {
+    AgentStarted,
+    TurnStarted {
+        number: u32,
+    },
+    AssistantStarted {
+        message_id: MessageId,
+    },
+    AssistantCompleted {
+        message_id: MessageId,
+        complete: bool,
+    },
+    StrategyChanged {
+        reason: String,
+    },
+    TurnEnded,
+    AgentEnded {
+        outcome: AgentActivityOutcome,
+    },
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct AgentActivityProjection {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub sequence: u64,
+    pub kind: AgentActivityKind,
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -610,6 +677,12 @@ pub struct DeliveryProjection {
     pub delivery_id: DeliveryId,
     pub state: String,
     pub terminal: bool,
+    #[serde(default)]
+    pub turn_id: Option<TurnId>,
+    #[serde(default)]
+    pub final_id: Option<EntryId>,
+    #[serde(default)]
+    pub acknowledged: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -709,7 +782,9 @@ pub enum DaemonEvent {
         message_id: MessageId,
         text: String,
     },
+    AgentActivity(AgentActivityProjection),
     MessageCommitted(MessageProjection),
+    TurnTerminal(TurnTerminalProjection),
     GoalChanged(GoalProjection),
     PlanChanged(PlanProjection),
     ChildChanged(ChildProjection),
@@ -734,6 +809,28 @@ pub enum DaemonEvent {
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotFrame {
+    pub protocol: ProtocolVersion,
+    pub root_tree_id: RootTreeId,
+    pub generation: Generation,
+    pub first_sequence: Sequence,
+    pub sequence: Sequence,
+    pub occurred_at: UtcTimestamp,
+    pub snapshot: Box<SessionSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct TerminalFrame {
+    pub protocol: ProtocolVersion,
+    pub root_tree_id: RootTreeId,
+    pub generation: Generation,
+    pub first_sequence: Sequence,
+    pub sequence: Sequence,
+    pub occurred_at: UtcTimestamp,
+    pub terminal: TurnTerminalProjection,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "message", content = "payload")]
 pub enum WireMessage {
     ClientHello(ClientHello),
@@ -741,9 +838,80 @@ pub enum WireMessage {
     Command(CommandEnvelope),
     CommandResult(CommandResultEnvelope),
     Event(EventEnvelope),
+    Snapshot(SnapshotFrame),
+    Terminal(TerminalFrame),
 }
 
 impl WireMessage {
+    pub fn from_event(envelope: EventEnvelope) -> Self {
+        let EventEnvelope {
+            protocol,
+            root_tree_id,
+            generation,
+            first_sequence,
+            sequence,
+            occurred_at,
+            event,
+        } = envelope;
+        match event {
+            DaemonEvent::Snapshot(snapshot) => Self::Snapshot(SnapshotFrame {
+                protocol,
+                root_tree_id,
+                generation,
+                first_sequence,
+                sequence,
+                occurred_at,
+                snapshot,
+            }),
+            DaemonEvent::TurnTerminal(terminal) => Self::Terminal(TerminalFrame {
+                protocol,
+                root_tree_id,
+                generation,
+                first_sequence,
+                sequence,
+                occurred_at,
+                terminal,
+            }),
+            event => Self::Event(EventEnvelope {
+                protocol,
+                root_tree_id,
+                generation,
+                first_sequence,
+                sequence,
+                occurred_at,
+                event,
+            }),
+        }
+    }
+
+    pub fn into_event(self) -> Option<EventEnvelope> {
+        match self {
+            Self::Event(envelope) => Some(envelope),
+            Self::Snapshot(frame) => Some(EventEnvelope {
+                protocol: frame.protocol,
+                root_tree_id: frame.root_tree_id,
+                generation: frame.generation,
+                first_sequence: frame.first_sequence,
+                sequence: frame.sequence,
+                occurred_at: frame.occurred_at,
+                event: DaemonEvent::Snapshot(frame.snapshot),
+            }),
+            Self::Terminal(frame) => Some(EventEnvelope {
+                protocol: frame.protocol,
+                root_tree_id: frame.root_tree_id,
+                generation: frame.generation,
+                first_sequence: frame.first_sequence,
+                sequence: frame.sequence,
+                occurred_at: frame.occurred_at,
+                event: DaemonEvent::TurnTerminal(frame.terminal),
+            }),
+            Self::ClientHello(_)
+            | Self::ServerHello(_)
+            | Self::Command(_)
+            | Self::CommandResult(_) => None,
+        }
+    }
+
     pub const fn protocol(&self) -> ProtocolVersion {
         match self {
             Self::ClientHello(value) => value.protocol,
@@ -751,6 +919,8 @@ impl WireMessage {
             Self::Command(value) => value.protocol,
             Self::CommandResult(value) => value.protocol,
             Self::Event(value) => value.protocol,
+            Self::Snapshot(value) => value.protocol,
+            Self::Terminal(value) => value.protocol,
         }
     }
 }

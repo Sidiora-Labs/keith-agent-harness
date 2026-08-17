@@ -2051,18 +2051,21 @@ mod tests {
     }
 
     fn request() -> ModelRequest {
+        let system = vec![ContentBlock::Text {
+            text: "system".into(),
+        }];
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
+        }];
+        let context = keith_provider_core::RequestContext::synthetic(&system, &messages);
         ModelRequest {
             request_id: EntityId::new(),
             model: "model-a".into(),
-            system: vec![ContentBlock::Text {
-                text: "system".into(),
-            }],
-            messages: vec![Message {
-                role: MessageRole::User,
-                content: vec![ContentBlock::Text {
-                    text: "hello".into(),
-                }],
-            }],
+            system,
+            messages,
             tools: vec![keith_provider_core::ToolDefinition {
                 name: "lookup".into(),
                 description: "look up a value".into(),
@@ -2072,6 +2075,7 @@ mod tests {
             max_output_tokens: Some(100),
             temperature: None,
             reasoning_effort: None,
+            context,
         }
     }
 

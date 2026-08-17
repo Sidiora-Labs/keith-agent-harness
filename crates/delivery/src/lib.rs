@@ -4,8 +4,8 @@ use std::fmt::Display;
 use std::sync::{Mutex, MutexGuard};
 
 use keith_agent_types::{
-    ArtifactId, CURRENT_SCHEMA_VERSION, CommitmentId, DeliveryId, EntityId, GoalId, JobId,
-    ProfileId, Revision, SessionId, UtcTimestamp,
+    ArtifactId, CURRENT_SCHEMA_VERSION, CommitmentId, DeliveryId, EntityId, EntryId, GoalId, JobId,
+    ProfileId, Revision, SessionId, TurnId, UtcTimestamp,
 };
 use keith_channel_core::{AdapterFailure, OutboundMessage, ReplyRoute, RetryClass, SendReceipt};
 use keith_protocol::DeliveryProjection;
@@ -49,6 +49,8 @@ pub struct DeliveryItem {
     pub stable_key: String,
     pub profile_id: ProfileId,
     pub session_id: SessionId,
+    pub turn_id: Option<TurnId>,
+    pub final_id: Option<EntryId>,
     pub source: DeliverySource,
     pub route: ReplyRoute,
     pub text: String,
@@ -73,6 +75,9 @@ impl DeliveryItem {
             delivery_id: self.id.clone(),
             state: delivery_state_name(self.state).to_owned(),
             terminal: self.state.is_terminal(),
+            turn_id: self.turn_id.clone(),
+            final_id: self.final_id.clone(),
+            acknowledged: self.state == DeliveryState::Sent,
         }
     }
 }
@@ -93,6 +98,8 @@ pub struct NewDelivery {
     pub stable_key: String,
     pub profile_id: ProfileId,
     pub session_id: SessionId,
+    pub turn_id: Option<TurnId>,
+    pub final_id: Option<EntryId>,
     pub source: DeliverySource,
     pub route: ReplyRoute,
     pub text: String,
@@ -230,6 +237,8 @@ where
             stable_key: new.stable_key,
             profile_id: new.profile_id,
             session_id: new.session_id,
+            turn_id: new.turn_id,
+            final_id: new.final_id,
             source: new.source,
             route: new.route,
             text: new.text,
@@ -536,6 +545,8 @@ fn validate_new(new: &NewDelivery, config: DeliveryConfig) -> Result<(), Deliver
 fn same_delivery(item: &DeliveryItem, new: &NewDelivery) -> bool {
     item.profile_id == new.profile_id
         && item.session_id == new.session_id
+        && item.turn_id == new.turn_id
+        && item.final_id == new.final_id
         && item.source == new.source
         && item.route == new.route
         && item.text == new.text
@@ -610,6 +621,8 @@ mod tests {
             stable_key: key.to_owned(),
             profile_id: ProfileId::new(),
             session_id: SessionId::new(),
+            turn_id: None,
+            final_id: None,
             source: DeliverySource::Attention(EntityId::new()),
             route: ReplyRoute {
                 channel: "json".to_owned(),
@@ -649,7 +662,9 @@ mod tests {
             },
         )
         .expect("outbox");
-        let new = new_delivery("stable", true);
+        let mut new = new_delivery("stable", true);
+        new.turn_id = Some(TurnId::new());
+        new.final_id = Some(EntryId::new());
         let first = outbox
             .enqueue(new.clone(), UtcTimestamp::UNIX_EPOCH)
             .expect("enqueue");
@@ -657,6 +672,9 @@ mod tests {
             .enqueue(new, UtcTimestamp::from_unix_millis(1))
             .expect("replay");
         assert_eq!(first.id, replay.id);
+        assert_eq!(first.projection().turn_id, first.turn_id);
+        assert_eq!(first.projection().final_id, first.final_id);
+        assert!(!first.projection().acknowledged);
         let claim = outbox
             .claim_next(UtcTimestamp::UNIX_EPOCH)
             .expect("claim")

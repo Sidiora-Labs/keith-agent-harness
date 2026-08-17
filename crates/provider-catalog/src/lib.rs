@@ -91,6 +91,15 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         "claude-sonnet-4-5"
     ),
     provider!(
+        "centra-managed",
+        "Centra Managed",
+        OpenAiChat,
+        BearerToken,
+        "KEITH_PROVIDER_TOKEN",
+        None,
+        "mimo-v2.5-pro"
+    ),
+    provider!(
         "openai-codex",
         "ChatGPT Plus/Pro (Codex)",
         OpenAiChat,
@@ -481,6 +490,7 @@ mod tests {
         for required in [
             "openai",
             "anthropic",
+            "centra-managed",
             "openai-codex",
             "github-copilot",
             "amazon-bedrock",

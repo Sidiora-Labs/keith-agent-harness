@@ -1,13 +1,15 @@
 #![forbid(unsafe_code)]
 
 use keith_agent_types::{
-    ArtifactId, EntityId, ProfileId, TimestampError, ToolCallId, TurnId, UtcTimestamp,
+    ArtifactId, EntityId, ProfileId, TimestampError, ToolCallId, ToolFailure, TurnId, UtcTimestamp,
+    canonical_json_bytes,
 };
 use keith_artifacts::{ArtifactError, OutputSpill};
 use keith_model_registry::{CredentialResolver, ModelPurpose, ModelRegistry, RegistryError};
 use keith_provider_core::{
-    CancellationToken, ContentBlock, Message, MessageRole, ModelEvent, ModelRequest, StopReason,
-    StreamControl, ToolBehavior, ToolDefinition, Usage,
+    CancellationToken, ContentBlock, ContextProvenance, ContextRecord, Message, MessageRole,
+    ModelEvent, ModelRequest, ModelVisibility, PersistPolicy, StopReason, StreamControl,
+    ToolBehavior, ToolDefinition, Usage,
 };
 use keith_session_store::{
     ContentBlock as StoredContentBlock, MessageRole as StoredMessageRole, SessionEntryPayload,
@@ -122,8 +124,27 @@ impl ContextCompactor for ConservativeCompactor {
         let keep = compacted.messages.len().div_ceil(2);
         let removed = compacted.messages.len().saturating_sub(keep);
         compacted.messages.drain(..removed);
+        compacted.context.messages.drain(..removed);
         compacted.system.push(ContentBlock::Text {
             text: format!("{removed} earlier messages were compacted after context overflow."),
+        });
+        let template = compacted
+            .context
+            .messages
+            .iter()
+            .flatten()
+            .next()
+            .or_else(|| compacted.context.system.first())
+            .ok_or(AgentLoopError::ContextOverflow)?;
+        compacted.context.system.push(ContextRecord {
+            session_id: template.session_id.clone(),
+            turn_id: template.turn_id.clone(),
+            entry_id: keith_agent_types::EntryId::new(),
+            source_id: "context_overflow_compactor".into(),
+            provenance: ContextProvenance::CompactionSummary,
+            current_turn: false,
+            persist_policy: PersistPolicy::Session,
+            model_visibility: ModelVisibility::Visible,
         });
         compacted.request_id = EntityId::new();
         Ok(compacted)
@@ -200,7 +221,7 @@ pub struct AgentLoop<'a> {
     compactor: &'a dyn ContextCompactor,
     steering: &'a dyn SteeringSource,
     session: &'a mut SessionWriter,
-    subscribers: Vec<Box<dyn AgentEventSubscriber>>,
+    subscribers: Vec<Box<dyn AgentEventSubscriber + 'a>>,
     config: AgentLoopConfig,
     sequence: u64,
 }
@@ -233,7 +254,7 @@ impl<'a> AgentLoop<'a> {
         }
     }
 
-    pub fn subscribe(&mut self, subscriber: impl AgentEventSubscriber + 'static) {
+    pub fn subscribe(&mut self, subscriber: impl AgentEventSubscriber + 'a) {
         self.subscribers.push(Box::new(subscriber));
     }
 
@@ -257,13 +278,10 @@ impl<'a> AgentLoop<'a> {
                 self.finish(AgentOutcome::Cancelled)?;
                 return Err(AgentLoopError::Cancelled);
             }
-            if let Some(text) = self.steering.take_at_boundary() {
-                request.messages.push(Message {
-                    role: MessageRole::User,
-                    content: vec![ContentBlock::Text { text }],
-                });
-            }
             let turn_id = TurnId::new();
+            if let Some(text) = self.steering.take_at_boundary() {
+                self.add_controller_guidance(&mut request, &turn_id, "steering", &text)?;
+            }
             self.emit(AgentEventKind::TurnStarted {
                 turn_id: turn_id.clone(),
                 number,
@@ -340,14 +358,12 @@ impl<'a> AgentLoop<'a> {
                     return Err(AgentLoopError::EmptyResponse);
                 }
                 empty_attempts += 1;
-                request.messages.push(Message {
-                    role: MessageRole::User,
-                    content: vec![ContentBlock::Text {
-                        text:
-                            "The previous response was empty. Continue with a substantive response."
-                                .into(),
-                    }],
-                });
+                self.add_controller_guidance(
+                    &mut request,
+                    &turn_id,
+                    "empty_response_retry",
+                    "The previous response was empty. Continue with a substantive response.",
+                )?;
                 self.emit(AgentEventKind::StrategyChanged {
                     turn_id,
                     reason: "empty_response_retry".into(),
@@ -356,7 +372,6 @@ impl<'a> AgentLoop<'a> {
             }
 
             self.commit_model_change(&attempt.provider, &attempt.model)?;
-            self.commit_assistant(&completed)?;
             if completed.calls.is_empty() {
                 self.commit_usage(attempt.usage)?;
                 self.emit(AgentEventKind::TurnEnded {
@@ -372,13 +387,15 @@ impl<'a> AgentLoop<'a> {
                 });
             }
 
+            let activity = self.commit_assistant_activity(&turn_id, &completed)?;
+
             let outcomes =
                 self.execute_calls(&turn_id, &request.tools, &completed.calls, cancellation)?;
-            append_tool_exchange(&mut request, &completed, &outcomes);
+            append_tool_exchange(&mut request, &completed, &activity, &outcomes);
             let mut changed_strategy = false;
             for outcome in &outcomes {
                 if outcome.is_error {
-                    let signature = format!("{}:{}", outcome.name, outcome.content);
+                    let signature = tool_failure_fingerprint(outcome);
                     let count = failures.entry(signature.clone()).or_default();
                     *count = count.saturating_add(1);
                     if *count >= self.config.identical_failure_limit {
@@ -391,12 +408,12 @@ impl<'a> AgentLoop<'a> {
                 }
             }
             if changed_strategy {
-                request.messages.push(Message {
-                    role: MessageRole::User,
-                    content: vec![ContentBlock::Text {
-                        text: "A tool failure repeated. Change strategy; do not repeat the identical call.".into(),
-                    }],
-                });
+                self.add_controller_guidance(
+                    &mut request,
+                    &turn_id,
+                    "repeated_tool_failure",
+                    "A tool failure repeated. Change strategy; do not repeat the identical call.",
+                )?;
                 self.emit(AgentEventKind::StrategyChanged {
                     turn_id: turn_id.clone(),
                     reason: "repeated_tool_failure".into(),
@@ -483,9 +500,9 @@ impl<'a> AgentLoop<'a> {
         call: &ToolInvocation,
         result: Result<Vec<u8>, ToolExecutionError>,
     ) -> Result<ToolOutcome, AgentLoopError> {
-        let (bytes, is_error) = match result {
-            Ok(bytes) => (bytes, false),
-            Err(error) => (error.message.into_bytes(), true),
+        let (bytes, is_error, failure) = match result {
+            Ok(bytes) => (bytes, false, None),
+            Err(error) => (error.message.into_bytes(), true, Some(*error.failure)),
         };
         let (content, artifact_id) = if bytes.len() > self.config.inline_tool_output_bytes {
             let spilled = self.spill.spill(&bytes)?;
@@ -499,14 +516,17 @@ impl<'a> AgentLoop<'a> {
         } else {
             (String::from_utf8_lossy(&bytes).into_owned(), None)
         };
-        let outcome = ToolOutcome {
+        let mut outcome = ToolOutcome {
             call_id: call.call_id.clone(),
             name: call.name.clone(),
             content,
             is_error,
             artifact_id: artifact_id.clone(),
+            arguments: call.arguments.clone(),
+            failure,
+            entry_id: None,
         };
-        self.commit_tool(call, &outcome)?;
+        outcome.entry_id = Some(self.commit_tool(call, &outcome)?);
         self.emit(AgentEventKind::ToolCompleted {
             turn_id: turn_id.clone(),
             call_id: call.call_id.clone(),
@@ -524,7 +544,11 @@ impl<'a> AgentLoop<'a> {
         })
     }
 
-    fn commit_assistant(&mut self, completed: &CompletedMessage) -> Result<(), AgentLoopError> {
+    fn commit_assistant_activity(
+        &mut self,
+        turn_id: &TurnId,
+        completed: &CompletedMessage,
+    ) -> Result<CommittedActivity, AgentLoopError> {
         let mut content = Vec::new();
         if !completed.text.is_empty() {
             content.push(StoredContentBlock::Text {
@@ -537,28 +561,36 @@ impl<'a> AgentLoop<'a> {
                 visibility: keith_session_store::ReasoningVisibility::Hidden,
             });
         }
-        self.append(SessionEntryPayload::AssistantMessage {
+        let activity_entry_id = self.append_entry(SessionEntryPayload::AssistantActivity {
+            turn_id: turn_id.clone(),
             message: StoredMessage {
                 role: StoredMessageRole::Assistant,
                 content,
                 provider_metadata: BTreeMap::new(),
             },
         })?;
+        let mut call_entry_ids = BTreeMap::new();
         for call in &completed.calls {
-            self.append(SessionEntryPayload::ToolCall {
+            let entry_id = self.append_entry(SessionEntryPayload::ToolCall {
                 call_id: call.call_id.clone(),
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
             })?;
+            call_entry_ids.insert(call.call_id.clone(), entry_id);
         }
-        Ok(())
+        Ok(CommittedActivity {
+            entry_id: activity_entry_id,
+            call_entry_ids,
+            session_id: self.session.manifest().session_id.clone(),
+            turn_id: turn_id.clone(),
+        })
     }
 
     fn commit_tool(
         &mut self,
         call: &ToolInvocation,
         outcome: &ToolOutcome,
-    ) -> Result<(), AgentLoopError> {
+    ) -> Result<keith_agent_types::EntryId, AgentLoopError> {
         let content = if let Some(artifact_id) = &outcome.artifact_id {
             vec![StoredContentBlock::Artifact {
                 artifact_id: artifact_id.clone(),
@@ -569,11 +601,44 @@ impl<'a> AgentLoop<'a> {
                 text: outcome.content.clone(),
             }]
         };
-        self.append(SessionEntryPayload::ToolResult {
+        let entry_id = self.append_entry(SessionEntryPayload::ToolResult {
             call_id: call.call_id.clone(),
             content,
             is_error: outcome.is_error,
-        })
+            failure: outcome.failure.clone(),
+        })?;
+        Ok(entry_id)
+    }
+
+    fn add_controller_guidance(
+        &mut self,
+        request: &mut ModelRequest,
+        turn_id: &TurnId,
+        source_id: &str,
+        text: &str,
+    ) -> Result<(), AgentLoopError> {
+        let entry_id = self.append_entry(SessionEntryPayload::ControllerGuidance {
+            turn_id: turn_id.clone(),
+            source_id: source_id.into(),
+            text: text.to_owned(),
+        })?;
+        request.system.push(ContentBlock::Text {
+            text: format!(
+                "<controller_guidance source=\"{source_id}\">{text}</controller_guidance>"
+            ),
+        });
+        request.context.system.push(ContextRecord {
+            session_id: self.session.manifest().session_id.clone(),
+            turn_id: turn_id.clone(),
+            entry_id,
+            source_id: source_id.into(),
+            provenance: ContextProvenance::ControllerGuidance,
+            current_turn: true,
+            persist_policy: PersistPolicy::Session,
+            model_visibility: ModelVisibility::Visible,
+        });
+        request.request_id = EntityId::new();
+        Ok(())
     }
 
     fn commit_usage(&mut self, usage: Usage) -> Result<(), AgentLoopError> {
@@ -585,9 +650,17 @@ impl<'a> AgentLoop<'a> {
     }
 
     fn append(&mut self, payload: SessionEntryPayload) -> Result<(), AgentLoopError> {
-        let parent = self.session.manifest().active_leaf.clone();
-        self.session.append(parent, UtcTimestamp::now()?, payload)?;
+        self.append_entry(payload)?;
         Ok(())
+    }
+
+    fn append_entry(
+        &mut self,
+        payload: SessionEntryPayload,
+    ) -> Result<keith_agent_types::EntryId, AgentLoopError> {
+        let parent = self.session.manifest().active_leaf.clone();
+        let entry = self.session.append(parent, UtcTimestamp::now()?, payload)?;
+        Ok(entry.id)
     }
 
     fn finish(&mut self, outcome: AgentOutcome) -> Result<(), AgentLoopError> {
@@ -716,6 +789,32 @@ struct ToolOutcome {
     content: String,
     is_error: bool,
     artifact_id: Option<ArtifactId>,
+    arguments: serde_json::Value,
+    failure: Option<ToolFailure>,
+    entry_id: Option<keith_agent_types::EntryId>,
+}
+
+struct CommittedActivity {
+    entry_id: keith_agent_types::EntryId,
+    call_entry_ids: BTreeMap<ToolCallId, keith_agent_types::EntryId>,
+    session_id: keith_agent_types::SessionId,
+    turn_id: TurnId,
+}
+
+fn tool_failure_fingerprint(outcome: &ToolOutcome) -> String {
+    let arguments = canonical_json_bytes(&outcome.arguments).map_or_else(
+        |_| "<invalid-canonical-arguments>".into(),
+        |bytes| String::from_utf8_lossy(&bytes).into_owned(),
+    );
+    let failure = outcome.failure.as_ref();
+    format!(
+        "{}|{}|{:?}|{}|{:?}",
+        outcome.name,
+        arguments,
+        failure.map(|value| value.error.category),
+        failure.map_or("UNCLASSIFIED", |value| value.error.code.as_str()),
+        failure.map(|value| value.effect_state),
+    )
 }
 
 fn repair_json_arguments(raw: &str) -> Result<serde_json::Value, AgentLoopError> {
@@ -742,23 +841,52 @@ fn repair_json_arguments(raw: &str) -> Result<serde_json::Value, AgentLoopError>
 fn append_tool_exchange(
     request: &mut ModelRequest,
     message: &CompletedMessage,
+    activity: &CommittedActivity,
     outcomes: &[ToolOutcome],
 ) {
     let mut assistant = Vec::new();
+    let mut assistant_context = Vec::new();
     if !message.text.is_empty() {
         assistant.push(ContentBlock::Text {
             text: message.text.clone(),
         });
+        assistant_context.push(ContextRecord {
+            session_id: activity.session_id.clone(),
+            turn_id: activity.turn_id.clone(),
+            entry_id: activity.entry_id.clone(),
+            source_id: "assistant_activity".into(),
+            provenance: ContextProvenance::AssistantCommentary,
+            current_turn: true,
+            persist_policy: PersistPolicy::Session,
+            model_visibility: ModelVisibility::Visible,
+        });
     }
-    assistant.extend(message.calls.iter().map(|call| ContentBlock::ToolCall {
-        id: call.call_id.clone(),
-        name: call.name.clone(),
-        arguments: call.arguments.clone(),
-    }));
+    for call in &message.calls {
+        assistant.push(ContentBlock::ToolCall {
+            id: call.call_id.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        });
+        assistant_context.push(ContextRecord {
+            session_id: activity.session_id.clone(),
+            turn_id: activity.turn_id.clone(),
+            entry_id: activity
+                .call_entry_ids
+                .get(&call.call_id)
+                .expect("every committed call has an entry")
+                .clone(),
+            source_id: call.call_id.to_string(),
+            provenance: ContextProvenance::ToolCall,
+            current_turn: true,
+            persist_policy: PersistPolicy::Session,
+            model_visibility: ModelVisibility::Visible,
+        });
+    }
     request.messages.push(Message {
         role: MessageRole::Assistant,
         content: assistant,
     });
+    request.context.messages.push(assistant_context);
     request.messages.push(Message {
         role: MessageRole::Tool,
         content: outcomes
@@ -770,6 +898,25 @@ fn append_tool_exchange(
             })
             .collect(),
     });
+    request.context.messages.push(
+        outcomes
+            .iter()
+            .map(|outcome| ContextRecord {
+                session_id: activity.session_id.clone(),
+                turn_id: activity.turn_id.clone(),
+                entry_id: outcome
+                    .entry_id
+                    .as_ref()
+                    .expect("every tool outcome has a stored entry")
+                    .clone(),
+                source_id: outcome.call_id.to_string(),
+                provenance: ContextProvenance::ToolResult,
+                current_turn: true,
+                persist_policy: PersistPolicy::Session,
+                model_visibility: ModelVisibility::Visible,
+            })
+            .collect(),
+    );
     request.request_id = EntityId::new();
 }
 
@@ -949,22 +1096,26 @@ mod tests {
     }
 
     fn request(tools: Vec<ToolDefinition>) -> ModelRequest {
+        let system = vec![ContentBlock::Text {
+            text: "system".into(),
+        }];
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text {
+                text: "work".into(),
+            }],
+        }];
+        let context = keith_provider_core::RequestContext::synthetic(&system, &messages);
         ModelRequest {
             request_id: EntityId::new(),
             model: "script-model".into(),
-            system: vec![ContentBlock::Text {
-                text: "system".into(),
-            }],
-            messages: vec![Message {
-                role: MessageRole::User,
-                content: vec![ContentBlock::Text {
-                    text: "work".into(),
-                }],
-            }],
+            system,
+            messages,
             tools,
             max_output_tokens: Some(1_024),
             temperature: None,
             reasoning_effort: None,
+            context,
         }
     }
 
@@ -1108,10 +1259,11 @@ mod tests {
             .unwrap()
             .ancestry(manifest.active_leaf.as_ref().unwrap())
             .unwrap();
-        assert!(ancestry.iter().any(|entry| matches!(
+        assert!(!ancestry.iter().any(|entry| matches!(
             &entry.payload,
-            SessionEntryPayload::AssistantMessage { message }
-                if message.content == vec![StoredContentBlock::Text { text: "hello".into() }]
+            SessionEntryPayload::AssistantMessage { .. }
+                | SessionEntryPayload::AssistantFinal { .. }
+                | SessionEntryPayload::AssistantActivity { .. }
         )));
     }
 
@@ -1254,6 +1406,10 @@ mod tests {
                 content: vec![ContentBlock::Text { text: "new".into() }],
             },
         ]);
+        model_request.context = keith_provider_core::RequestContext::synthetic(
+            &model_request.system,
+            &model_request.messages,
+        );
         let mut loop_ = AgentLoop::new(
             &first_registry,
             &profile_id,
@@ -1313,14 +1469,17 @@ mod tests {
                 },
             ])
         };
-        let provider =
-            Arc::new(ScriptedProvider::new(vec![tool_events(), tool_events()])) as Arc<_>;
-        let (_directory, _store, _session_id, profile_id, mut writer) = session();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            tool_events(),
+            tool_events(),
+            tool_events(),
+        ])) as Arc<_>;
+        let (_directory, store, session_id, profile_id, mut writer) = session();
         let registry = registry(provider, &profile_id);
         let artifacts = tempfile::tempdir().unwrap();
         let spill = test_spill(artifacts.path());
         let config = AgentLoopConfig {
-            identical_failure_limit: 2,
+            identical_failure_limit: 3,
             ..AgentLoopConfig::default()
         };
         let mut loop_ = AgentLoop::new(
@@ -1334,13 +1493,132 @@ mod tests {
             &mut writer,
             config,
         );
-        assert!(matches!(
-            loop_.run(
-                request(vec![tool_definition("fail", ToolBehavior::StateChanging)]),
-                &CancellationToken::default()
-            ),
-            Err(AgentLoopError::RepeatedFailure(_))
-        ));
+        let result = loop_.run(
+            request(vec![tool_definition("fail", ToolBehavior::StateChanging)]),
+            &CancellationToken::default(),
+        );
+        assert!(matches!(result, Err(AgentLoopError::RepeatedFailure(_))));
+        drop(loop_);
+        drop(writer);
+        let manifest = store.manifest(&session_id).unwrap();
+        let ancestry = store
+            .load_index(&session_id)
+            .unwrap()
+            .ancestry(manifest.active_leaf.as_ref().unwrap())
+            .unwrap();
+        assert!(
+            !ancestry
+                .iter()
+                .any(|entry| matches!(entry.payload, SessionEntryPayload::UserMessage { .. }))
+        );
+        assert!(ancestry.iter().any(|entry| matches!(
+            &entry.payload,
+            SessionEntryPayload::ControllerGuidance { source_id, .. }
+                if source_id == "repeated_tool_failure"
+        )));
+        assert!(ancestry.iter().any(|entry| matches!(
+            &entry.payload,
+            SessionEntryPayload::ToolResult {
+                failure: Some(failure),
+                ..
+            } if failure.effect_state == keith_agent_types::ToolEffectState::Unknown
+                && failure.error.code == "TOOL_EXECUTION_FAILED"
+        )));
+    }
+
+    #[test]
+    fn twenty_seven_call_thirteen_error_replay_has_no_synthetic_user_or_retry_narration() {
+        let mut responses = (0_u32..27)
+            .map(|index| {
+                let name = if index < 13 { "fail" } else { "process" };
+                response(vec![
+                    ModelEvent::ToolCallCompleted {
+                        id: ToolCallId::new(),
+                        name: name.into(),
+                        arguments: json!({"replay_index": index}),
+                    },
+                    ModelEvent::Finished {
+                        reason: StopReason::ToolUse,
+                    },
+                ])
+            })
+            .collect::<Vec<_>>();
+        responses.push(text_response("one terminal replay answer"));
+        let provider = Arc::new(ScriptedProvider::new(responses)) as Arc<_>;
+        let (_directory, store, session_id, profile_id, mut writer) = session();
+        let registry = registry(provider, &profile_id);
+        let artifacts = tempfile::tempdir().unwrap();
+        let spill = test_spill(artifacts.path());
+        let mut loop_ = AgentLoop::new(
+            &registry,
+            &profile_id,
+            &credential,
+            &ProcessTool,
+            &spill,
+            &ConservativeCompactor,
+            &NoSteering,
+            &mut writer,
+            AgentLoopConfig::default(),
+        );
+        let result = loop_
+            .run(
+                request(vec![
+                    tool_definition("fail", ToolBehavior::StateChanging),
+                    tool_definition("process", ToolBehavior::ReadOnly),
+                ]),
+                &CancellationToken::default(),
+            )
+            .unwrap();
+        assert_eq!(result.turns, 28);
+        assert_eq!(
+            result.final_text.as_deref(),
+            Some("one terminal replay answer")
+        );
+        drop(loop_);
+        drop(writer);
+
+        let manifest = store.manifest(&session_id).unwrap();
+        let ancestry = store
+            .load_index(&session_id)
+            .unwrap()
+            .ancestry(manifest.active_leaf.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(
+            ancestry
+                .iter()
+                .filter(|entry| matches!(entry.payload, SessionEntryPayload::ToolCall { .. }))
+                .count(),
+            27
+        );
+        assert_eq!(
+            ancestry
+                .iter()
+                .filter(|entry| matches!(entry.payload, SessionEntryPayload::ToolResult { .. }))
+                .count(),
+            27
+        );
+        assert_eq!(
+            ancestry
+                .iter()
+                .filter(|entry| matches!(
+                    &entry.payload,
+                    SessionEntryPayload::ToolResult {
+                        is_error: true,
+                        failure: Some(failure),
+                        ..
+                    } if !failure.success
+                        && failure.status == keith_agent_types::ToolFailureStatus::Error
+                        && failure.effect_state == keith_agent_types::ToolEffectState::Unknown
+                ))
+                .count(),
+            13
+        );
+        assert!(!ancestry.iter().any(|entry| matches!(
+            entry.payload,
+            SessionEntryPayload::UserMessage { .. }
+                | SessionEntryPayload::ControllerGuidance { .. }
+                | SessionEntryPayload::AssistantFinal { .. }
+        )));
     }
 
     struct TestServer {

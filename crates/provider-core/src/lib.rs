@@ -5,7 +5,7 @@ use std::fmt::{self, Debug, Display};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
-use keith_agent_types::{EntityId, ToolCallId};
+use keith_agent_types::{EntityId, EntryId, SessionId, ToolCallId, TurnId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -62,6 +62,244 @@ pub struct Message {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ContextProvenance {
+    SystemPolicy,
+    DeveloperPolicy,
+    SessionContract,
+    ActiveGoal,
+    DurableMemory,
+    RetrievedKnowledge,
+    CompactionSummary,
+    UserIngress,
+    AssistantCommentary,
+    AssistantFinal,
+    ToolCall,
+    ToolResult,
+    ControllerGuidance,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistPolicy {
+    Never,
+    Session,
+    Durable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelVisibility {
+    Hidden,
+    Visible,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextRecord {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub entry_id: EntryId,
+    pub source_id: String,
+    pub provenance: ContextProvenance,
+    pub current_turn: bool,
+    pub persist_policy: PersistPolicy,
+    pub model_visibility: ModelVisibility,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestContext {
+    pub system: Vec<ContextRecord>,
+    pub messages: Vec<Vec<ContextRecord>>,
+    pub active_user_entry_id: EntryId,
+    pub verbatim_last_user_message: String,
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum ContextContractError {
+    #[error("system context metadata does not align with system content")]
+    SystemAlignment,
+    #[error("message context metadata does not align with provider messages")]
+    MessageAlignment,
+    #[error("provider role=user if and only if provenance=user_ingress")]
+    UserRoleProvenance,
+    #[error("provider tool content must retain tool provenance")]
+    ToolProvenance,
+    #[error("active user entry is missing, non-user, or not current")]
+    ActiveUserEntry,
+    #[error("verbatim last user message does not match the active user entry")]
+    VerbatimUserMessage,
+    #[error("hidden context was included in provider-visible content")]
+    HiddenVisible,
+}
+
+impl RequestContext {
+    /// Verifies that every provider-visible item retains its typed provenance and identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a context-contract error when metadata and provider content diverge.
+    pub fn validate(
+        &self,
+        system: &[ContentBlock],
+        messages: &[Message],
+    ) -> Result<(), ContextContractError> {
+        if self.system.len() != system.len() {
+            return Err(ContextContractError::SystemAlignment);
+        }
+        if self.messages.len() != messages.len()
+            || self
+                .messages
+                .iter()
+                .zip(messages)
+                .any(|(records, message)| records.len() != message.content.len())
+        {
+            return Err(ContextContractError::MessageAlignment);
+        }
+        if self
+            .system
+            .iter()
+            .chain(self.messages.iter().flatten())
+            .any(|record| record.model_visibility == ModelVisibility::Hidden)
+        {
+            return Err(ContextContractError::HiddenVisible);
+        }
+        if self
+            .system
+            .iter()
+            .any(|record| record.provenance == ContextProvenance::UserIngress)
+        {
+            return Err(ContextContractError::UserRoleProvenance);
+        }
+        for (message, records) in messages.iter().zip(&self.messages) {
+            for (content, record) in message.content.iter().zip(records) {
+                if (message.role == MessageRole::User)
+                    != (record.provenance == ContextProvenance::UserIngress)
+                {
+                    return Err(ContextContractError::UserRoleProvenance);
+                }
+                if matches!(content, ContentBlock::ToolResult { .. })
+                    != (record.provenance == ContextProvenance::ToolResult)
+                    || matches!(content, ContentBlock::ToolCall { .. })
+                        != (record.provenance == ContextProvenance::ToolCall)
+                {
+                    return Err(ContextContractError::ToolProvenance);
+                }
+            }
+        }
+        let active = self
+            .messages
+            .iter()
+            .enumerate()
+            .flat_map(|(message_index, records)| {
+                records
+                    .iter()
+                    .enumerate()
+                    .map(move |(content_index, record)| (message_index, content_index, record))
+            })
+            .find(|(_, _, record)| record.entry_id == self.active_user_entry_id)
+            .ok_or(ContextContractError::ActiveUserEntry)?;
+        if active.2.provenance != ContextProvenance::UserIngress || !active.2.current_turn {
+            return Err(ContextContractError::ActiveUserEntry);
+        }
+        let text = match &messages[active.0].content[active.1] {
+            ContentBlock::Text { text } => text,
+            ContentBlock::Image { .. }
+            | ContentBlock::ToolCall { .. }
+            | ContentBlock::ToolResult { .. } => {
+                return Err(ContextContractError::VerbatimUserMessage);
+            }
+        };
+        if text != &self.verbatim_last_user_message {
+            return Err(ContextContractError::VerbatimUserMessage);
+        }
+        Ok(())
+    }
+
+    pub fn synthetic(system: &[ContentBlock], messages: &[Message]) -> Self {
+        let session_id = SessionId::new();
+        let turn_id = TurnId::new();
+        let mut active_user_entry_id = EntryId::new();
+        let mut verbatim_last_user_message = String::new();
+        let system = system
+            .iter()
+            .map(|_| {
+                context_record(
+                    &session_id,
+                    &turn_id,
+                    ContextProvenance::SystemPolicy,
+                    "synthetic_system",
+                    false,
+                )
+            })
+            .collect();
+        let mut message_records: Vec<Vec<ContextRecord>> = Vec::with_capacity(messages.len());
+        for message in messages {
+            let mut records = Vec::with_capacity(message.content.len());
+            for content in &message.content {
+                let provenance = match content {
+                    ContentBlock::ToolCall { .. } => ContextProvenance::ToolCall,
+                    ContentBlock::ToolResult { .. } => ContextProvenance::ToolResult,
+                    ContentBlock::Text { .. } | ContentBlock::Image { .. }
+                        if message.role == MessageRole::User =>
+                    {
+                        ContextProvenance::UserIngress
+                    }
+                    ContentBlock::Text { .. } | ContentBlock::Image { .. } => {
+                        ContextProvenance::AssistantCommentary
+                    }
+                };
+                let mut record = context_record(
+                    &session_id,
+                    &turn_id,
+                    provenance,
+                    "synthetic_message",
+                    false,
+                );
+                if provenance == ContextProvenance::UserIngress {
+                    active_user_entry_id = record.entry_id.clone();
+                    record.current_turn = true;
+                    if let ContentBlock::Text { text } = content {
+                        verbatim_last_user_message.clone_from(text);
+                    }
+                    for earlier in message_records.iter_mut().flatten() {
+                        earlier.current_turn = false;
+                    }
+                }
+                records.push(record);
+            }
+            message_records.push(records);
+        }
+        Self {
+            system,
+            messages: message_records,
+            active_user_entry_id,
+            verbatim_last_user_message,
+        }
+    }
+}
+
+fn context_record(
+    session_id: &SessionId,
+    turn_id: &TurnId,
+    provenance: ContextProvenance,
+    source_id: &str,
+    current_turn: bool,
+) -> ContextRecord {
+    ContextRecord {
+        session_id: session_id.clone(),
+        turn_id: turn_id.clone(),
+        entry_id: EntryId::new(),
+        source_id: source_id.into(),
+        provenance,
+        current_turn,
+        persist_policy: PersistPolicy::Session,
+        model_visibility: ModelVisibility::Visible,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolBehavior {
     ReadOnly,
     StateChanging,
@@ -87,6 +325,7 @@ pub struct ModelRequest {
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub reasoning_effort: Option<String>,
+    pub context: RequestContext,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -484,20 +723,24 @@ mod tests {
     use super::*;
 
     fn request() -> ModelRequest {
+        let system = Vec::new();
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
+        }];
+        let context = RequestContext::synthetic(&system, &messages);
         ModelRequest {
             request_id: EntityId::new(),
             model: "model-a".into(),
-            system: Vec::new(),
-            messages: vec![Message {
-                role: MessageRole::User,
-                content: vec![ContentBlock::Text {
-                    text: "hello".into(),
-                }],
-            }],
+            system,
+            messages,
             tools: Vec::new(),
             max_output_tokens: Some(100),
             temperature: None,
             reasoning_effort: None,
+            context,
         }
     }
 
@@ -510,6 +753,36 @@ mod tests {
                 .to_string()
                 .contains("highly-secret")
         );
+    }
+
+    #[test]
+    fn context_contract_enforces_user_ingress_and_tool_roles() {
+        let mut request = request();
+        assert!(
+            request
+                .context
+                .validate(&request.system, &request.messages)
+                .is_ok()
+        );
+        request.context.messages[0][0].provenance = ContextProvenance::ControllerGuidance;
+        assert_eq!(
+            request.context.validate(&request.system, &request.messages),
+            Err(ContextContractError::UserRoleProvenance)
+        );
+
+        for (encoded, expected) in [
+            ("compaction_summary", ContextProvenance::CompactionSummary),
+            ("durable_memory", ContextProvenance::DurableMemory),
+            ("retrieved_knowledge", ContextProvenance::RetrievedKnowledge),
+            ("system_policy", ContextProvenance::SystemPolicy),
+            ("controller_guidance", ContextProvenance::ControllerGuidance),
+            ("tool_result", ContextProvenance::ToolResult),
+        ] {
+            let decoded: ContextProvenance =
+                serde_json::from_str(&format!("\"{encoded}\"")).unwrap();
+            assert_eq!(decoded, expected);
+            assert_ne!(decoded, ContextProvenance::UserIngress);
+        }
     }
 
     #[test]

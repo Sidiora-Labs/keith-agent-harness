@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -9,18 +11,20 @@ use keith_agent_types::{
     CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, ClientId, CommandId, EntityId, ProfileId,
     RootTreeId, SessionId, UtcTimestamp, WorkerId,
 };
+use keith_agent_web::{PlatformCompatibilityConfig, WebServer, WebServerConfig};
 use keith_connection::{
     AgentTransport, FramedTransport, LocalStream, connect_local, set_local_read_timeout,
     set_local_write_timeout,
 };
 use keith_credentials::{
-    CredentialOwner, CredentialRef, EncryptedCredentialStore, RestrictedMasterKeyStore, SecretValue,
+    CredentialOwner, CredentialRef, EncryptedCredentialStore, MasterKey, RestrictedMasterKeyStore,
+    SecretValue,
 };
 use keith_daemon_core::RootManifest;
 use keith_local_runtime::{LocalRuntimeLaunchConfig, RuntimeCredentialKeySource};
 use keith_protocol::{
-    AttachSession, ClientCommand, ClientHello, CommandEnvelope, CommandResult, ResponsePayload,
-    SessionFilter, SessionState, WireFormat, WireMessage,
+    AttachSession, ClientCommand, ClientHello, CommandEnvelope, CommandResult, CreateGoal,
+    GoalLimits, ResponsePayload, SessionFilter, SessionState, WireFormat, WireMessage,
 };
 use keith_worker_runtime::{WorkerRunState, read_registration, registration_path};
 #[cfg(unix)]
@@ -178,6 +182,51 @@ fn wait_for_worker(data_root: &Path, root: &RootTreeId) -> u32 {
     }
 }
 
+async fn http_request(address: SocketAddr, request: Vec<u8>) -> String {
+    tokio::task::spawn_blocking(move || {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.write_all(&request).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    })
+    .await
+    .unwrap()
+}
+
+async fn http_stream_prefix(address: SocketAddr, request: Vec<u8>, marker: &str) -> String {
+    let marker = marker.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        stream.write_all(&request).unwrap();
+        let mut response = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => {
+                    response.extend_from_slice(&chunk[..read]);
+                    if String::from_utf8_lossy(&response).contains(&marker) {
+                        break;
+                    }
+                }
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    break;
+                }
+                Err(error) => panic!("event stream read failed: {error}"),
+            }
+        }
+        String::from_utf8(response).unwrap()
+    })
+    .await
+    .unwrap()
+}
+
 #[cfg(unix)]
 fn send_signal(process: &mut Child, signal: Signal) {
     kill(Pid::from_raw(i32::try_from(process.id()).unwrap()), signal).unwrap();
@@ -327,4 +376,185 @@ fn daemon_process_is_lazy_contains_crashes_and_adopts_after_restart() {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(!process_is_alive(second_pid));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_platform_bridge_reaches_the_real_daemon_and_leased_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let data_root = directory.path().join("data");
+    let socket = directory.path().join("agentd.sock");
+    let workspace = directory.path().join("workspace");
+    let root = RootTreeId::new();
+    let requested_session = SessionId::new();
+    let launch = LocalRuntimeLaunchConfig {
+        data_root: data_root.clone(),
+        credential_root: data_root.join("credentials"),
+        credential_key_source: RuntimeCredentialKeySource::Restricted(
+            data_root.join("credentials"),
+        ),
+        workspace_root: workspace,
+        openai_base_url: "http://127.0.0.1:1".into(),
+        anthropic_base_url: "http://127.0.0.1:1".into(),
+        provider_base_urls: std::collections::BTreeMap::new(),
+    };
+    seed_provider_credential(&launch);
+    let runtime = launch
+        .open_worker(root.clone(), WorkerId::new(), EntityId::new())
+        .unwrap();
+    let registered = runtime.registered_profiles().unwrap().remove(0);
+    let profile = registered.profile.id;
+    let created = runtime
+        .create_session_assigned(
+            &profile,
+            &registered.profile.workspace_id,
+            requested_session,
+            root.clone(),
+            Some("Native bridge process proof".into()),
+        )
+        .unwrap();
+    let _created_session = created.session_id;
+    drop(runtime);
+    let mut daemon = start_daemon(&data_root, &socket);
+    let _connection = open_connection(&socket);
+
+    let assets = directory.path().join("assets");
+    fs::create_dir(&assets).unwrap();
+    fs::write(assets.join("agent_web.js"), b"export default function(){}").unwrap();
+    fs::write(assets.join("agent_web_bg.wasm"), b"\0asm\x01\0\0\0").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let platform_key = b"real-daemon-platform-bridge-key-0001";
+    let web = WebServer::new(WebServerConfig {
+        bind: address,
+        exact_origin: format!("http://{address}"),
+        daemon_socket: socket.clone(),
+        asset_root: assets,
+        credential_root: directory.path().join("web-credentials"),
+        credential_key: MasterKey::from_bytes([0x42; 32]),
+        login_secret: b"real-daemon-web-login-secret-0001".to_vec(),
+        session_lifetime: Duration::from_secs(60),
+        mutation_limit_per_second: 8,
+        daemon_timeout: Duration::from_secs(2),
+        openai_compatibility: None,
+        platform_compatibility: Some(PlatformCompatibilityConfig {
+            api_key: platform_key.to_vec(),
+            allow_non_loopback: false,
+            max_in_flight: 2,
+        }),
+    })
+    .unwrap();
+    let web_task = tokio::spawn(web.serve_listener(listener));
+
+    let catalog = http_request(
+        address,
+        format!(
+            "GET /platform/v1/catalog HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+            String::from_utf8_lossy(platform_key)
+        )
+        .into_bytes(),
+    )
+    .await;
+    assert!(catalog.starts_with("HTTP/1.1 200 OK"), "{catalog}");
+    assert!(catalog.contains(&profile.to_string()), "{catalog}");
+    let (_, catalog_body) = catalog.split_once("\r\n\r\n").unwrap();
+    let catalog_json: serde_json::Value = serde_json::from_str(catalog_body).unwrap();
+    let session: SessionId = catalog_json["sessions"][0]["session_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let session_root: RootTreeId = catalog_json["sessions"][0]["root_tree_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "session_id": session.clone(),
+        "command": ClientCommand::AttachSession(AttachSession {
+            session_id: session.clone(),
+            resume: None,
+        }),
+    }))
+    .unwrap();
+    let mut command = format!(
+        "POST /platform/v1/profiles/{profile}/commands HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        String::from_utf8_lossy(platform_key),
+        body.len()
+    )
+    .into_bytes();
+    command.extend_from_slice(&body);
+    let attached = http_request(address, command).await;
+    assert!(attached.starts_with("HTTP/1.1 200 OK"), "{attached}");
+    let (_, attached_body) = attached.split_once("\r\n\r\n").unwrap();
+    let attached_json: serde_json::Value = serde_json::from_str(attached_body).unwrap();
+    let generation = attached_json["result"]["payload"]["value"]["generation"]
+        .as_u64()
+        .unwrap();
+    let worker_pid = wait_for_worker(&data_root, &session_root);
+    assert!(process_is_alive(worker_pid));
+
+    let goal_body = serde_json::to_vec(&serde_json::json!({
+        "session_id": session.clone(),
+        "command": ClientCommand::CreateGoal(CreateGoal {
+            session_id: session.clone(),
+            objective: "Prove native replay".into(),
+            limits: GoalLimits {
+                max_turns: Some(1),
+                max_tokens: Some(64),
+                deadline: None,
+            },
+        }),
+    }))
+    .unwrap();
+    let mut goal_command = format!(
+        "POST /platform/v1/profiles/{profile}/commands HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        String::from_utf8_lossy(platform_key),
+        goal_body.len()
+    )
+    .into_bytes();
+    goal_command.extend_from_slice(&goal_body);
+    let goal = http_request(address, goal_command).await;
+    assert!(goal.starts_with("HTTP/1.1 200 OK"), "{goal}");
+
+    let wrong_profile = ProfileId::new();
+    let mut denied = format!(
+        "POST /platform/v1/profiles/{wrong_profile}/commands HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        String::from_utf8_lossy(platform_key),
+        body.len()
+    )
+    .into_bytes();
+    denied.extend_from_slice(&body);
+    let denied = http_request(address, denied).await;
+    assert!(denied.starts_with("HTTP/1.1 403 Forbidden"), "{denied}");
+    assert!(denied.contains("scope_denied"), "{denied}");
+
+    let replay = http_stream_prefix(
+        address,
+        format!(
+            "GET /platform/v1/events/{profile}/{session}?generation={generation}&sequence=0 HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {}\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n",
+            String::from_utf8_lossy(platform_key)
+        )
+        .into_bytes(),
+        "\"message\":\"event\"",
+    )
+    .await;
+    assert!(replay.starts_with("HTTP/1.1 200 OK"), "{replay}");
+    assert!(replay.contains("text/event-stream"), "{replay}");
+    assert!(replay.contains("\"message\":\"event\""), "{replay}");
+    assert!(replay.contains("\"event\":\"snapshot\""), "{replay}");
+
+    web_task.abort();
+    let _ = web_task.await;
+    #[cfg(unix)]
+    {
+        send_signal(&mut daemon, Signal::SIGTERM);
+        assert!(daemon.wait().unwrap().success());
+    }
+    #[cfg(windows)]
+    {
+        send_signal(&mut daemon, true);
+        let _ = daemon.wait().unwrap();
+        terminate_pid(worker_pid);
+    }
 }

@@ -13,8 +13,9 @@ use axum::response::{IntoResponse, Response};
 use futures_util::stream;
 use keith_agent_types::{EntityId, ErrorCode, MessageId, ProfileId, SessionId, UtcTimestamp};
 use keith_protocol::{
-    ClientCommand, CommandResult, CreateSession, DeliveryPolicy, MessageRole, ProfileSummary,
-    ResponsePayload, SessionSnapshot, SubmitPrompt, UsageProjection,
+    AgentActivityKind, ClientCommand, CommandResult, CreateSession, DaemonEvent, DeliveryPolicy,
+    MessageRole, ProfileSummary, ResponsePayload, SessionSnapshot, SubmitPrompt, UsageProjection,
+    WireMessage,
 };
 use ring::{digest, hmac};
 use serde::{Deserialize, Serialize};
@@ -261,7 +262,7 @@ fn stream_completion(
     let created = unix_seconds();
     let requested_model = prepared.model.clone();
     let include_usage = prepared.include_stream_usage;
-    let (sender, receiver) = mpsc::channel::<Result<Event, Infallible>>(8);
+    let (sender, receiver) = mpsc::channel::<Result<Event, Infallible>>(256);
     tokio::spawn(async move {
         send_sse_json(
             &sender,
@@ -275,28 +276,48 @@ fn stream_completion(
             ),
         )
         .await;
+        let event_sender = sender.clone();
         let turn = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            run_native_turn(&bridge, &compatibility, &prepared, completion_id, created)
+            let mut projection = OpenAiStreamProjection::new(
+                completion_id.clone(),
+                created,
+                requested_model.clone(),
+            );
+            let completion = run_native_turn_streaming(
+                &bridge,
+                &compatibility,
+                &prepared,
+                completion_id,
+                created,
+                &mut |message| {
+                    for value in projection.project(message) {
+                        send_sse_json_blocking(&event_sender, &value);
+                    }
+                },
+            );
+            (completion, projection.last_message)
         })
         .await;
         match turn {
-            Ok(Ok(completion)) => {
+            Ok((Ok(completion), last_message)) => {
                 let id = completion.id.clone();
                 let model = completion.model.clone();
                 let session_id = completion.session_id.to_string();
-                send_sse_json(
-                    &sender,
-                    &stream_chunk(
-                        &id,
-                        completion.created,
-                        &model,
-                        &json!({"content": completion.text}),
-                        &Value::Null,
-                        Some(&session_id),
-                    ),
-                )
-                .await;
+                if last_message != completion.text {
+                    send_sse_json(
+                        &sender,
+                        &stream_chunk(
+                            &id,
+                            completion.created,
+                            &model,
+                            &json!({"content": completion.text}),
+                            &Value::Null,
+                            Some(&session_id),
+                        ),
+                    )
+                    .await;
+                }
                 send_sse_json(
                     &sender,
                     &stream_chunk(
@@ -325,7 +346,7 @@ fn stream_completion(
                     .await;
                 }
             }
-            Ok(Err(error)) => send_sse_json(&sender, &error.envelope()).await,
+            Ok((Err(error), _)) => send_sse_json(&sender, &error.envelope()).await,
             Err(_) => send_sse_json(&sender, &ApiFailure::task().envelope()).await,
         }
         let _ = sender.send(Ok(Event::default().data("[DONE]"))).await;
@@ -354,6 +375,107 @@ async fn send_sse_json(sender: &mpsc::Sender<Result<Event, Infallible>>, value: 
     if let Ok(encoded) = serde_json::to_string(value) {
         let _ = sender.send(Ok(Event::default().data(encoded))).await;
     }
+}
+
+fn send_sse_json_blocking(sender: &mpsc::Sender<Result<Event, Infallible>>, value: &Value) {
+    if let Ok(encoded) = serde_json::to_string(value) {
+        let _ = sender.blocking_send(Ok(Event::default().data(encoded)));
+    }
+}
+
+struct OpenAiStreamProjection {
+    id: String,
+    created: i64,
+    model: String,
+    last_message: String,
+}
+
+impl OpenAiStreamProjection {
+    fn new(id: String, created: i64, model: String) -> Self {
+        Self {
+            id,
+            created,
+            model,
+            last_message: String::new(),
+        }
+    }
+
+    fn project(&mut self, message: WireMessage) -> Vec<Value> {
+        match message {
+            WireMessage::Event(envelope) => {
+                if matches!(
+                    &envelope.event,
+                    DaemonEvent::AgentActivity(activity)
+                        if matches!(&activity.kind, AgentActivityKind::AssistantStarted { .. })
+                ) {
+                    self.last_message.clear();
+                }
+                let delta_text = match &envelope.event {
+                    DaemonEvent::AssistantDelta { text, .. } => Some(text.clone()),
+                    _ => None,
+                };
+                let metadata = json!({
+                    "keith_event": {
+                        "type": "event",
+                        "envelope": envelope
+                    }
+                });
+                if let Some(text) = delta_text {
+                    self.last_message.push_str(&text);
+                    let mut chunk = stream_chunk(
+                        &self.id,
+                        self.created,
+                        &self.model,
+                        &json!({"content": text}),
+                        &Value::Null,
+                        None,
+                    );
+                    chunk["metadata"] = metadata;
+                    vec![chunk]
+                } else {
+                    vec![activity_chunk(
+                        &self.id,
+                        self.created,
+                        &self.model,
+                        metadata,
+                    )]
+                }
+            }
+            WireMessage::Snapshot(frame) => vec![activity_chunk(
+                &self.id,
+                self.created,
+                &self.model,
+                json!({
+                    "keith_event": {
+                        "type": "snapshot",
+                        "session_id": frame.snapshot.session.session_id,
+                        "generation": frame.generation,
+                        "sequence": frame.sequence,
+                        "terminal": frame.snapshot.terminal
+                    }
+                }),
+            )],
+            WireMessage::Terminal(frame) => vec![activity_chunk(
+                &self.id,
+                self.created,
+                &self.model,
+                json!({"keith_event": {"type": "terminal", "frame": frame}}),
+            )],
+            _ => Vec::new(),
+        }
+    }
+}
+
+fn activity_chunk(id: &str, created: i64, model: &str, metadata: Value) -> Value {
+    json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [],
+        "usage": null,
+        "metadata": metadata
+    })
 }
 
 fn stream_chunk(
@@ -845,6 +967,24 @@ fn run_native_turn(
     completion_id: String,
     created: i64,
 ) -> Result<NativeCompletion, ApiFailure> {
+    run_native_turn_streaming(
+        bridge,
+        compatibility,
+        prepared,
+        completion_id,
+        created,
+        &mut |_| {},
+    )
+}
+
+fn run_native_turn_streaming(
+    bridge: &DaemonBridge,
+    compatibility: &OpenAiCompatibility,
+    prepared: &PreparedRequest,
+    completion_id: String,
+    created: i64,
+    events: &mut dyn FnMut(WireMessage),
+) -> Result<NativeCompletion, ApiFailure> {
     let mut client = bridge.connect().map_err(ApiFailure::bridge)?;
     let profiles = client.profiles().map_err(ApiFailure::bridge)?;
     let profile = resolve_profile(&prepared.model, &profiles)?.clone();
@@ -860,7 +1000,7 @@ fn run_native_turn(
         prepared.advisory_client_tools,
     )?;
     let session_id = before.session.session_id.clone();
-    let after = execute_snapshot(
+    let after = execute_snapshot_streaming(
         &mut client,
         Some(session_id.clone()),
         ClientCommand::SubmitPrompt(SubmitPrompt {
@@ -870,6 +1010,7 @@ fn run_native_turn(
             delivery: DeliveryPolicy::Immediate,
             reply_route: None,
         }),
+        events,
     )?;
     let message = after
         .messages
@@ -992,8 +1133,19 @@ fn execute_snapshot(
     session_id: Option<SessionId>,
     command: ClientCommand,
 ) -> Result<SessionSnapshot, ApiFailure> {
+    execute_snapshot_streaming(client, session_id, command, &mut |_| {})
+}
+
+fn execute_snapshot_streaming(
+    client: &mut NativeClient,
+    session_id: Option<SessionId>,
+    command: ClientCommand,
+    events: &mut dyn FnMut(WireMessage),
+) -> Result<SessionSnapshot, ApiFailure> {
     let envelope = client.envelope(session_id, command);
-    let result = client.execute(envelope).map_err(ApiFailure::bridge)?;
+    let result = client
+        .execute_streaming(envelope, events)
+        .map_err(ApiFailure::bridge)?;
     match result.result {
         CommandResult::Data(payload) => match *payload {
             ResponsePayload::Snapshot(snapshot) => Ok(*snapshot),

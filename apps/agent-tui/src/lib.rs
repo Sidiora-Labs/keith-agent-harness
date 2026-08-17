@@ -337,6 +337,11 @@ impl TuiApp {
                     self.apply_snapshot(*snapshot);
                 }
             }
+            message @ (WireMessage::Snapshot(_) | WireMessage::Terminal(_)) => {
+                if let Some(envelope) = message.into_event() {
+                    self.apply_wire_message(WireMessage::Event(envelope));
+                }
+            }
             WireMessage::ClientHello(_) | WireMessage::Command(_) => {}
         }
     }

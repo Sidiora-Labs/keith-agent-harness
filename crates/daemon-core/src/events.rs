@@ -371,11 +371,13 @@ fn apply_event(
                 });
             }
         }
+        DaemonEvent::AgentActivity(_) => {}
         DaemonEvent::MessageCommitted(message) => {
             upsert(&mut snapshot.messages, message.clone(), |item| {
                 item.message_id.clone()
             });
         }
+        DaemonEvent::TurnTerminal(terminal) => snapshot.terminal = Some(terminal.clone()),
         DaemonEvent::GoalChanged(goal) => {
             upsert(&mut snapshot.goals, goal.clone(), |item| {
                 item.goal_id.clone()
@@ -526,12 +528,13 @@ mod tests {
     use std::cell::Cell;
 
     use keith_agent_types::{
-        CURRENT_PROTOCOL_VERSION, ChildId, DeliveryId, EntityId, GoalId, MessageId, ProfileId,
-        Revision, SessionId, ToolCallId,
+        CURRENT_PROTOCOL_VERSION, ChildId, DeliveryId, EntityId, EntryId, GoalId, MessageId,
+        ProfileId, Revision, SessionId, ToolCallId, TurnId,
     };
     use keith_protocol::{
         ChildProjection, CommandResult, DeliveryProjection, GoalProjection, GoalState,
-        MessageProjection, SessionState, SessionSummary, ToolProjection, WaitProjection,
+        MessageProjection, SessionState, SessionSummary, ToolProjection, TurnTerminalProjection,
+        TurnTerminalStatus, WaitProjection,
     };
 
     use super::*;
@@ -572,6 +575,7 @@ mod tests {
                 next_wake: None,
                 safe_error: None,
             },
+            terminal: None,
             revision: Revision::ZERO,
         }
     }
@@ -680,6 +684,54 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_before_or_after_terminal_replays_one_final_and_the_same_terminal() {
+        let root = RootTreeId::new();
+        let generation = Generation::new(6);
+        let initial = snapshot(root.clone(), generation);
+        let session_id = initial.session.session_id.clone();
+        let mut hub = EventHub::new(root.clone(), generation, initial, 8, 8).unwrap();
+        let final_event = hub.publish(committed(0)).unwrap();
+        let terminal = TurnTerminalProjection {
+            session_id,
+            turn_id: TurnId::new(),
+            final_id: EntryId::new(),
+            status: TurnTerminalStatus::Failed,
+            execution_succeeded: false,
+            final_created: true,
+            artifacts_persisted: true,
+            delivery_enqueued: true,
+            delivery_acknowledged: false,
+            detail: Some("provider unavailable".into()),
+        };
+        let terminal_event = hub
+            .publish(DaemonEvent::TurnTerminal(terminal.clone()))
+            .unwrap();
+        let before_final = hub.recover(Some(&ResumeCursor {
+            root_tree_id: root.clone(),
+            generation,
+            last_sequence: Sequence::ZERO,
+        }));
+        assert_eq!(
+            before_final.events,
+            vec![final_event, terminal_event.clone()]
+        );
+        let before_terminal = hub.recover(Some(&ResumeCursor {
+            root_tree_id: root.clone(),
+            generation,
+            last_sequence: Sequence::new(1),
+        }));
+        assert_eq!(before_terminal.events, vec![terminal_event]);
+        let after_terminal = hub.recover(Some(&ResumeCursor {
+            root_tree_id: root,
+            generation,
+            last_sequence: Sequence::new(2),
+        }));
+        assert!(after_terminal.events.is_empty());
+        assert_eq!(hub.snapshot().messages.len(), 1);
+        assert_eq!(hub.snapshot().terminal.as_ref(), Some(&terminal));
+    }
+
+    #[test]
     fn slow_clients_are_bounded_deltas_coalesce_and_terminal_state_is_recoverable() {
         let root = RootTreeId::new();
         let generation = Generation::new(1);
@@ -739,6 +791,7 @@ mod tests {
         .unwrap();
         hub.publish(DaemonEvent::ToolChanged(ToolProjection {
             tool_call_id: ToolCallId::new(),
+            tool: Some("test_tool".into()),
             state: "complete".into(),
             terminal: true,
         }))
@@ -753,6 +806,9 @@ mod tests {
             delivery_id: DeliveryId::new(),
             state: "sent".into(),
             terminal: true,
+            turn_id: None,
+            final_id: None,
+            acknowledged: true,
         }))
         .unwrap();
         let snapshot = hub.snapshot();

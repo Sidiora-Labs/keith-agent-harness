@@ -546,6 +546,18 @@ ac_5  = "THE adapter SHALL support explicit native session IDs plus privacy-pres
 ac_6  = "BEARER credentials SHALL be configured by named secret environment reference, compared without value-dependent equality, redacted from diagnostics, and required on every compatibility route; non-loopback exposure SHALL require explicit operator acknowledgement."
 ac_7  = "A real-process conformance suite SHALL exercise model discovery, authenticated JSON and streaming turns, durable continuation, multiple profiles/conversations, malformed and oversized requests, unsupported features, disconnect/restart recovery, native-client coexistence, and OpenAI-compatible client configuration without secret leakage."
 
+[req.52]
+title = "Typed context provenance, honest tool failure, and mandatory turn finalization"
+story = "As a user whose action Keith has durably accepted, I want context identity and turn completion enforced by the runtime, so that injected state cannot impersonate me and failures cannot leave an acknowledged turn unanswered."
+ac_1  = "EVERY model-visible context record SHALL carry session, turn, entry, source, provenance, current-turn, persistence-policy, and model-visibility metadata; provider role `user` SHALL be emitted if and only if provenance is UserIngress."
+ac_2  = "SYSTEM and developer policy, session contract, active goal, marked past context or compaction checkpoint, exact active thread tail, current-turn tool calls/results, active user entry ID, and the verbatim last user message SHALL be compiled as distinct typed request sections; the active user message SHALL remain outside compaction."
+ac_3  = "COMPACTION, memory, retrieved knowledge, controller guidance, child results, and retry guidance SHALL retain explicit non-user provenance and SHALL NOT deserialize, persist, or re-enter memory as UserIngress."
+ac_4  = "A failed tool invocation SHALL remain a tool result paired by call ID and SHALL preserve status, success false, typed error category/code/reason/detail, retry directive, effect state, and recovery actions."
+ac_5  = "THE repetition fingerprint SHALL contain tool, canonical arguments, error category, error code, and effect state; unknown effects SHALL require state inspection before retry and an exhausted identical-failure budget SHALL choose an alternative or finalize without synthetic user guidance."
+ac_6  = "EVERY durably accepted user action SHALL atomically commit exactly one terminal assistant final, artifact references, terminal status referencing that final ID, authoritative snapshot, and durable delivery outbox item; provider/tool failure SHALL use a deterministic honest local finalizer."
+ac_7  = "EXECUTION success, final creation, artifact persistence, terminal status, and delivery acknowledgement SHALL be tracked independently; disconnect SHALL NOT convert a produced final into command rejection, and reconnect SHALL replay the same authoritative state until acknowledgement."
+ac_8  = "A replay and fault suite SHALL cover the 27-call/13-error regression, provenance deserialization denial, repeated compaction and restart, failures around tool/final/snapshot/outbox boundaries, unknown-effect writes, provider outage, artifact delivery, and disconnect/reconnect with exactly one final answer."
+
 # ================================ TASKS ==================================
 
 [tasks]
@@ -1318,6 +1330,19 @@ requires = ["12.1", "12.5", "13.3"]
 symbols = ["OpenAiCompatibility", "chat_completions"]
 touches = ["apps/agent-web/src/*.rs", "apps/agent-web/src/server/*.rs", "apps/agent-web/tests/*.rs", "apps/xtask/src/main.rs", "docs/openai-compatibility.md"]
 
+[task.13.6]
+title  = "Typed context provenance, tool failures, and mandatory turn finalizer"
+status = "in_progress"
+wave   = 23
+do_1   = "Define typed context provenance and metadata, compile model requests by section, and enforce provider role user iff provenance is UserIngress"
+do_2   = "Preserve typed tool errors, retry directives, effect state, recovery actions, and canonical repetition fingerprints without synthetic user guidance"
+do_3   = "Separate assistant activity from terminal finals and implement one mandatory atomic finalizer for every durably accepted user action"
+do_4   = "Persist final, artifacts, terminal status, authoritative snapshot, and delivery outbox independently from stream delivery and acknowledgement"
+do_5   = "Run replay, provenance, repeated compaction/restart, boundary fault, unknown-effect, provider-down, artifact, and reconnect qualification"
+reqs   = ["7.1-7.7", "8.1-8.6", "10.1-10.7", "13.1-13.6", "35.1-35.6", "42.1-42.6", "52.1-52.8"]
+requires = ["4.2", "5.1", "9.2", "11.1", "12.2", "13.4"]
+touches = ["crates/session-store/src/lib.rs", "crates/agent-loop/src/lib.rs", "crates/tool-core/src/lib.rs", "crates/local-runtime/src/lib.rs", "crates/protocol/src/lib.rs", "crates/delivery/src/*.rs"]
+
 [task.13.5]
 title  = "Performance, recursive load, and multi-hour soak"
 status = "pending"
@@ -1328,7 +1353,7 @@ do_3   = "Run multi-hour bounded-memory soak across daemon, workers, clients, ch
 do_4   = "Run workers, channel bursts, recursive trees, schedules, rebuilds, output floods, slow/disconnected viewers, and reconnect load"
 do_5   = "Publish hardware, configuration, workload, percentiles, exclusions, and failure behavior"
 reqs   = ["48.1-48.6"]
-requires = ["12.1", "12.2", "13.3"]
+requires = ["12.1", "12.2", "13.3", "13.6"]
 
 [task.14]
 section = "Phase 14 — Keith Agent Production Acceptance"

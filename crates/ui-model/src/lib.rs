@@ -582,6 +582,7 @@ fn apply_event_payload(snapshot: &mut SessionSnapshot, event: &DaemonEvent) {
                 item.message_id.clone()
             });
         }
+        DaemonEvent::TurnTerminal(terminal) => snapshot.terminal = Some(terminal.clone()),
         DaemonEvent::GoalChanged(goal) => {
             upsert(&mut snapshot.goals, goal.clone(), |item| {
                 item.goal_id.clone()
@@ -648,6 +649,7 @@ fn apply_event_payload(snapshot: &mut SessionSnapshot, event: &DaemonEvent) {
             .retain(|item| item.confirmation_id != *confirmation_id),
         DaemonEvent::CommandAccepted { .. }
         | DaemonEvent::CommandRejected(_)
+        | DaemonEvent::AgentActivity(_)
         | DaemonEvent::Warning(_)
         | DaemonEvent::Error(_) => {}
     }
@@ -1044,6 +1046,7 @@ mod tests {
                 next_wake: None,
                 safe_error: None,
             },
+            terminal: None,
             revision: Revision::ZERO,
         }
     }
@@ -1130,6 +1133,9 @@ mod tests {
                 delivery_id: DeliveryId::new(),
                 state: "pending".into(),
                 terminal: false,
+                turn_id: None,
+                final_id: None,
+                acknowledged: false,
             }),
             DaemonEvent::MemoryChanged(MemoryChangeProjection {
                 entry_id: EntryId::new(),
@@ -1317,6 +1323,7 @@ mod tests {
         );
         let terminal_tool = ToolProjection {
             tool_call_id: ToolCallId::new(),
+            tool: Some("test_tool".into()),
             state: "complete".into(),
             terminal: true,
         };

@@ -24,11 +24,15 @@ use keith_connection::{
     set_local_listener_nonblocking, set_local_read_timeout,
 };
 use keith_protocol::{
-    ClientCommand, CommandError, CommandResult, CommandResultEnvelope, Feature, ResponsePayload,
-    SessionFilter, SessionSnapshot, SessionState, SessionSummary, WireFormat, WireMessage,
-    negotiate,
+    AgentActivityKind, AgentActivityOutcome, AgentActivityProjection, ClientCommand, CommandError,
+    CommandResult, CommandResultEnvelope, DaemonEvent, EventEnvelope, Feature, ResponsePayload,
+    SessionFilter, SessionSnapshot, SessionState, SessionSummary, ToolProjection, WireFormat,
+    WireMessage, negotiate,
 };
-use keith_runtime_api::{RuntimeRequest, RuntimeResponse, RuntimeSession};
+use keith_runtime_api::{
+    RuntimeAgentOutcome, RuntimeEvent, RuntimeEventKind, RuntimeRequest, RuntimeResponse,
+    RuntimeSession,
+};
 use keith_supervisor::{
     SupervisorError, SupervisorOptions, WorkerEvent, WorkerStatus, WorkerSupervisor,
     signal_active_cancellation,
@@ -466,6 +470,7 @@ impl DaemonCore {
                 next_wake: None,
                 safe_error: None,
             },
+            terminal: None,
             revision: Revision::ZERO,
         });
         match self.event_hubs.get_mut(root_tree_id) {
@@ -661,7 +666,7 @@ impl DaemonCore {
                         daemon.drain_client_events(&connected_client_id)?
                     };
                     for event in events {
-                        transport.send(&WireMessage::Event(event))?;
+                        transport.send(&WireMessage::from_event(event))?;
                     }
                     continue;
                 }
@@ -696,12 +701,27 @@ impl DaemonCore {
                     Duration::from_millis(250),
                 );
             }
+            let mut stream_error = None;
             let (result, recovery_events) = {
                 let mut daemon = shared.lock().map_err(|_| DaemonError::LockPoisoned)?;
-                daemon.handle_command(&connected_client_id, negotiated, command)
+                daemon.handle_command_streaming(
+                    &connected_client_id,
+                    negotiated,
+                    command,
+                    &mut |event| {
+                        if stream_error.is_none()
+                            && let Err(error) = transport.send(&WireMessage::from_event(event))
+                        {
+                            stream_error = Some(error);
+                        }
+                    },
+                )
             };
+            if let Some(error) = stream_error {
+                return Err(error.into());
+            }
             for event in recovery_events {
-                transport.send(&WireMessage::Event(event))?;
+                transport.send(&WireMessage::from_event(event))?;
             }
             transport.send(&WireMessage::CommandResult(result))?;
         }
@@ -713,6 +733,16 @@ impl DaemonCore {
         connected_client_id: &keith_agent_types::ClientId,
         negotiated: keith_agent_types::ProtocolVersion,
         command: keith_protocol::CommandEnvelope,
+    ) -> (CommandResultEnvelope, Vec<keith_protocol::EventEnvelope>) {
+        self.handle_command_streaming(connected_client_id, negotiated, command, &mut |_| {})
+    }
+
+    fn handle_command_streaming(
+        &mut self,
+        connected_client_id: &keith_agent_types::ClientId,
+        negotiated: keith_agent_types::ProtocolVersion,
+        command: keith_protocol::CommandEnvelope,
+        events: &mut dyn FnMut(EventEnvelope),
     ) -> (CommandResultEnvelope, Vec<keith_protocol::EventEnvelope>) {
         let mut recovery_events = Vec::new();
         let result = if command.client_id != *connected_client_id {
@@ -748,6 +778,7 @@ impl DaemonCore {
                     connected_client_id,
                     command.session_id.as_ref(),
                     command.command,
+                    events,
                 );
                 recovery_events = events;
                 result
@@ -792,10 +823,12 @@ impl DaemonCore {
         client_id: &keith_agent_types::ClientId,
         scope_session_id: Option<&SessionId>,
         command: ClientCommand,
+        events: &mut dyn FnMut(EventEnvelope),
     ) -> (CommandResult, Vec<keith_protocol::EventEnvelope>) {
         let embedded_session_id = command_session_id(&command).cloned();
         if let (Some(scope), Some(embedded)) = (scope_session_id, embedded_session_id.as_ref())
             && scope != embedded
+            && !command_supports_descendant_target(&command)
         {
             return (
                 CommandResult::Rejected(CommandError {
@@ -918,7 +951,7 @@ impl DaemonCore {
                     Err(error) => rejected_daemon(error),
                 }
             }
-            ClientCommand::SubmitPrompt(prompt) => match self.run_prompt(&prompt) {
+            ClientCommand::SubmitPrompt(prompt) => match self.run_prompt(&prompt, events) {
                 Ok(snapshot) => (
                     CommandResult::Data(Box::new(ResponsePayload::Snapshot(Box::new(snapshot)))),
                     Vec::new(),
@@ -926,7 +959,11 @@ impl DaemonCore {
                 Err(error) => rejected_daemon(error),
             },
             feature => {
-                let effective_session_id = embedded_session_id.as_ref().or(scope_session_id);
+                let effective_session_id = command_route_session_id(
+                    scope_session_id,
+                    embedded_session_id.as_ref(),
+                    &feature,
+                );
                 let generation = match effective_session_id {
                     Some(session_id) => match self.activate_session(session_id) {
                         Ok(status) => status.generation,
@@ -1246,6 +1283,7 @@ impl DaemonCore {
     fn run_prompt(
         &mut self,
         prompt: &keith_protocol::SubmitPrompt,
+        events: &mut dyn FnMut(EventEnvelope),
     ) -> Result<SessionSnapshot, DaemonError> {
         let status = self.activate_session(&prompt.session_id)?;
         let root = self
@@ -1253,15 +1291,39 @@ impl DaemonCore {
             .root_for_session(&prompt.session_id)
             .cloned()
             .ok_or_else(|| DaemonError::UnknownSession(prompt.session_id.clone()))?;
-        let snapshot = match self.execute_worker(
-            &root,
-            status.generation,
-            RuntimeRequest::RunPrompt {
-                prompt: prompt.clone(),
-                generation: status.generation,
-            },
-        )? {
+        if !self.worker_runtime_enabled {
+            return Err(runtime_unavailable());
+        }
+        let mut event_error = None;
+        let response = {
+            let supervisor = &mut self.supervisor;
+            let mut event_hub = self.event_hubs.get_mut(&root);
+            supervisor.execute_streaming(
+                &root,
+                status.generation,
+                RuntimeRequest::RunPrompt {
+                    prompt: prompt.clone(),
+                    generation: status.generation,
+                },
+                &mut |event| {
+                    if event_error.is_some() {
+                        return;
+                    }
+                    if let Some(hub) = event_hub.as_deref_mut() {
+                        match hub.publish(runtime_daemon_event(event)) {
+                            Ok(envelope) => events(envelope),
+                            Err(error) => event_error = Some(error),
+                        }
+                    }
+                },
+            )?
+        };
+        if let Some(error) = event_error {
+            return Err(error.into());
+        }
+        let snapshot = match response {
             RuntimeResponse::Snapshot(snapshot) => *snapshot,
+            RuntimeResponse::Failed(error) => return Err(DaemonError::Runtime(error)),
             response => {
                 return Err(DaemonError::Runtime(format!(
                     "worker returned {} for prompt",
@@ -1277,7 +1339,14 @@ impl DaemonCore {
             self.persist_root_manifest(&updated)?;
         }
         if let Some(hub) = self.event_hubs.get_mut(&root) {
-            return hub.publish_snapshot(snapshot).map_err(DaemonError::from);
+            let terminal = snapshot.terminal.clone();
+            let envelope = hub.publish(DaemonEvent::Snapshot(Box::new(snapshot)))?;
+            events(envelope);
+            if let Some(terminal) = terminal {
+                let envelope = hub.publish(DaemonEvent::TurnTerminal(terminal))?;
+                events(envelope);
+            }
+            return Ok(hub.snapshot().clone());
         }
         Ok(snapshot)
     }
@@ -1297,6 +1366,74 @@ impl DaemonCore {
         )?;
         fs::rename(temporary, path)?;
         Ok(())
+    }
+}
+
+fn runtime_daemon_event(event: RuntimeEvent) -> DaemonEvent {
+    let RuntimeEvent {
+        session_id,
+        turn_id,
+        sequence,
+        kind,
+    } = event;
+    match kind {
+        RuntimeEventKind::AssistantDelta { message_id, text } => {
+            DaemonEvent::AssistantDelta { message_id, text }
+        }
+        RuntimeEventKind::ToolStarted { call_id, name } => {
+            DaemonEvent::ToolChanged(ToolProjection {
+                tool_call_id: call_id,
+                tool: Some(name),
+                state: "running".into(),
+                terminal: false,
+            })
+        }
+        RuntimeEventKind::ToolCompleted {
+            call_id,
+            name,
+            is_error,
+            ..
+        } => DaemonEvent::ToolChanged(ToolProjection {
+            tool_call_id: call_id,
+            tool: Some(name),
+            state: if is_error { "failed" } else { "succeeded" }.into(),
+            terminal: true,
+        }),
+        kind => DaemonEvent::AgentActivity(AgentActivityProjection {
+            session_id,
+            turn_id,
+            sequence,
+            kind: match kind {
+                RuntimeEventKind::AgentStarted => AgentActivityKind::AgentStarted,
+                RuntimeEventKind::TurnStarted { number } => {
+                    AgentActivityKind::TurnStarted { number }
+                }
+                RuntimeEventKind::AssistantStarted { message_id } => {
+                    AgentActivityKind::AssistantStarted { message_id }
+                }
+                RuntimeEventKind::AssistantCompleted {
+                    message_id,
+                    complete,
+                } => AgentActivityKind::AssistantCompleted {
+                    message_id,
+                    complete,
+                },
+                RuntimeEventKind::StrategyChanged { reason } => {
+                    AgentActivityKind::StrategyChanged { reason }
+                }
+                RuntimeEventKind::TurnEnded => AgentActivityKind::TurnEnded,
+                RuntimeEventKind::AgentEnded { outcome } => AgentActivityKind::AgentEnded {
+                    outcome: match outcome {
+                        RuntimeAgentOutcome::Completed => AgentActivityOutcome::Completed,
+                        RuntimeAgentOutcome::Cancelled => AgentActivityOutcome::Cancelled,
+                        RuntimeAgentOutcome::Exhausted => AgentActivityOutcome::Exhausted,
+                    },
+                },
+                RuntimeEventKind::AssistantDelta { .. }
+                | RuntimeEventKind::ToolStarted { .. }
+                | RuntimeEventKind::ToolCompleted { .. } => unreachable!(),
+            },
+        }),
     }
 }
 
@@ -1335,6 +1472,22 @@ fn command_session_id(command: &ClientCommand) -> Option<&SessionId> {
         ClientCommand::Export(request) => Some(&request.session_id),
         ClientCommand::StageAttachment(request) => Some(&request.session_id),
         _ => None,
+    }
+}
+
+const fn command_supports_descendant_target(command: &ClientCommand) -> bool {
+    matches!(command, ClientCommand::CreateChild(_))
+}
+
+fn command_route_session_id<'a>(
+    scope_session_id: Option<&'a SessionId>,
+    embedded_session_id: Option<&'a SessionId>,
+    command: &ClientCommand,
+) -> Option<&'a SessionId> {
+    if command_supports_descendant_target(command) {
+        scope_session_id.or(embedded_session_id)
+    } else {
+        embedded_session_id.or(scope_session_id)
     }
 }
 
@@ -1412,5 +1565,26 @@ mod tests {
             RootCatalog::discover(directory.path()),
             Err(CatalogError::ManifestTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn descendant_child_creation_routes_through_the_leased_root_scope() {
+        let root_session = SessionId::new();
+        let child_session = SessionId::new();
+        let command = ClientCommand::CreateChild(keith_protocol::CreateChild {
+            parent_session_id: child_session.clone(),
+            objective: "nested child".into(),
+            workspace_mode: keith_protocol::ChildWorkspaceMode::ReadOnlyParent,
+            limits: keith_protocol::GoalLimits {
+                max_turns: Some(1),
+                max_tokens: Some(1_000),
+                deadline: None,
+            },
+        });
+        assert_eq!(
+            command_route_session_id(Some(&root_session), command_session_id(&command), &command,),
+            Some(&root_session)
+        );
+        assert_eq!(command_session_id(&command), Some(&child_session));
     }
 }

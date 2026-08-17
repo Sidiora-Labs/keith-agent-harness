@@ -119,6 +119,8 @@ Open `http://127.0.0.1:7341`, sign in, and use Settings to configure a provider 
 
 `agent-web` can also expose a separately authenticated OpenAI-compatible `/v1` interface for Open WebUI, assistant-ui, OpenAI SDKs, and similar applications. This remains a thin adapter over the primary native `AgentConnection` API. See [OpenAI-compatible application interface](openai-compatibility.md) for enablement, supported behavior, durable session mapping, and network-safety requirements.
 
+For trusted platform integration, `agent-web` can instead expose the separately authenticated native `/platform/v1` bridge. This is the private V1 integration path and does not route internal platform traffic through OpenAI compatibility. See [Native platform integration](platform-integration.md) for exact routes, cohort/profile ownership, configuration, and remaining beta gates.
+
 ## Start and stop
 
 Run `agentd --data-root DATA_ROOT --socket ENDPOINT --worker-executable RELEASE/bin/agent-worker --workspace-root WORKSPACE` as the user service. Run `agent-web` against the same endpoint. Stop the web process first and send the daemon its normal termination signal; the daemon drains and stops its workers before exiting. Abrupt process termination is recovered from durable state on the next start.

@@ -374,6 +374,8 @@ pub enum KernelError {
     NotFound(KernelId),
     #[error("kernel process exited or disconnected")]
     Crashed,
+    #[error("kernel process failed during startup: {0}")]
+    Startup(String),
     #[error("kernel execution timed out")]
     Timeout,
     #[error("kernel execution was cancelled")]
@@ -478,7 +480,7 @@ impl KernelBroker {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .env_clear()
             .env("LANG", "C.UTF-8")
             .env("PYTHONHASHSEED", "0")
@@ -488,16 +490,38 @@ impl KernelBroker {
         let pid = child.id();
         let stdin = child.stdin.take().ok_or(KernelError::Crashed)?;
         let stdout = child.stdout.take().ok_or(KernelError::Crashed)?;
+        let mut stderr = child.stderr.take().ok_or(KernelError::Crashed)?;
         let mut io = ProcessIo {
             child,
             stdin,
             stdout: BufReader::new(stdout),
         };
-        let ready = read_event(&mut io.stdout)?;
+        let ready = match read_event(&mut io.stdout) {
+            Ok(ready) => ready,
+            Err(error) => {
+                terminate_process(&mut io.child);
+                let mut detail = String::new();
+                let _ = stderr.take(4 * 1024).read_to_string(&mut detail);
+                let detail = detail.trim();
+                if detail.is_empty() {
+                    return Err(error);
+                }
+                return Err(KernelError::Startup(detail.to_owned()));
+            }
+        };
         if !matches!(ready.event, GuestEventKind::Ready { .. }) {
             terminate_process(&mut io.child);
-            return Err(KernelError::Crashed);
+            let mut detail = String::new();
+            let _ = stderr.take(4 * 1024).read_to_string(&mut detail);
+            return Err(if detail.trim().is_empty() {
+                KernelError::Crashed
+            } else {
+                KernelError::Startup(detail.trim().to_owned())
+            });
         }
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        });
         let process = Arc::new(KernelProcess {
             id: id.clone(),
             pid,

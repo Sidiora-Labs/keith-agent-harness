@@ -605,6 +605,7 @@ fn connect_subscription(app: &Rc<RefCell<ClientApp>>) -> Result<(), JsValue> {
         );
     }
     let socket = WebSocket::new(&url)?;
+    let subscribed_session = state.session.clone();
     let document = state.document.clone();
     let on_open = Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
         set_status(&document, "Connected");
@@ -614,9 +615,17 @@ fn connect_subscription(app: &Rc<RefCell<ClientApp>>) -> Result<(), JsValue> {
 
     let app_for_message = Rc::clone(app);
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        if app_for_message.borrow().connection_epoch != epoch {
+            return;
+        }
         if let Some(text) = event.data().as_string()
             && let Ok(message) = serde_json::from_str::<WireMessage>(&text)
         {
+            if snapshot_session_id(&message)
+                .is_some_and(|session_id| session_id.to_string() != subscribed_session)
+            {
+                return;
+            }
             apply_wire_message(&app_for_message, message);
         }
     });
@@ -651,6 +660,25 @@ fn connect_subscription(app: &Rc<RefCell<ClientApp>>) -> Result<(), JsValue> {
     state.socket = Some(socket);
     set_status(&state.document, "Connecting");
     Ok(())
+}
+
+fn snapshot_session_id(message: &WireMessage) -> Option<&SessionId> {
+    match message {
+        WireMessage::CommandResult(result) => match &result.result {
+            CommandResult::Data(payload) => match payload.as_ref() {
+                ResponsePayload::Snapshot(snapshot) => Some(&snapshot.session.session_id),
+                _ => None,
+            },
+            CommandResult::Accepted { .. } | CommandResult::Rejected(_) => None,
+        },
+        WireMessage::Event(event) => match &event.event {
+            DaemonEvent::Snapshot(snapshot) => Some(&snapshot.session.session_id),
+            _ => None,
+        },
+        WireMessage::Snapshot(frame) => Some(&frame.snapshot.session.session_id),
+        WireMessage::Terminal(frame) => Some(&frame.terminal.session_id),
+        WireMessage::ServerHello(_) | WireMessage::ClientHello(_) | WireMessage::Command(_) => None,
+    }
 }
 
 fn apply_wire_message(app: &Rc<RefCell<ClientApp>>, message: WireMessage) {
@@ -707,6 +735,13 @@ fn apply_wire_message(app: &Rc<RefCell<ClientApp>>, message: WireMessage) {
             if matches!(event.event, DaemonEvent::Warning(_) | DaemonEvent::Error(_)) {
                 set_status(&state.document, "Agent reported a diagnostic event");
             }
+        }
+        message @ (WireMessage::Snapshot(_) | WireMessage::Terminal(_)) => {
+            drop(state);
+            if let Some(event) = message.into_event() {
+                apply_wire_message(app, WireMessage::Event(event));
+            }
+            return;
         }
         WireMessage::ServerHello(_) => set_status(&state.document, "Connected"),
         WireMessage::ClientHello(_) | WireMessage::Command(_) => {}
