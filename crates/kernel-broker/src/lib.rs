@@ -62,8 +62,16 @@ def bridge(operation):
     if reply.get("protocol") != PROTOCOL or reply.get("bridge_id") != bridge_id:
         raise RuntimeError("invalid bridge reply")
     if reply.get("error") is not None:
-        raise RuntimeError(reply["error"].get("message", "bridge request denied"))
+        raise BridgeError(
+            reply["error"].get("code", "bridge"),
+            reply["error"].get("message", "bridge request denied"),
+        )
     return reply.get("result")
+
+class BridgeError(RuntimeError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
 
 class RlmBridge:
     """Typed, host-authorized operations exposed to the persistent guest."""
@@ -75,6 +83,7 @@ class RlmBridge:
             "call_mcp": "rlm.call_mcp(server_id: str, tool_name: str, arguments: dict | None = None); do not pass raw MCP methods such as tools/list",
             "compact": "rlm.compact(target_tokens: int = 32000)",
             "create_artifact": "rlm.create_artifact(text: str, media_type: str = 'text/plain')",
+            "memory": "use memory.catalog/search/timeline/expand/compare/evidence/plan_capsule lazily",
         }
     def __call__(self, objective):
         return self.run(objective)
@@ -99,8 +108,110 @@ class RlmBridge:
     def create_artifact(self, text, media_type="text/plain"):
         return bridge({"kind": "create_artifact", "media_type": media_type, "text": text})
 
+class MemoryResult:
+    """Opaque archive result. It is intentionally excluded from kernel snapshots."""
+    __slots__ = ("_value",)
+    def __init__(self, value):
+        self._value = value
+    def __getitem__(self, key):
+        return memory_value(self._value[key])
+    def __iter__(self):
+        return iter(self._value)
+    def __len__(self):
+        return len(self._value)
+    def __bool__(self):
+        return bool(self._value)
+    def get(self, key, default=None):
+        if not isinstance(self._value, dict):
+            raise TypeError("get is only available for memory mappings")
+        return memory_value(self._value.get(key, default))
+    def keys(self):
+        if not isinstance(self._value, dict):
+            raise TypeError("keys is only available for memory mappings")
+        return self._value.keys()
+    def items(self):
+        if not isinstance(self._value, dict):
+            raise TypeError("items is only available for memory mappings")
+        return ((key, memory_value(value)) for key, value in self._value.items())
+    def __repr__(self):
+        return json.dumps(self._value, ensure_ascii=False, indent=2, sort_keys=True)
+
+def memory_value(value):
+    if isinstance(value, (dict, list)):
+        return MemoryResult(value)
+    return value
+
+def contains_memory_value(value, seen=None):
+    if isinstance(value, (MemoryWorld, MemoryResult)):
+        return True
+    if seen is None:
+        seen = set()
+    identity = id(value)
+    if identity in seen:
+        return False
+    seen.add(identity)
+    if isinstance(value, dict):
+        return any(contains_memory_value(item, seen) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(contains_memory_value(item, seen) for item in value)
+    return False
+
+class MemoryWorld:
+    """Lazy, profile-scoped view over Keith's durable memory observatory."""
+    __slots__ = ("revision",)
+    SENSITIVITIES = ("public", "personal", "sensitive", "secret")
+    def __init__(self):
+        self.revision = None
+    def help(self):
+        return {
+            "catalog": "memory.catalog()",
+            "search": "memory.search(query, limit=12, sensitivity='personal')",
+            "timeline": "memory.timeline(session_id=None, from_ms=None, until_ms=None, limit=24)",
+            "expand": "memory.expand(node_id, depth=1, max_nodes=48)",
+            "compare": "memory.compare(left_node, right_node)",
+            "evidence": "memory.evidence(evidence_ids)",
+            "plan_capsule": "memory.plan_capsule(query, evidence_ids=None, token_budget=4000)",
+            "refresh": "memory.refresh() after a memory_revision_changed error",
+        }
+    def _call(self, operation, sensitivity="personal", max_bytes=24576):
+        if sensitivity not in self.SENSITIVITIES:
+            raise ValueError("sensitivity must be public, personal, sensitive, or secret")
+        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool):
+            raise TypeError("max_bytes must be an integer")
+        result = bridge({
+            "kind": "memory",
+            "request": {
+                "expected_revision": self.revision,
+                "max_result_bytes": max_bytes,
+                "max_sensitivity": sensitivity,
+                "operation": operation,
+            },
+        })
+        if not isinstance(result, dict) or not isinstance(result.get("revision"), int):
+            raise RuntimeError("memory bridge returned an invalid revision-bound result")
+        self.revision = result["revision"]
+        return MemoryResult(result)
+    def refresh(self, sensitivity="personal", max_bytes=24576):
+        self.revision = None
+        return self.catalog(sensitivity=sensitivity, max_bytes=max_bytes)
+    def catalog(self, sensitivity="personal", max_bytes=24576):
+        return self._call({"operation": "catalog"}, sensitivity, max_bytes)
+    def search(self, query, limit=12, sensitivity="personal", include_disputed=False, max_bytes=24576):
+        return self._call({"operation": "search", "query": query, "limit": limit, "include_disputed": include_disputed}, sensitivity, max_bytes)
+    def timeline(self, session_id=None, from_ms=None, until_ms=None, limit=24, sensitivity="personal", include_disputed=False, max_bytes=24576):
+        return self._call({"operation": "timeline", "session_id": session_id, "from": from_ms, "until": until_ms, "limit": limit, "include_disputed": include_disputed}, sensitivity, max_bytes)
+    def expand(self, node_id, depth=1, max_nodes=48, sensitivity="personal", max_bytes=24576):
+        return self._call({"operation": "expand", "node_id": node_id, "depth": depth, "max_nodes": max_nodes}, sensitivity, max_bytes)
+    def compare(self, left_node, right_node, sensitivity="personal", max_bytes=24576):
+        return self._call({"operation": "compare", "left_node": left_node, "right_node": right_node}, sensitivity, max_bytes)
+    def evidence(self, evidence_ids, sensitivity="personal", max_bytes=24576):
+        return self._call({"operation": "evidence", "evidence_ids": list(evidence_ids)}, sensitivity, max_bytes)
+    def plan_capsule(self, query, evidence_ids=None, token_budget=4000, sensitivity="personal", max_bytes=24576):
+        return self._call({"operation": "plan_capsule", "query": query, "evidence_ids": list(evidence_ids or []), "token_budget": token_budget}, sensitivity, max_bytes)
+
 rlm = RlmBridge()
-STATE = {"bridge": bridge, "rlm": rlm, "__builtins__": __builtins__}
+memory = MemoryWorld()
+STATE = {"bridge": bridge, "rlm": rlm, "memory": memory, "__builtins__": __builtins__}
 
 def json_value(value):
     try:
@@ -146,7 +257,10 @@ for line in sys.__stdin__:
             saved = {}
             excluded = []
             for name, value in STATE.items():
-                if name.startswith("__") or name in ("bridge", "rlm"):
+                if name.startswith("__") or name in ("bridge", "rlm", "memory"):
+                    continue
+                if contains_memory_value(value):
+                    excluded.append({"name": name, "type_name": type(value).__name__, "reason": "memory handles and archive results are not snapshot state"})
                     continue
                 try:
                     json.dumps(value)
@@ -159,7 +273,7 @@ for line in sys.__stdin__:
             emit({"event": "snapshot", "state": saved, "excluded": excluded}, request_id)
         elif kind == "restore":
             for name in list(STATE):
-                if not name.startswith("__") and name not in ("bridge", "rlm"):
+                if not name.startswith("__") and name not in ("bridge", "rlm", "memory"):
                     del STATE[name]
             STATE.update(command["state"])
             emit({"event": "restored"}, request_id)
@@ -299,6 +413,7 @@ pub trait BridgeHandler: Send + Sync {
         &self,
         context: &BridgeContext,
         operation: &BridgeOperation,
+        cancellation: &CancellationToken,
     ) -> Result<serde_json::Value, BridgeFailure>;
 }
 
@@ -310,6 +425,7 @@ impl BridgeHandler for DenyBridge {
         &self,
         _context: &BridgeContext,
         _operation: &BridgeOperation,
+        _cancellation: &CancellationToken,
     ) -> Result<serde_json::Value, BridgeFailure> {
         Err(BridgeFailure {
             code: "denied".into(),
@@ -645,6 +761,7 @@ impl KernelBroker {
                                 session_id: process.spec.session_id.clone(),
                             },
                             &operation,
+                            cancellation,
                         )
                     } else {
                         Err(BridgeFailure {
@@ -1503,12 +1620,21 @@ mod tests {
             &self,
             _context: &BridgeContext,
             operation: &BridgeOperation,
+            _cancellation: &CancellationToken,
         ) -> Result<serde_json::Value, BridgeFailure> {
             self.calls.fetch_add(1, AtomicOrdering::Relaxed);
             match operation {
                 BridgeOperation::Compact { target_tokens } => {
                     Ok(serde_json::json!({"accepted": true, "target": target_tokens}))
                 }
+                BridgeOperation::Memory { request } => Ok(serde_json::json!({
+                    "revision": request.expected_revision.unwrap_or(11),
+                    "max_sensitivity": "personal",
+                    "result": {
+                        "kind": "search",
+                        "items": [{"evidence_id": EntityId::new(), "excerpt": "routing history"}],
+                    },
+                })),
                 _ => Err(BridgeFailure {
                     code: "unexpected".into(),
                     message: "unexpected operation in process test".into(),
@@ -1592,6 +1718,72 @@ mod tests {
             .unwrap();
         assert_eq!(second.result, Some(serde_json::json!(42)));
         assert_eq!(second.usage.executions, 2);
+    }
+
+    #[test]
+    fn memory_world_is_lazy_revision_bound_and_excluded_from_snapshots() {
+        let root = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let session = SessionId::new();
+        let bridge = Arc::new(RecordingBridge::new());
+        let broker = broker(&root, bridge.clone());
+        let mut memory_spec = spec(&workspace, &session);
+        memory_spec.allowed_bridge.insert(BridgeCapability::Memory);
+        let id = broker
+            .start(memory_spec.clone(), UtcTimestamp::UNIX_EPOCH)
+            .unwrap();
+        let execution = broker
+            .execute(
+                &id,
+                "remembered = memory.search('routing')",
+                &CancellationToken::default(),
+                &mut NoKernelOutput,
+                UtcTimestamp::from_unix_millis(1),
+            )
+            .unwrap();
+        assert!(execution.error.is_none());
+        let revision = broker
+            .execute(
+                &id,
+                "remembered['revision']",
+                &CancellationToken::default(),
+                &mut NoKernelOutput,
+                UtcTimestamp::from_unix_millis(2),
+            )
+            .unwrap();
+        assert_eq!(revision.result, Some(serde_json::json!(11)));
+        assert_eq!(bridge.calls.load(AtomicOrdering::Relaxed), 1);
+
+        let snapshot = broker
+            .snapshot(
+                &id,
+                &CancellationToken::default(),
+                UtcTimestamp::from_unix_millis(3),
+            )
+            .unwrap();
+        assert!(snapshot.state.get("remembered").is_none());
+        assert!(snapshot.excluded.iter().any(|excluded| {
+            excluded.name == "remembered" && excluded.reason.contains("archive results")
+        }));
+
+        let restored = broker
+            .restore(
+                &snapshot.id,
+                memory_spec,
+                &CancellationToken::default(),
+                UtcTimestamp::from_unix_millis(4),
+            )
+            .unwrap();
+        let result = broker
+            .execute(
+                &restored,
+                "memory.revision is None",
+                &CancellationToken::default(),
+                &mut NoKernelOutput,
+                UtcTimestamp::from_unix_millis(5),
+            )
+            .unwrap();
+        assert_eq!(result.result, Some(serde_json::json!(true)));
     }
 
     #[test]

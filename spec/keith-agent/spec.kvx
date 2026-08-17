@@ -993,7 +993,7 @@ requires = ["7.2", "7.4"]
 
 [task.7.7]
 title  = "Authoritative evidence vault and rebuildable memory atlas"
-status = "in_progress"
+status = "done"
 wave   = 14
 do_1   = "Define evidence authority, validity, scope, temporal identity, source digests, derivation provenance, atlas nodes, typed edges, and revision manifests"
 do_2   = "Project committed session evidence and admitted durable memory into profile-scoped multi-resolution temporal, entity, causal, correction, thematic, procedural, session, goal, and artifact routes"
@@ -1006,7 +1006,7 @@ touches = ["crates/memory/Cargo.toml", "crates/memory/src/*.rs"]
 
 [task.7.8]
 title  = "Lazy revision-bound MemoryWorld kernel capability"
-status = "pending"
+status = "in_progress"
 wave   = 15
 do_1   = "Add a typed memory bridge capability and Python MemoryWorld surface for catalog, search, timeline, expand, compare, evidence, and capsule planning"
 do_2   = "Bind every view to profile, session, archive revision, sensitivity policy, result byte limits, and cancellation while keeping the archive host-owned"

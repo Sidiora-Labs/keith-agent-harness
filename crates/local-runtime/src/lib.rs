@@ -63,10 +63,16 @@ use keith_kernel_broker::{
     BridgeHandler, KernelBroker, KernelIsolation, KernelLimits, KernelNetwork, KernelOutputSpill,
     KernelRuntime, KernelSpec, NoKernelOutput,
 };
-use keith_kernel_protocol::{BridgeCapability, BridgeContext, BridgeFailure, BridgeOperation};
+use keith_kernel_protocol::{
+    BridgeCapability, BridgeContext, BridgeFailure, BridgeOperation, MemoryBridgeOperation,
+    MemoryBridgeRequest, MemorySensitivity,
+};
 use keith_knowledge::{KnowledgeError, KnowledgeService};
 use keith_mcp::McpManager;
-use keith_memory::{MemoryPolicy, MemoryRecordState, MemoryService};
+use keith_memory::{
+    AtlasSearchRequest, AtlasTimelineRequest, EvidenceRecord, MemoryPolicy, MemoryRecordState,
+    MemoryService,
+};
 use keith_model_registry::{
     CredentialResolver, ModelPurpose, ModelRegistry, ModelRoute, ModelSelection, RegistryError,
 };
@@ -366,6 +372,7 @@ struct RuntimeBridge {
     children: Arc<ChildService>,
     artifacts: Arc<ArtifactService>,
     mcp: Arc<Mutex<McpManager>>,
+    memory_worlds: Arc<Mutex<BTreeMap<ProfileId, Arc<MemoryService>>>>,
     root_scope: Option<RootTreeId>,
     pending: Mutex<BTreeMap<SessionId, Vec<PendingKernelEffect>>>,
 }
@@ -427,6 +434,7 @@ impl RuntimeBridge {
         children: Arc<ChildService>,
         artifacts: Arc<ArtifactService>,
         mcp: Arc<Mutex<McpManager>>,
+        memory_worlds: Arc<Mutex<BTreeMap<ProfileId, Arc<MemoryService>>>>,
         root_scope: Option<RootTreeId>,
     ) -> Self {
         Self {
@@ -437,6 +445,7 @@ impl RuntimeBridge {
             children,
             artifacts,
             mcp,
+            memory_worlds,
             root_scope,
             pending: Mutex::new(BTreeMap::new()),
         }
@@ -745,6 +754,308 @@ impl RuntimeBridge {
             "sha256": metadata.sha256,
         }))
     }
+
+    fn read_memory(
+        &self,
+        context: &BridgeContext,
+        request: &MemoryBridgeRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<serde_json::Value, BridgeFailure> {
+        check_bridge_cancellation(cancellation)?;
+        if !(512..=48 * 1_024).contains(&request.max_result_bytes) {
+            return Err(BridgeFailure {
+                code: "memory_limit".into(),
+                message: "memory max_result_bytes must be between 512 and 49152".into(),
+            });
+        }
+        let manifest = self.manifest(&context.session_id)?;
+        let memory = self
+            .memory_worlds
+            .lock()
+            .map_err(|_| BridgeFailure {
+                code: "memory_state".into(),
+                message: "profile memory registry is unavailable".into(),
+            })?
+            .get(&manifest.profile_id)
+            .cloned()
+            .ok_or_else(|| BridgeFailure {
+                code: "memory_unavailable".into(),
+                message: "profile memory is not initialized".into(),
+            })?;
+        let observatory = memory.observatory();
+        let revision = observatory
+            .revision()
+            .map_err(|error| bridge_failure("memory", error))?;
+        if request
+            .expected_revision
+            .is_some_and(|expected| expected != revision)
+        {
+            return Err(BridgeFailure {
+                code: "memory_revision_changed".into(),
+                message: "memory changed; refresh the MemoryWorld handle before continuing".into(),
+            });
+        }
+        let requested = bridge_sensitivity(request.max_sensitivity);
+        let allowed = memory.max_automatic_sensitivity();
+        let sensitivity = if sensitivity_rank(requested) > sensitivity_rank(allowed) {
+            allowed
+        } else {
+            requested
+        };
+        let body = memory_operation(
+            observatory,
+            &request.operation,
+            revision,
+            sensitivity,
+            cancellation,
+        )?;
+        check_bridge_cancellation(cancellation)?;
+        let final_revision = observatory
+            .revision()
+            .map_err(|error| bridge_failure("memory", error))?;
+        if final_revision != revision {
+            return Err(BridgeFailure {
+                code: "memory_revision_changed".into(),
+                message: "memory changed while the query was running; refresh and retry".into(),
+            });
+        }
+        let result = serde_json::json!({
+            "revision": revision,
+            "max_sensitivity": sensitivity_name(sensitivity),
+            "result": body,
+        });
+        let encoded =
+            serde_json::to_vec(&result).map_err(|error| bridge_failure("memory", error))?;
+        if encoded.len() > request.max_result_bytes as usize {
+            return Err(BridgeFailure {
+                code: "memory_result_too_large".into(),
+                message: format!(
+                    "memory result requires {} bytes but the request allows {}",
+                    encoded.len(),
+                    request.max_result_bytes
+                ),
+            });
+        }
+        Ok(result)
+    }
+}
+
+fn check_bridge_cancellation(cancellation: &CancellationToken) -> Result<(), BridgeFailure> {
+    if cancellation.is_cancelled() {
+        Err(BridgeFailure {
+            code: "cancelled".into(),
+            message: "kernel bridge operation was cancelled".into(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+const fn bridge_sensitivity(sensitivity: MemorySensitivity) -> Sensitivity {
+    match sensitivity {
+        MemorySensitivity::Public => Sensitivity::Public,
+        MemorySensitivity::Personal => Sensitivity::Personal,
+        MemorySensitivity::Sensitive => Sensitivity::Sensitive,
+        MemorySensitivity::Secret => Sensitivity::Secret,
+    }
+}
+
+const fn sensitivity_rank(sensitivity: Sensitivity) -> u8 {
+    match sensitivity {
+        Sensitivity::Public => 0,
+        Sensitivity::Personal => 1,
+        Sensitivity::Sensitive => 2,
+        Sensitivity::Secret => 3,
+    }
+}
+
+const fn sensitivity_name(sensitivity: Sensitivity) -> &'static str {
+    match sensitivity {
+        Sensitivity::Public => "public",
+        Sensitivity::Personal => "personal",
+        Sensitivity::Sensitive => "sensitive",
+        Sensitivity::Secret => "secret",
+    }
+}
+
+fn memory_operation(
+    observatory: &keith_memory::MemoryObservatory,
+    operation: &MemoryBridgeOperation,
+    revision: u64,
+    sensitivity: Sensitivity,
+    cancellation: &CancellationToken,
+) -> Result<serde_json::Value, BridgeFailure> {
+    check_bridge_cancellation(cancellation)?;
+    match operation {
+        MemoryBridgeOperation::Catalog => {
+            let catalog = observatory
+                .catalog_filtered(sensitivity)
+                .map_err(|error| bridge_failure("memory", error))?;
+            serde_json::to_value(serde_json::json!({"kind": "catalog", "catalog": catalog}))
+                .map_err(|error| bridge_failure("memory", error))
+        }
+        MemoryBridgeOperation::Search {
+            query,
+            limit,
+            include_disputed,
+        } => {
+            let (items, coverage) = observatory
+                .search(&AtlasSearchRequest {
+                    query: query.clone(),
+                    limit: *limit,
+                    max_sensitivity: sensitivity,
+                    include_disputed: *include_disputed,
+                })
+                .map_err(|error| bridge_failure("memory", error))?;
+            Ok(serde_json::json!({"kind": "search", "items": items, "coverage": coverage}))
+        }
+        MemoryBridgeOperation::Timeline {
+            session_id,
+            from,
+            until,
+            limit,
+            include_disputed,
+        } => {
+            let (items, coverage) = observatory
+                .timeline(&AtlasTimelineRequest {
+                    session_id: session_id.clone(),
+                    from: *from,
+                    until: *until,
+                    limit: *limit,
+                    max_sensitivity: sensitivity,
+                    include_disputed: *include_disputed,
+                })
+                .map_err(|error| bridge_failure("memory", error))?;
+            Ok(serde_json::json!({"kind": "timeline", "items": items, "coverage": coverage}))
+        }
+        MemoryBridgeOperation::Expand {
+            node_id,
+            depth,
+            max_nodes,
+        } => {
+            let (nodes, edges, coverage) = observatory
+                .expand(node_id, *depth, *max_nodes, sensitivity)
+                .map_err(|error| bridge_failure("memory", error))?;
+            Ok(serde_json::json!({
+                "kind": "expand",
+                "nodes": nodes,
+                "edges": edges,
+                "coverage": coverage,
+            }))
+        }
+        MemoryBridgeOperation::Compare {
+            left_node,
+            right_node,
+        } => {
+            let comparison = observatory
+                .compare(left_node, right_node, sensitivity)
+                .map_err(|error| bridge_failure("memory", error))?;
+            Ok(serde_json::json!({"kind": "compare", "comparison": comparison}))
+        }
+        MemoryBridgeOperation::Evidence { evidence_ids } => {
+            let items = observatory
+                .evidence(evidence_ids, sensitivity)
+                .map_err(|error| bridge_failure("memory", error))?;
+            Ok(serde_json::json!({"kind": "evidence", "items": items}))
+        }
+        MemoryBridgeOperation::PlanCapsule {
+            query,
+            evidence_ids,
+            token_budget,
+        } => plan_memory_capsule(
+            observatory,
+            query,
+            evidence_ids,
+            *token_budget,
+            revision,
+            sensitivity,
+        ),
+    }
+}
+
+fn plan_memory_capsule(
+    observatory: &keith_memory::MemoryObservatory,
+    query: &str,
+    evidence_ids: &[EntityId],
+    token_budget: u64,
+    revision: u64,
+    sensitivity: Sensitivity,
+) -> Result<serde_json::Value, BridgeFailure> {
+    if query.trim().is_empty()
+        || query.len() > 16 * 1_024
+        || !(128..=32_000).contains(&token_budget)
+    {
+        return Err(BridgeFailure {
+            code: "memory_query".into(),
+            message: "capsule planning requires a query and a token budget from 128 to 32000"
+                .into(),
+        });
+    }
+    let (candidates, coverage) = if evidence_ids.is_empty() {
+        let (results, coverage) = observatory
+            .search(&AtlasSearchRequest {
+                query: query.to_owned(),
+                limit: 32,
+                max_sensitivity: sensitivity,
+                include_disputed: false,
+            })
+            .map_err(|error| bridge_failure("memory", error))?;
+        (
+            results
+                .into_iter()
+                .map(|result| result.evidence)
+                .collect::<Vec<_>>(),
+            Some(coverage),
+        )
+    } else {
+        (
+            observatory
+                .evidence(evidence_ids, sensitivity)
+                .map_err(|error| bridge_failure("memory", error))?,
+            None,
+        )
+    };
+    let mut used_tokens = 0_u64;
+    let mut selected = Vec::new();
+    for evidence in candidates {
+        let estimated_tokens = evidence_token_price(&evidence);
+        if used_tokens.saturating_add(estimated_tokens) > token_budget {
+            continue;
+        }
+        used_tokens = used_tokens.saturating_add(estimated_tokens);
+        selected.push(capsule_manifest_item(&evidence, estimated_tokens));
+    }
+    Ok(serde_json::json!({
+        "kind": "capsule_plan",
+        "query": query,
+        "archive_revision": revision,
+        "token_budget": token_budget,
+        "estimated_tokens": used_tokens,
+        "evidence": selected,
+        "search_coverage": coverage,
+    }))
+}
+
+fn evidence_token_price(evidence: &EvidenceRecord) -> u64 {
+    u64::try_from(evidence.text.len().saturating_add(3) / 4).unwrap_or(u64::MAX)
+}
+
+fn capsule_manifest_item(evidence: &EvidenceRecord, estimated_tokens: u64) -> serde_json::Value {
+    let excerpt = evidence.text.chars().take(360).collect::<String>();
+    serde_json::json!({
+        "evidence_id": evidence.id,
+        "source_session": evidence.source_session,
+        "source_entries": evidence.source_entries,
+        "source_digests": evidence.source_digests,
+        "content_digest": evidence.content_digest,
+        "source_kind": evidence.source_kind,
+        "authority": evidence.authority,
+        "validity": evidence.validity,
+        "occurred_at": evidence.occurred_at,
+        "sensitivity": evidence.sensitivity,
+        "estimated_tokens": estimated_tokens,
+        "excerpt": excerpt,
+    })
 }
 
 impl BridgeHandler for RuntimeBridge {
@@ -752,6 +1063,7 @@ impl BridgeHandler for RuntimeBridge {
         &self,
         context: &BridgeContext,
         operation: &BridgeOperation,
+        cancellation: &CancellationToken,
     ) -> Result<serde_json::Value, BridgeFailure> {
         match operation {
             BridgeOperation::CreateChild { objective } => self.create_child(context, objective),
@@ -787,13 +1099,14 @@ impl BridgeHandler for RuntimeBridge {
             BridgeOperation::CreateArtifact { media_type, text } => {
                 self.create_artifact(context, media_type, text)
             }
+            BridgeOperation::Memory { request } => self.read_memory(context, request, cancellation),
         }
     }
 }
 
 struct ProfileModules {
     workspace: PersonalWorkspace,
-    memory: MemoryService,
+    memory: Arc<MemoryService>,
     knowledge: KnowledgeService,
     skills: SkillRegistry,
     attention: Mutex<LocalAttention>,
@@ -880,12 +1193,14 @@ impl ProfileModules {
             now,
         )
         .map_err(module_error)?;
-        let memory = MemoryService::open(
-            workspace.clone(),
-            &profile.profile.id,
-            MemoryPolicy::default(),
-        )
-        .map_err(module_error)?;
+        let memory = Arc::new(
+            MemoryService::open(
+                workspace.clone(),
+                &profile.profile.id,
+                MemoryPolicy::default(),
+            )
+            .map_err(module_error)?,
+        );
         let knowledge =
             KnowledgeService::new(workspace.clone(), retrieval, profile.profile.id.clone());
         let skills = SkillRegistry::open(
@@ -1224,6 +1539,7 @@ impl LocalRuntime {
             McpManager::open(data_root.join("mcp"), Arc::clone(&credentials), 32)
                 .map_err(module_error)?,
         ));
+        let memory_worlds = Arc::new(Mutex::new(BTreeMap::new()));
         let kernel_bridge = Arc::new(RuntimeBridge::new(
             sessions.clone(),
             Arc::clone(&profiles),
@@ -1232,6 +1548,7 @@ impl LocalRuntime {
             Arc::clone(&children),
             Arc::clone(&artifacts),
             Arc::clone(&mcp),
+            memory_worlds,
             config.root_scope.clone(),
         ));
         let kernel_spill = Arc::new(KernelArtifactSpill {
@@ -4907,9 +5224,14 @@ impl LocalRuntime {
             .profile_modules
             .lock()
             .map_err(|_| LocalRuntimeError::LockPoisoned)?;
-        Ok(Arc::clone(
-            modules.entry(profile.profile.id.clone()).or_insert(opened),
-        ))
+        let selected = Arc::clone(modules.entry(profile.profile.id.clone()).or_insert(opened));
+        self.system_modules
+            .kernel_bridge
+            .memory_worlds
+            .lock()
+            .map_err(|_| LocalRuntimeError::LockPoisoned)?
+            .insert(profile.profile.id.clone(), Arc::clone(&selected.memory));
+        Ok(selected)
     }
 
     fn ensure_supported_provider(&self, provider: &str) -> Result<(), LocalRuntimeError> {
@@ -8342,6 +8664,7 @@ impl KernelTool {
                 BridgeCapability::Mcp,
                 BridgeCapability::Compaction,
                 BridgeCapability::Artifacts,
+                BridgeCapability::Memory,
             ]),
         })
     }
@@ -9051,6 +9374,275 @@ mod tests {
             validate_prompt_text(&"x".repeat(MAX_RUNTIME_PROMPT_BYTES + 1)),
             Err(LocalRuntimeError::Invalid(_))
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn memory_bridge_enforces_revision_profile_sensitivity_size_deletion_and_cancellation() {
+        use keith_memory::{EvidenceAuthority, EvidenceSourceKind, ObservatoryMutation};
+        use keith_session_store::RetentionClass;
+
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path().join("data");
+        let credential_root = data_root.join("credentials");
+        let workspace_root = root.path().join("workspace");
+        let key = [47_u8; 32];
+        seed_provider_credential(&credential_root, key, "openai", "memory-bridge-secret");
+        let configuration = || LocalRuntimeConfig {
+            data_root: data_root.clone(),
+            credential_root: credential_root.clone(),
+            credential_key: MasterKey::from_bytes(key),
+            workspace_root: workspace_root.clone(),
+            openai_base_url: "http://127.0.0.1:65535".into(),
+            anthropic_base_url: "http://127.0.0.1:65535".into(),
+            provider_base_urls: BTreeMap::new(),
+            root_scope: None,
+            worker_id: WorkerId::new(),
+            owner_instance: EntityId::new(),
+        };
+        let runtime = LocalRuntime::open(configuration()).unwrap();
+        let profile = runtime.registered_profiles().unwrap().remove(0);
+        let session = runtime
+            .create_session(
+                &profile.profile.id,
+                &profile.profile.workspace_id,
+                Some("Memory bridge".into()),
+            )
+            .unwrap();
+        let modules = runtime.profile_modules(&profile).unwrap();
+        let now = UtcTimestamp::now().unwrap();
+        let public = EvidenceRecord::new(
+            profile.profile.id.clone(),
+            session.session_id.clone(),
+            vec![EntryId::new()],
+            vec!["public-source-digest".into()],
+            "public-routing-source".into(),
+            None,
+            EvidenceSourceKind::UserMessage,
+            EvidenceAuthority::UserAsserted,
+            format!("routing public preference {}", "detail ".repeat(300)),
+            now,
+            Sensitivity::Public,
+            RetentionClass::Durable,
+            Vec::new(),
+        );
+        let secret = EvidenceRecord::new(
+            profile.profile.id.clone(),
+            session.session_id.clone(),
+            vec![EntryId::new()],
+            vec!["secret-source-digest".into()],
+            "secret-routing-source".into(),
+            None,
+            EvidenceSourceKind::UserMessage,
+            EvidenceAuthority::UserAsserted,
+            "routing secret preference".into(),
+            now,
+            Sensitivity::Secret,
+            RetentionClass::Durable,
+            Vec::new(),
+        );
+        let public_id = public.id.clone();
+        let initial_revision = modules
+            .memory
+            .observatory()
+            .apply(
+                vec![
+                    ObservatoryMutation::Observe(public),
+                    ObservatoryMutation::Observe(secret),
+                ],
+                now,
+            )
+            .unwrap();
+        let context = BridgeContext {
+            kernel_id: KernelId::new(),
+            session_id: session.session_id.clone(),
+        };
+        let search = BridgeOperation::Memory {
+            request: MemoryBridgeRequest {
+                expected_revision: Some(initial_revision),
+                max_result_bytes: 48 * 1_024,
+                max_sensitivity: MemorySensitivity::Secret,
+                operation: MemoryBridgeOperation::Search {
+                    query: "routing".into(),
+                    limit: 8,
+                    include_disputed: false,
+                },
+            },
+        };
+        let visible = runtime
+            .system_modules
+            .kernel_bridge
+            .handle(&context, &search, &CancellationToken::default())
+            .unwrap();
+        assert_eq!(visible["max_sensitivity"], "personal");
+        assert_eq!(visible["result"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            visible["result"]["items"][0]["evidence"]["id"],
+            serde_json::json!(public_id)
+        );
+
+        let too_small = BridgeOperation::Memory {
+            request: MemoryBridgeRequest {
+                expected_revision: Some(initial_revision),
+                max_result_bytes: 512,
+                max_sensitivity: MemorySensitivity::Personal,
+                operation: MemoryBridgeOperation::Evidence {
+                    evidence_ids: vec![public_id.clone()],
+                },
+            },
+        };
+        let oversized = runtime
+            .system_modules
+            .kernel_bridge
+            .handle(&context, &too_small, &CancellationToken::default())
+            .unwrap_err();
+        assert_eq!(oversized.code, "memory_result_too_large");
+
+        let next = EvidenceRecord::new(
+            profile.profile.id.clone(),
+            session.session_id.clone(),
+            vec![EntryId::new()],
+            vec!["next-source-digest".into()],
+            "next-routing-source".into(),
+            None,
+            EvidenceSourceKind::AssistantFinal,
+            EvidenceAuthority::AssistantGenerated,
+            "routing follow-up evidence".into(),
+            UtcTimestamp::from_unix_millis(now.unix_millis() + 1),
+            Sensitivity::Personal,
+            RetentionClass::Daily,
+            Vec::new(),
+        );
+        let next_revision = modules
+            .memory
+            .observatory()
+            .apply(
+                vec![ObservatoryMutation::Observe(next)],
+                UtcTimestamp::from_unix_millis(now.unix_millis() + 1),
+            )
+            .unwrap();
+        let stale = runtime
+            .system_modules
+            .kernel_bridge
+            .handle(&context, &search, &CancellationToken::default())
+            .unwrap_err();
+        assert_eq!(stale.code, "memory_revision_changed");
+
+        let deleted_revision = modules
+            .memory
+            .observatory()
+            .apply(
+                vec![ObservatoryMutation::Delete {
+                    evidence_id: public_id.clone(),
+                }],
+                UtcTimestamp::from_unix_millis(now.unix_millis() + 2),
+            )
+            .unwrap();
+        let deleted = BridgeOperation::Memory {
+            request: MemoryBridgeRequest {
+                expected_revision: Some(deleted_revision),
+                max_result_bytes: 48 * 1_024,
+                max_sensitivity: MemorySensitivity::Personal,
+                operation: MemoryBridgeOperation::Evidence {
+                    evidence_ids: vec![public_id],
+                },
+            },
+        };
+        assert!(
+            runtime
+                .system_modules
+                .kernel_bridge
+                .handle(&context, &deleted, &CancellationToken::default())
+                .is_err()
+        );
+        let cancelled = CancellationToken::default();
+        cancelled.cancel();
+        assert_eq!(
+            runtime
+                .system_modules
+                .kernel_bridge
+                .handle(&context, &search, &cancelled)
+                .unwrap_err()
+                .code,
+            "cancelled"
+        );
+
+        let other_workspace = root.path().join("other-workspace");
+        for directory in [
+            other_workspace.join(".keith/memory/daily"),
+            other_workspace.join(".keith/schedules"),
+        ] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        for relative in [".keith/AGENT.md", ".keith/USER.md", ".keith/RULE.md"] {
+            fs::write(other_workspace.join(relative), "isolated profile\n").unwrap();
+        }
+        let mut other = profile.clone();
+        other.profile.id = ProfileId::new();
+        other.profile.workspace_id = WorkspaceId::new();
+        other.profile.display_name = "Other Keith".into();
+        other.resources = ProfileResources {
+            workspace_root: other_workspace.clone(),
+            memory_root: other_workspace.join(".keith/memory"),
+            schedule_root: other_workspace.join(".keith/schedules"),
+        };
+        let other = runtime.profiles.register(other).unwrap();
+        runtime.profile_modules(&other).unwrap();
+        let other_session = runtime
+            .create_session(
+                &other.profile.id,
+                &other.profile.workspace_id,
+                Some("Isolated memory".into()),
+            )
+            .unwrap();
+        let isolated_context = BridgeContext {
+            kernel_id: KernelId::new(),
+            session_id: other_session.session_id,
+        };
+        let isolated = runtime
+            .system_modules
+            .kernel_bridge
+            .handle(
+                &isolated_context,
+                &BridgeOperation::Memory {
+                    request: MemoryBridgeRequest {
+                        expected_revision: None,
+                        max_result_bytes: 8 * 1_024,
+                        max_sensitivity: MemorySensitivity::Personal,
+                        operation: MemoryBridgeOperation::Catalog,
+                    },
+                },
+                &CancellationToken::default(),
+            )
+            .unwrap();
+        assert_eq!(isolated["result"]["catalog"]["evidence_count"], 0);
+
+        drop(modules);
+        drop(runtime);
+        let restarted = LocalRuntime::open(configuration()).unwrap();
+        let recovered = restarted
+            .system_modules
+            .kernel_bridge
+            .handle(
+                &context,
+                &BridgeOperation::Memory {
+                    request: MemoryBridgeRequest {
+                        expected_revision: Some(deleted_revision),
+                        max_result_bytes: 48 * 1_024,
+                        max_sensitivity: MemorySensitivity::Personal,
+                        operation: MemoryBridgeOperation::Search {
+                            query: "follow-up".into(),
+                            limit: 4,
+                            include_disputed: false,
+                        },
+                    },
+                },
+                &CancellationToken::default(),
+            )
+            .unwrap();
+        assert_eq!(recovered["revision"], deleted_revision);
+        assert_eq!(recovered["result"]["items"].as_array().unwrap().len(), 1);
+        assert!(next_revision < deleted_revision);
     }
 
     #[test]

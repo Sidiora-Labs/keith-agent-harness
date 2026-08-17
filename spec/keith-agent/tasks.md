@@ -252,14 +252,14 @@
     - Implement install, update, disable, rollback, delete, and restart-safe history
     - Test discovery, selection, irrelevant exclusion, unavailable tools, precedence, and rollback
     - _Requirements: 28.1-28.3, 28.6_
-  - [-] 7.7 Authoritative evidence vault and rebuildable memory atlas
+  - [x] 7.7 Authoritative evidence vault and rebuildable memory atlas
     - Define evidence authority, validity, scope, temporal identity, source digests, derivation provenance, atlas nodes, typed edges, and revision manifests
     - Project committed session evidence and admitted durable memory into profile-scoped multi-resolution temporal, entity, causal, correction, thematic, procedural, session, goal, and artifact routes
     - Implement deterministic lexical and trigram entry routes, rebuild, quarantine, correction, dispute, deletion, sensitivity change, deduplication, and cache invalidation without making the atlas authoritative
     - Expose bounded catalog, search, timeline, expand, compare, and exact-evidence operations with stable citations and coverage metadata
     - Run source-authority, rebuild equivalence, correction dominance, deletion cleanup, prompt-injection, corruption, and cross-profile isolation tests
     - _Requirements: 25.1-25.6, 26.1-26.6, 44.1-44.5, 52.1-52.3, 53.1-53.2, 53.9-53.10_
-  - [ ] 7.8 Lazy revision-bound MemoryWorld kernel capability
+  - [-] 7.8 Lazy revision-bound MemoryWorld kernel capability
     - Add a typed memory bridge capability and Python MemoryWorld surface for catalog, search, timeline, expand, compare, evidence, and capsule planning
     - Bind every view to profile, session, archive revision, sensitivity policy, result byte limits, and cancellation while keeping the archive host-owned
     - Keep MemoryWorld handles and archive contents out of kernel snapshots and reconnect compatible handles after restore only when their revision and scope remain valid

@@ -650,14 +650,35 @@ impl MemoryObservatory {
     }
 
     pub fn catalog(&self) -> Result<AtlasCatalog, ObservatoryError> {
+        self.catalog_filtered(Sensitivity::Secret)
+    }
+
+    pub fn catalog_filtered(
+        &self,
+        max_sensitivity: Sensitivity,
+    ) -> Result<AtlasCatalog, ObservatoryError> {
         let state = self.lock()?;
         let mut nodes_by_kind = BTreeMap::new();
         for node in state.atlas.nodes.values() {
-            *nodes_by_kind.entry(node.kind).or_insert(0) += 1;
+            if node.evidence_ids.is_empty()
+                || node.evidence_ids.iter().any(|id| {
+                    state.evidence.get(id).is_some_and(|record| {
+                        record.validity != EvidenceValidity::Deleted
+                            && sensitivity_rank(record.sensitivity)
+                                <= sensitivity_rank(max_sensitivity)
+                    })
+                })
+            {
+                *nodes_by_kind.entry(node.kind).or_insert(0) += 1;
+            }
         }
         let sessions = state
             .evidence
             .values()
+            .filter(|record| {
+                record.validity != EvidenceValidity::Deleted
+                    && sensitivity_rank(record.sensitivity) <= sensitivity_rank(max_sensitivity)
+            })
             .map(|record| record.source_session.clone())
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -667,6 +688,15 @@ impl MemoryObservatory {
             .nodes
             .values()
             .filter(|node| node.kind == AtlasNodeKind::Day)
+            .filter(|node| {
+                node.evidence_ids.iter().any(|id| {
+                    state.evidence.get(id).is_some_and(|record| {
+                        record.validity != EvidenceValidity::Deleted
+                            && sensitivity_rank(record.sensitivity)
+                                <= sensitivity_rank(max_sensitivity)
+                    })
+                })
+            })
             .map(|node| node.label.clone())
             .collect();
         Ok(AtlasCatalog {
@@ -674,11 +704,29 @@ impl MemoryObservatory {
             revision: state.atlas.vault_revision,
             head_digest: state.atlas.vault_head_digest.clone(),
             derivation_version: state.atlas.derivation_version,
-            evidence_count: state.evidence.len(),
-            active_count: count_validity(&state.evidence, EvidenceValidity::Active),
-            disputed_count: count_validity(&state.evidence, EvidenceValidity::Disputed),
-            superseded_count: count_validity(&state.evidence, EvidenceValidity::Superseded),
-            deleted_count: count_validity(&state.evidence, EvidenceValidity::Deleted),
+            evidence_count: state
+                .evidence
+                .values()
+                .filter(|record| {
+                    sensitivity_rank(record.sensitivity) <= sensitivity_rank(max_sensitivity)
+                })
+                .count(),
+            active_count: count_filtered_validity(
+                &state.evidence,
+                EvidenceValidity::Active,
+                max_sensitivity,
+            ),
+            disputed_count: count_filtered_validity(
+                &state.evidence,
+                EvidenceValidity::Disputed,
+                max_sensitivity,
+            ),
+            superseded_count: count_filtered_validity(
+                &state.evidence,
+                EvidenceValidity::Superseded,
+                max_sensitivity,
+            ),
+            deleted_count: 0,
             nodes_by_kind,
             sessions,
             days,
@@ -1875,6 +1923,20 @@ fn count_validity(
     evidence
         .values()
         .filter(|record| record.validity == validity)
+        .count()
+}
+
+fn count_filtered_validity(
+    evidence: &BTreeMap<EntityId, EvidenceRecord>,
+    validity: EvidenceValidity,
+    max_sensitivity: Sensitivity,
+) -> usize {
+    evidence
+        .values()
+        .filter(|record| {
+            record.validity == validity
+                && sensitivity_rank(record.sensitivity) <= sensitivity_rank(max_sensitivity)
+        })
         .count()
 }
 

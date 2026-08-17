@@ -338,6 +338,11 @@ impl MemoryService {
         &self.observatory
     }
 
+    /// Returns the strongest sensitivity the service may expose automatically.
+    pub const fn max_automatic_sensitivity(&self) -> Sensitivity {
+        self.policy.max_automatic_sensitivity
+    }
+
     /// Projects committed session evidence without making the atlas authoritative.
     ///
     /// # Errors

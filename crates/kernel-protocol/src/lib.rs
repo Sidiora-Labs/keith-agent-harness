@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use keith_agent_types::{EntityId, GoalId, KernelId, SessionId};
+use keith_agent_types::{EntityId, GoalId, KernelId, SessionId, UtcTimestamp};
 use serde::{Deserialize, Serialize};
 
 pub const KERNEL_PROTOCOL_VERSION: u16 = 1;
@@ -84,6 +84,60 @@ pub enum BridgeCapability {
     Mcp,
     Compaction,
     Artifacts,
+    Memory,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySensitivity {
+    Public,
+    Personal,
+    Sensitive,
+    Secret,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryBridgeRequest {
+    pub expected_revision: Option<u64>,
+    pub max_result_bytes: u32,
+    pub max_sensitivity: MemorySensitivity,
+    pub operation: MemoryBridgeOperation,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "operation")]
+pub enum MemoryBridgeOperation {
+    Catalog,
+    Search {
+        query: String,
+        limit: usize,
+        include_disputed: bool,
+    },
+    Timeline {
+        session_id: Option<SessionId>,
+        from: Option<UtcTimestamp>,
+        until: Option<UtcTimestamp>,
+        limit: usize,
+        include_disputed: bool,
+    },
+    Expand {
+        node_id: String,
+        depth: usize,
+        max_nodes: usize,
+    },
+    Compare {
+        left_node: String,
+        right_node: String,
+    },
+    Evidence {
+        evidence_ids: Vec<EntityId>,
+    },
+    PlanCapsule {
+        query: String,
+        evidence_ids: Vec<EntityId>,
+        token_budget: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -113,6 +167,9 @@ pub enum BridgeOperation {
         media_type: String,
         text: String,
     },
+    Memory {
+        request: MemoryBridgeRequest,
+    },
 }
 
 impl BridgeOperation {
@@ -124,6 +181,7 @@ impl BridgeOperation {
             Self::CallMcp { .. } => BridgeCapability::Mcp,
             Self::Compact { .. } => BridgeCapability::Compaction,
             Self::CreateArtifact { .. } => BridgeCapability::Artifacts,
+            Self::Memory { .. } => BridgeCapability::Memory,
         }
     }
 }
@@ -197,6 +255,21 @@ mod tests {
                     text: "deliverable".into(),
                 },
                 BridgeCapability::Artifacts,
+            ),
+            (
+                BridgeOperation::Memory {
+                    request: MemoryBridgeRequest {
+                        expected_revision: Some(7),
+                        max_result_bytes: 8_192,
+                        max_sensitivity: MemorySensitivity::Personal,
+                        operation: MemoryBridgeOperation::Search {
+                            query: "routing".into(),
+                            limit: 8,
+                            include_disputed: false,
+                        },
+                    },
+                },
+                BridgeCapability::Memory,
             ),
         ];
         for (operation, capability) in operations {
