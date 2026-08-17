@@ -68,6 +68,7 @@ pub enum ContextProvenance {
     SessionContract,
     ActiveGoal,
     DurableMemory,
+    RetrievedMemory,
     RetrievedKnowledge,
     CompactionSummary,
     UserIngress,
@@ -789,6 +790,7 @@ mod tests {
         for (encoded, expected) in [
             ("compaction_summary", ContextProvenance::CompactionSummary),
             ("durable_memory", ContextProvenance::DurableMemory),
+            ("retrieved_memory", ContextProvenance::RetrievedMemory),
             ("retrieved_knowledge", ContextProvenance::RetrievedKnowledge),
             ("system_policy", ContextProvenance::SystemPolicy),
             ("controller_guidance", ContextProvenance::ControllerGuidance),

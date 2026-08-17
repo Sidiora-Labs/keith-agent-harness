@@ -1019,7 +1019,7 @@ touches = ["crates/kernel-protocol/src/lib.rs", "crates/kernel-broker/src/lib.rs
 
 [task.7.9]
 title  = "Bounded read-only recursive memory scouts and recall capsules"
-status = "in_progress"
+status = "done"
 wave   = 16
 do_1   = "Define memory-scout purpose, immutable scope manifest, structured findings, recall lifecycle, capsule schema, and validation contract"
 do_2   = "Run scouts through bounded dedicated recursion with memory-only read authority, deterministic partitioning, cancellation, deduplication, and crash-safe replay"
@@ -1032,7 +1032,7 @@ touches = ["crates/subagents/src/*.rs", "crates/memory/src/*.rs", "crates/local-
 
 [task.7.10]
 title  = "Bounded reflex activation and removal of whole-memory prompt injection"
-status = "pending"
+status = "in_progress"
 wave   = 17
 do_1   = "Add explicit RetrievedMemory provenance and frozen activation manifests carrying selector version, archive revision, evidence IDs, digests, coverage, and token price"
 do_2   = "Select confirmed anchors, active work, relevant evidence, and corrections within deterministic per-kind and total budgets before provider sampling"

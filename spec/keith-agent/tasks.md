@@ -266,14 +266,14 @@
     - Return structured bounded results with exact evidence IDs and never expose memory operations as provider user messages
     - Run kernel restart, incompatible revision, deletion, sensitivity, output bound, cancellation, profile denial, and snapshot-remnant tests
     - _Requirements: 17.1-17.6, 44.1-44.5, 52.1-52.3, 53.3, 53.8-53.10_
-  - [-] 7.9 Bounded read-only recursive memory scouts and recall capsules
+  - [x] 7.9 Bounded read-only recursive memory scouts and recall capsules
     - Define memory-scout purpose, immutable scope manifest, structured findings, recall lifecycle, capsule schema, and validation contract
     - Run scouts through bounded dedicated recursion with memory-only read authority, deterministic partitioning, cancellation, deduplication, and crash-safe replay
     - Validate source IDs, digests, revision, scope, claims, contradictions, coverage, and budgets before producing exactly one paired recall result
     - Prevent scouts from writing memory, mutating workspaces, messaging users, delivering finals, or inheriting ordinary profile tools
     - Run nested recall, unsupported claim, stale source, cross-profile, recursive explosion, cancellation, crash, timeout, and ordinary-turn liveness tests
     - _Requirements: 10.1-10.7, 13.1-13.6, 21.1-21.6, 41.1-41.6, 42.1-42.6, 52.3-52.8, 53.4-53.6, 53.8-53.10_
-  - [ ] 7.10 Bounded reflex activation and removal of whole-memory prompt injection
+  - [-] 7.10 Bounded reflex activation and removal of whole-memory prompt injection
     - Add explicit RetrievedMemory provenance and frozen activation manifests carrying selector version, archive revision, evidence IDs, digests, coverage, and token price
     - Select confirmed anchors, active work, relevant evidence, and corrections within deterministic per-kind and total budgets before provider sampling
     - Remove whole MEMORY.md injection and arbitrary first-record activation; deduplicate by source identity and content digest and keep operational/recovery state exact-key only

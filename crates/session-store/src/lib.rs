@@ -911,6 +911,56 @@ pub struct MemoryRecallLink {
     pub result_id: EntityId,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryActivationKind {
+    ConfirmedAnchor,
+    ActiveWork,
+    Correction,
+    RelevantEvidence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryActivationEvidence {
+    pub kind: MemoryActivationKind,
+    pub evidence_id: EntityId,
+    pub source_entries: Vec<EntryId>,
+    pub source_digests: Vec<String>,
+    pub source_identity: String,
+    pub content_digest: String,
+    pub authority: String,
+    pub validity: String,
+    pub text: String,
+    pub token_price: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryActivationCoverage {
+    pub examined: usize,
+    pub matched: usize,
+    pub eligible: usize,
+    pub selected: usize,
+    pub excluded_current_thread: usize,
+    pub deduplicated: usize,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryActivationManifest {
+    pub manifest_id: String,
+    pub selector_version: String,
+    pub query_identity: String,
+    pub profile_id: ProfileId,
+    pub session_id: SessionId,
+    pub archive_revision: u64,
+    pub evidence: Vec<MemoryActivationEvidence>,
+    pub coverage: MemoryActivationCoverage,
+    pub token_price: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sensitivity {

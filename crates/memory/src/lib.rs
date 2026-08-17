@@ -1,7 +1,13 @@
 #![forbid(unsafe_code)]
 
+mod activation;
 mod observatory;
 mod recall;
+
+pub use activation::{
+    ACTIVATION_SELECTOR_VERSION, ActivationError, ActivationPolicy, ActivationRequest,
+    select_activation, validate_activation,
+};
 
 pub use observatory::{
     AtlasCatalog, AtlasComparison, AtlasCoverage, AtlasEdge, AtlasNode, AtlasNodeKind,
