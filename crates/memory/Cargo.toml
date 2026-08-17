@@ -14,6 +14,7 @@ keith-session-store = { path = "../session-store" }
 keith-workspace = { path = "../workspace" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

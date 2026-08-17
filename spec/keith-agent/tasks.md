@@ -252,6 +252,34 @@
     - Implement install, update, disable, rollback, delete, and restart-safe history
     - Test discovery, selection, irrelevant exclusion, unavailable tools, precedence, and rollback
     - _Requirements: 28.1-28.3, 28.6_
+  - [-] 7.7 Authoritative evidence vault and rebuildable memory atlas
+    - Define evidence authority, validity, scope, temporal identity, source digests, derivation provenance, atlas nodes, typed edges, and revision manifests
+    - Project committed session evidence and admitted durable memory into profile-scoped multi-resolution temporal, entity, causal, correction, thematic, procedural, session, goal, and artifact routes
+    - Implement deterministic lexical and trigram entry routes, rebuild, quarantine, correction, dispute, deletion, sensitivity change, deduplication, and cache invalidation without making the atlas authoritative
+    - Expose bounded catalog, search, timeline, expand, compare, and exact-evidence operations with stable citations and coverage metadata
+    - Run source-authority, rebuild equivalence, correction dominance, deletion cleanup, prompt-injection, corruption, and cross-profile isolation tests
+    - _Requirements: 25.1-25.6, 26.1-26.6, 44.1-44.5, 52.1-52.3, 53.1-53.2, 53.9-53.10_
+  - [ ] 7.8 Lazy revision-bound MemoryWorld kernel capability
+    - Add a typed memory bridge capability and Python MemoryWorld surface for catalog, search, timeline, expand, compare, evidence, and capsule planning
+    - Bind every view to profile, session, archive revision, sensitivity policy, result byte limits, and cancellation while keeping the archive host-owned
+    - Keep MemoryWorld handles and archive contents out of kernel snapshots and reconnect compatible handles after restore only when their revision and scope remain valid
+    - Return structured bounded results with exact evidence IDs and never expose memory operations as provider user messages
+    - Run kernel restart, incompatible revision, deletion, sensitivity, output bound, cancellation, profile denial, and snapshot-remnant tests
+    - _Requirements: 17.1-17.6, 44.1-44.5, 52.1-52.3, 53.3, 53.8-53.10_
+  - [ ] 7.9 Bounded read-only recursive memory scouts and recall capsules
+    - Define memory-scout purpose, immutable scope manifest, structured findings, recall lifecycle, capsule schema, and validation contract
+    - Run scouts through bounded dedicated recursion with memory-only read authority, deterministic partitioning, cancellation, deduplication, and crash-safe replay
+    - Validate source IDs, digests, revision, scope, claims, contradictions, coverage, and budgets before producing exactly one paired recall result
+    - Prevent scouts from writing memory, mutating workspaces, messaging users, delivering finals, or inheriting ordinary profile tools
+    - Run nested recall, unsupported claim, stale source, cross-profile, recursive explosion, cancellation, crash, timeout, and ordinary-turn liveness tests
+    - _Requirements: 10.1-10.7, 13.1-13.6, 21.1-21.6, 41.1-41.6, 42.1-42.6, 52.3-52.8, 53.4-53.6, 53.8-53.10_
+  - [ ] 7.10 Bounded reflex activation and removal of whole-memory prompt injection
+    - Add explicit RetrievedMemory provenance and frozen activation manifests carrying selector version, archive revision, evidence IDs, digests, coverage, and token price
+    - Select confirmed anchors, active work, relevant evidence, and corrections within deterministic per-kind and total budgets before provider sampling
+    - Remove whole MEMORY.md injection and arbitrary first-record activation; deduplicate by source identity and content digest and keep operational/recovery state exact-key only
+    - Freeze activation across the same provider step, rebuild only after authoritative surface change, and keep compaction, retries, active user ingress, finalization, and delivery independent
+    - Run longitudinal relevance, false-familiarity, correction, deletion, no-embedding fallback, stale activation, repeated compaction, provider retry, memory failure, and final-authority regression suites
+    - _Requirements: 7.1-7.7, 9.1-9.6, 10.1-10.7, 25.1-25.6, 26.1-26.6, 44.1-44.5, 52.1-52.8, 53.6-53.10_
 
 ## Phase 8 — Scheduler, Commitments, Awareness, Attention, and Presence
 
@@ -469,7 +497,7 @@
     - Run workers, channel bursts, recursive trees, schedules, rebuilds, output floods, slow/disconnected viewers, and reconnect load
     - Publish hardware, configuration, workload, percentiles, exclusions, and failure behavior
     - _Requirements: 48.1-48.6_
-  - [-] 13.6 Typed context provenance, tool failures, and mandatory turn finalizer
+  - [x] 13.6 Typed context provenance, tool failures, and mandatory turn finalizer
     - Define typed context provenance and metadata, compile model requests by section, and enforce provider role user iff provenance is UserIngress
     - Preserve typed tool errors, retry directives, effect state, recovery actions, and canonical repetition fingerprints without synthetic user guidance
     - Separate assistant activity from terminal finals and implement one mandatory atomic finalizer for every durably accepted user action
@@ -540,10 +568,10 @@
     { "id": 11, "tasks": ["5.6", "6.2", "7.1"] },
     { "id": 12, "tasks": ["6.3", "7.2"] },
     { "id": 13, "tasks": ["7.3", "7.4", "8.1"] },
-    { "id": 14, "tasks": ["7.5", "7.6", "8.2"] },
-    { "id": 15, "tasks": ["8.3", "9.1", "10.1", "10.2"] },
-    { "id": 16, "tasks": ["8.4", "8.5", "9.2"] },
-    { "id": 17, "tasks": ["9.3", "9.4", "11.1"] },
+    { "id": 14, "tasks": ["7.5", "7.6", "7.7", "8.2"] },
+    { "id": 15, "tasks": ["7.8", "8.3", "9.1", "10.1", "10.2"] },
+    { "id": 16, "tasks": ["7.9", "8.4", "8.5", "9.2"] },
+    { "id": 17, "tasks": ["7.10", "9.3", "9.4", "11.1"] },
     { "id": 18, "tasks": ["10.3", "11.2", "11.3"] },
     { "id": 19, "tasks": ["10.4", "11.4"] },
     { "id": 20, "tasks": ["11.5", "12.1", "12.4"] },

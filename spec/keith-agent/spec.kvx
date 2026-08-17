@@ -15,7 +15,7 @@
 feature      = "keith-agent"
 title        = "Keith Agent — Rust-native supervised recursion, readable personal memory, multi-channel presence, and durable autonomy"
 status       = "planning"
-spec_version = "1.0.0"
+spec_version = "1.1.0"
 intro        = "Keith Agent combines the Delta-1 supervised recursive runtime with the Gamma-3 assistant and distribution layer in one Rust-native architecture. One daemon supervises one worker per root session tree; every root and durable child uses AgentSession; prompts, schedules, channel messages, child results, steering, and autonomous continuation share one action inbox. Human-readable profiles, memory, knowledge, and skills remain user-owned, while event-driven awareness, attention, commitments, waiting, planning, review, channels, and reversible refinement create continuity without simulated consciousness. Rust owns every platform boundary; Python, shells, browsers, compilers, and other runtimes are optional restricted guest workloads. No task is complete from source presence, a rendered interface, an endpoint response, or a model claim: current packaged binaries and real process paths must satisfy the referenced acceptance criteria."
 
 [design]
@@ -558,6 +558,20 @@ ac_6  = "EVERY durably accepted user action SHALL atomically commit exactly one 
 ac_7  = "EXECUTION success, final creation, artifact persistence, terminal status, and delivery acknowledgement SHALL be tracked independently; disconnect SHALL NOT convert a produced final into command rejection, and reconnect SHALL replay the same authoritative state until acknowledgement."
 ac_8  = "A replay and fault suite SHALL cover the 27-call/13-error regression, provenance deserialization denial, repeated compaction and restart, failures around tool/final/snapshot/outbox boundaries, unknown-effect writes, provider outage, artifact delivery, and disconnect/reconnect with exactly one final answer."
 
+[req.53]
+title = "Computational memory observatory with evidence-grounded recursive recall"
+story = "As a persistent personal agent, I want abundant history to remain computationally addressable outside the prompt, so that Keith can investigate, connect, and verify past experience without contaminating the turn loop or treating retrieval indexes as truth."
+ac_1  = "AN append-only profile-scoped evidence vault SHALL retain exact source session entries, authority class, sensitivity, retention, content digest, temporal identity, and active, superseded, disputed, or deleted validity without allowing summaries or indexes to replace source evidence."
+ac_2  = "A rebuildable memory atlas SHALL project temporal, entity, causal, correction, thematic, procedural, session, goal, artifact, lexical, trigram, and optional semantic routes at multiple resolutions while retaining exact evidence references and derivation version."
+ac_3  = "THE persistent Python kernel SHALL receive a lazy revision-bound MemoryWorld capability whose bounded catalog, search, timeline, expansion, comparison, evidence, and capsule operations query host-owned memory without serializing the archive into kernel snapshots."
+ac_4  = "DELIBERATE recursive recall SHALL use a distinct read-only memory-scout purpose with scoped evidence manifests, no workspace, shell, browser, external messaging, delivery, or memory-write authority, and hard depth, child, token, byte, time, and concurrency bounds."
+ac_5  = "MEMORY scouts SHALL return structured findings containing claims, supporting and contradictory evidence IDs, coverage, uncertainty, archive revision, and unexplored regions; unsupported or stale findings SHALL fail validation and SHALL NOT enter model context."
+ac_6  = "A validated recall capsule SHALL carry stable query identity, archive revision, source IDs and digests, coverage, contradictions, gaps, selector version, and token price and SHALL compile only as explicit non-user RetrievedMemory provenance."
+ac_7  = "REFLEX memory activation SHALL select a small deterministic budget of confirmed anchors, active work, relevant evidence, and corrections; whole memory files, arbitrary first records, derived operational state, and unscoped cross-conversation content SHALL NOT be injected into every provider request."
+ac_8  = "RECALL, atlas, scout, kernel-view, reflection, cache, and projection failures SHALL fail open for ordinary turns, remain maintenance or paired tool outcomes, and SHALL NOT alter an accepted final, active user message, provider retry authority, compaction boundary, or delivery identity."
+ac_9  = "CORRECTION, deletion, sensitivity change, profile isolation, source revision, and index rebuild SHALL invalidate affected atlas routes, caches, kernel handles, activation manifests, and future capsules while preserving only explicitly retained source authority."
+ac_10 = "A longitudinal and fault suite SHALL prove exact recall, correction dominance, deletion cleanup, prompt-injection resistance, cross-profile denial, stale-capsule rejection, recursive bounds, crash-safe read replay, degraded retrieval, no context duplication, and unchanged turn finalization."
+
 # ================================ TASKS ==================================
 
 [tasks]
@@ -977,6 +991,58 @@ do_5   = "Test discovery, selection, irrelevant exclusion, unavailable tools, pr
 reqs   = ["28.1-28.3", "28.6"]
 requires = ["7.2", "7.4"]
 
+[task.7.7]
+title  = "Authoritative evidence vault and rebuildable memory atlas"
+status = "in_progress"
+wave   = 14
+do_1   = "Define evidence authority, validity, scope, temporal identity, source digests, derivation provenance, atlas nodes, typed edges, and revision manifests"
+do_2   = "Project committed session evidence and admitted durable memory into profile-scoped multi-resolution temporal, entity, causal, correction, thematic, procedural, session, goal, and artifact routes"
+do_3   = "Implement deterministic lexical and trigram entry routes, rebuild, quarantine, correction, dispute, deletion, sensitivity change, deduplication, and cache invalidation without making the atlas authoritative"
+do_4   = "Expose bounded catalog, search, timeline, expand, compare, and exact-evidence operations with stable citations and coverage metadata"
+do_5   = "Run source-authority, rebuild equivalence, correction dominance, deletion cleanup, prompt-injection, corruption, and cross-profile isolation tests"
+reqs   = ["25.1-25.6", "26.1-26.6", "44.1-44.5", "52.1-52.3", "53.1-53.2", "53.9-53.10"]
+requires = ["7.3", "7.4", "13.6"]
+touches = ["crates/memory/src/*.rs", "crates/session-store/src/lib.rs", "crates/agent-types/src/lib.rs"]
+
+[task.7.8]
+title  = "Lazy revision-bound MemoryWorld kernel capability"
+status = "pending"
+wave   = 15
+do_1   = "Add a typed memory bridge capability and Python MemoryWorld surface for catalog, search, timeline, expand, compare, evidence, and capsule planning"
+do_2   = "Bind every view to profile, session, archive revision, sensitivity policy, result byte limits, and cancellation while keeping the archive host-owned"
+do_3   = "Keep MemoryWorld handles and archive contents out of kernel snapshots and reconnect compatible handles after restore only when their revision and scope remain valid"
+do_4   = "Return structured bounded results with exact evidence IDs and never expose memory operations as provider user messages"
+do_5   = "Run kernel restart, incompatible revision, deletion, sensitivity, output bound, cancellation, profile denial, and snapshot-remnant tests"
+reqs   = ["17.1-17.6", "44.1-44.5", "52.1-52.3", "53.3", "53.8-53.10"]
+requires = ["5.6", "7.7"]
+touches = ["crates/kernel-protocol/src/lib.rs", "crates/kernel-broker/src/lib.rs", "crates/local-runtime/src/lib.rs", "crates/memory/src/*.rs"]
+
+[task.7.9]
+title  = "Bounded read-only recursive memory scouts and recall capsules"
+status = "pending"
+wave   = 16
+do_1   = "Define memory-scout purpose, immutable scope manifest, structured findings, recall lifecycle, capsule schema, and validation contract"
+do_2   = "Run scouts through bounded dedicated recursion with memory-only read authority, deterministic partitioning, cancellation, deduplication, and crash-safe replay"
+do_3   = "Validate source IDs, digests, revision, scope, claims, contradictions, coverage, and budgets before producing exactly one paired recall result"
+do_4   = "Prevent scouts from writing memory, mutating workspaces, messaging users, delivering finals, or inheriting ordinary profile tools"
+do_5   = "Run nested recall, unsupported claim, stale source, cross-profile, recursive explosion, cancellation, crash, timeout, and ordinary-turn liveness tests"
+reqs   = ["10.1-10.7", "13.1-13.6", "21.1-21.6", "41.1-41.6", "42.1-42.6", "52.3-52.8", "53.4-53.6", "53.8-53.10"]
+requires = ["6.2", "7.8"]
+touches = ["crates/subagents/src/*.rs", "crates/memory/src/*.rs", "crates/local-runtime/src/lib.rs", "crates/provider-core/src/lib.rs", "crates/session-store/src/lib.rs"]
+
+[task.7.10]
+title  = "Bounded reflex activation and removal of whole-memory prompt injection"
+status = "pending"
+wave   = 17
+do_1   = "Add explicit RetrievedMemory provenance and frozen activation manifests carrying selector version, archive revision, evidence IDs, digests, coverage, and token price"
+do_2   = "Select confirmed anchors, active work, relevant evidence, and corrections within deterministic per-kind and total budgets before provider sampling"
+do_3   = "Remove whole MEMORY.md injection and arbitrary first-record activation; deduplicate by source identity and content digest and keep operational/recovery state exact-key only"
+do_4   = "Freeze activation across the same provider step, rebuild only after authoritative surface change, and keep compaction, retries, active user ingress, finalization, and delivery independent"
+do_5   = "Run longitudinal relevance, false-familiarity, correction, deletion, no-embedding fallback, stale activation, repeated compaction, provider retry, memory failure, and final-authority regression suites"
+reqs   = ["7.1-7.7", "9.1-9.6", "10.1-10.7", "25.1-25.6", "26.1-26.6", "44.1-44.5", "52.1-52.8", "53.6-53.10"]
+requires = ["7.9"]
+touches = ["crates/provider-core/src/lib.rs", "crates/local-runtime/src/lib.rs", "crates/memory/src/*.rs", "crates/session-store/src/lib.rs"]
+
 [task.8]
 section = "Phase 8 — Scheduler, Commitments, Awareness, Attention, and Presence"
 title   = "The Persistent Life Loop"
@@ -1332,7 +1398,7 @@ touches = ["apps/agent-web/src/*.rs", "apps/agent-web/src/server/*.rs", "apps/ag
 
 [task.13.6]
 title  = "Typed context provenance, tool failures, and mandatory turn finalizer"
-status = "in_progress"
+status = "done"
 wave   = 23
 do_1   = "Define typed context provenance and metadata, compile model requests by section, and enforce provider role user iff provenance is UserIngress"
 do_2   = "Preserve typed tool errors, retry directives, effect state, recovery actions, and canonical repetition fingerprints without synthetic user guidance"

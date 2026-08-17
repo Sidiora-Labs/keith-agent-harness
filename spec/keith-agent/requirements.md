@@ -674,3 +674,20 @@ Keith Agent combines the Delta-1 supervised recursive runtime with the Gamma-3 a
 7. EXECUTION success, final creation, artifact persistence, terminal status, and delivery acknowledgement SHALL be tracked independently; disconnect SHALL NOT convert a produced final into command rejection, and reconnect SHALL replay the same authoritative state until acknowledgement.
 8. A replay and fault suite SHALL cover the 27-call/13-error regression, provenance deserialization denial, repeated compaction and restart, failures around tool/final/snapshot/outbox boundaries, unknown-effect writes, provider outage, artifact delivery, and disconnect/reconnect with exactly one final answer.
 
+## Requirement 53: Computational memory observatory with evidence-grounded recursive recall
+
+**User Story:** As a persistent personal agent, I want abundant history to remain computationally addressable outside the prompt, so that Keith can investigate, connect, and verify past experience without contaminating the turn loop or treating retrieval indexes as truth.
+
+### Acceptance Criteria
+
+1. AN append-only profile-scoped evidence vault SHALL retain exact source session entries, authority class, sensitivity, retention, content digest, temporal identity, and active, superseded, disputed, or deleted validity without allowing summaries or indexes to replace source evidence.
+2. A rebuildable memory atlas SHALL project temporal, entity, causal, correction, thematic, procedural, session, goal, artifact, lexical, trigram, and optional semantic routes at multiple resolutions while retaining exact evidence references and derivation version.
+3. THE persistent Python kernel SHALL receive a lazy revision-bound MemoryWorld capability whose bounded catalog, search, timeline, expansion, comparison, evidence, and capsule operations query host-owned memory without serializing the archive into kernel snapshots.
+4. DELIBERATE recursive recall SHALL use a distinct read-only memory-scout purpose with scoped evidence manifests, no workspace, shell, browser, external messaging, delivery, or memory-write authority, and hard depth, child, token, byte, time, and concurrency bounds.
+5. MEMORY scouts SHALL return structured findings containing claims, supporting and contradictory evidence IDs, coverage, uncertainty, archive revision, and unexplored regions; unsupported or stale findings SHALL fail validation and SHALL NOT enter model context.
+6. A validated recall capsule SHALL carry stable query identity, archive revision, source IDs and digests, coverage, contradictions, gaps, selector version, and token price and SHALL compile only as explicit non-user RetrievedMemory provenance.
+7. REFLEX memory activation SHALL select a small deterministic budget of confirmed anchors, active work, relevant evidence, and corrections; whole memory files, arbitrary first records, derived operational state, and unscoped cross-conversation content SHALL NOT be injected into every provider request.
+8. RECALL, atlas, scout, kernel-view, reflection, cache, and projection failures SHALL fail open for ordinary turns, remain maintenance or paired tool outcomes, and SHALL NOT alter an accepted final, active user message, provider retry authority, compaction boundary, or delivery identity.
+9. CORRECTION, deletion, sensitivity change, profile isolation, source revision, and index rebuild SHALL invalidate affected atlas routes, caches, kernel handles, activation manifests, and future capsules while preserving only explicitly retained source authority.
+10. A longitudinal and fault suite SHALL prove exact recall, correction dominance, deletion cleanup, prompt-injection resistance, cross-profile denial, stale-capsule rejection, recursive bounds, crash-safe read replay, degraded retrieval, no context duplication, and unchanged turn finalization.
+

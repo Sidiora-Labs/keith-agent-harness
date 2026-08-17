@@ -1,5 +1,14 @@
 #![forbid(unsafe_code)]
 
+mod observatory;
+
+pub use observatory::{
+    AtlasCatalog, AtlasComparison, AtlasCoverage, AtlasEdge, AtlasNode, AtlasNodeKind,
+    AtlasRelation, AtlasSearchRequest, AtlasSearchResult, AtlasTimelineRequest, EvidenceAuthority,
+    EvidenceFacet, EvidenceFacetKind, EvidenceRecord, EvidenceSourceKind, EvidenceValidity,
+    MemoryObservatory, ObservatoryError, ObservatoryHealth, ObservatoryLimits, ObservatoryMutation,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -108,6 +117,10 @@ pub enum MemoryError {
     Json(#[from] serde_json::Error),
     #[error("workspace update failed: {0}")]
     Workspace(#[from] keith_workspace::PersonalWorkspaceError),
+    #[error("memory observatory failed: {0}")]
+    Observatory(#[from] ObservatoryError),
+    #[error("memory clock failed: {0}")]
+    Clock(String),
     #[error("memory ledger belongs to another profile or unsupported schema")]
     IncompatibleLedger,
     #[error("compaction emission does not contain a committed compaction boundary")]
@@ -130,6 +143,7 @@ pub struct MemoryService {
     workspace: PersonalWorkspace,
     policy: MemoryPolicy,
     ledger: Mutex<MemoryLedger>,
+    observatory: MemoryObservatory,
 }
 
 impl MemoryService {
@@ -156,10 +170,19 @@ impl MemoryService {
         {
             return Err(MemoryError::IncompatibleLedger);
         }
+        let now = UtcTimestamp::now().map_err(|error| MemoryError::Clock(error.to_string()))?;
+        let observatory = MemoryObservatory::open(
+            &workspace.layout().root,
+            profile_id,
+            ObservatoryLimits::default(),
+            now,
+        )?;
+        observatory.sync_memory_records(ledger.records.values(), now)?;
         Ok(Self {
             workspace,
             policy,
             ledger: Mutex::new(ledger),
+            observatory,
         })
     }
 
@@ -216,6 +239,9 @@ impl MemoryService {
         );
         next.processed_boundaries.insert(boundary);
         self.commit_ledger(&mut next, now)?;
+        let _ = self
+            .observatory
+            .sync_memory_records(next.records.values(), now);
         *ledger = next;
         Ok(outcome)
     }
@@ -263,6 +289,9 @@ impl MemoryService {
         previous.superseded_by = Some(corrected.id.clone());
         next.records.insert(corrected.id.clone(), corrected.clone());
         self.commit_ledger(&mut next, now)?;
+        let _ = self
+            .observatory
+            .sync_memory_records(next.records.values(), now);
         *ledger = next;
         Ok(corrected)
     }
@@ -288,6 +317,9 @@ impl MemoryService {
         record.state = MemoryRecordState::Deleted;
         record.deleted_at = Some(now);
         self.commit_ledger(&mut next, now)?;
+        let _ = self
+            .observatory
+            .sync_memory_records(next.records.values(), now);
         *ledger = next;
         Ok(())
     }
@@ -299,6 +331,27 @@ impl MemoryService {
     /// Returns an error when the memory state lock is poisoned.
     pub fn records(&self) -> Result<Vec<MemoryRecord>, MemoryError> {
         Ok(self.lock()?.records.values().cloned().collect())
+    }
+
+    /// Returns the profile-scoped evidence vault and rebuildable atlas.
+    pub const fn observatory(&self) -> &MemoryObservatory {
+        &self.observatory
+    }
+
+    /// Projects committed session evidence without making the atlas authoritative.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when source evidence is invalid or the append-only vault cannot persist.
+    pub fn ingest_session_entries(
+        &self,
+        session_id: &SessionId,
+        entries: &[keith_session_store::SessionEntry],
+        now: UtcTimestamp,
+    ) -> Result<u64, MemoryError> {
+        self.observatory
+            .ingest_session_entries(session_id, entries, now)
+            .map_err(Into::into)
     }
 
     fn commit_ledger(&self, next: &mut MemoryLedger, now: UtcTimestamp) -> Result<(), MemoryError> {
@@ -955,6 +1008,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn correction_and_deletion_preserve_auditable_metadata_and_bounds() {
         let directory = tempdir().unwrap();
         let workspace_root = directory.path().join("workspace");
@@ -995,6 +1049,34 @@ mod tests {
         let memory = fs::read_to_string(workspace_root.join("MEMORY.md")).unwrap();
         assert!(memory.contains("Prefers short, concrete updates"));
         assert!(!memory.contains("Prefers concise updates"));
+        let (old_results, _) = service
+            .observatory()
+            .search(&AtlasSearchRequest {
+                query: "concise updates".into(),
+                limit: 8,
+                max_sensitivity: Sensitivity::Personal,
+                include_disputed: false,
+            })
+            .unwrap();
+        assert!(
+            old_results
+                .iter()
+                .all(|result| result.evidence.text != "Prefers concise updates")
+        );
+        let (corrected_results, _) = service
+            .observatory()
+            .search(&AtlasSearchRequest {
+                query: "short concrete updates".into(),
+                limit: 8,
+                max_sensitivity: Sensitivity::Personal,
+                include_disputed: false,
+            })
+            .unwrap();
+        assert!(
+            corrected_results
+                .iter()
+                .any(|result| result.evidence.text == "Prefers short, concrete updates")
+        );
         service
             .delete(&corrected.id, UtcTimestamp::from_unix_millis(3))
             .unwrap();
@@ -1002,6 +1084,20 @@ mod tests {
             !fs::read_to_string(workspace_root.join("MEMORY.md"))
                 .unwrap()
                 .contains("Prefers short, concrete updates")
+        );
+        let (deleted_results, _) = service
+            .observatory()
+            .search(&AtlasSearchRequest {
+                query: "short concrete updates".into(),
+                limit: 8,
+                max_sensitivity: Sensitivity::Personal,
+                include_disputed: true,
+            })
+            .unwrap();
+        assert!(
+            deleted_results
+                .iter()
+                .all(|result| result.evidence.text != "Prefers short, concrete updates")
         );
         let records = service.records().unwrap();
         assert!(records.iter().any(|record| {
