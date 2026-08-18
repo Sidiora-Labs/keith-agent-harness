@@ -287,7 +287,7 @@
     - Keep the persona user-editable, live-reloadable, profile-scoped, and independent from turn authority and memory-derived relationship state
     - Test new profile creation, exact legacy migration, customized-file preservation, restart idempotence, and actual model-request personality content
     - _Requirements: 23.1-23.5, 24.1-24.6, 43.1-43.6, 51.4, 52.1-52.3, 54.1-54.3, 54.8-54.10_
-  - [-] 7.12 Durable relationship state, first meeting, preferred name, and typed context
+  - [x] 7.12 Durable relationship state, first meeting, preferred name, and typed context
     - Implement a profile-scoped hash-chained relationship ledger and the Unintroduced, AwaitingName, and Established projection with truncated-tail recovery
     - Start first meeting exactly once for a genuine user entry, capture only explicit or directly solicited names, and retain exact source session, entry, and digest
     - Project preferred-name confirmation, correction, and forgetting into the evidence vault with supersession/deletion and no weak or account-metadata inference

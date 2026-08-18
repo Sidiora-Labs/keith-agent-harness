@@ -1072,7 +1072,7 @@ touches = ["crates/local-runtime/src/lib.rs"]
 
 [task.7.12]
 title  = "Durable relationship state, first meeting, preferred name, and typed context"
-status = "in_progress"
+status = "done"
 wave   = 19
 do_1   = "Implement a profile-scoped hash-chained relationship ledger and the Unintroduced, AwaitingName, and Established projection with truncated-tail recovery"
 do_2   = "Start first meeting exactly once for a genuine user entry, capture only explicit or directly solicited names, and retain exact source session, entry, and digest"

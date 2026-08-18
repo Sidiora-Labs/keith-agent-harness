@@ -2,10 +2,13 @@
 
 use std::collections::BTreeSet;
 
-use keith_agent_types::{Generation, GoalId, Sequence, SessionId, UtcTimestamp};
+use keith_agent_types::{
+    ActionId, ChildId, CommitmentId, DeliveryId, EntityId, EntryId, Generation, GoalId, JobId,
+    Sequence, SessionId, ToolCallId, TurnId, UtcTimestamp,
+};
 use keith_protocol::{
-    DaemonEvent, EventEnvelope, MemoryChangeProjection, MessageProjection, MessageRole,
-    SessionSnapshot,
+    DaemonEvent, EventEnvelope, GoalState, MemoryChangeKind, MemoryChangeProjection,
+    MessageProjection, MessageRole, SessionSnapshot, TurnTerminalStatus,
 };
 pub use keith_protocol::{PresenceProjection, PresenceState};
 use serde::{Deserialize, Serialize};
@@ -187,6 +190,492 @@ impl ClientParity {
 
     pub fn is_full(&self) -> bool {
         self == &Self::full()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonalSurface {
+    Home,
+    Conversation,
+    Work,
+    YourWorld,
+    Settings,
+}
+
+impl PersonalSurface {
+    pub const ALL: [Self; 5] = [
+        Self::Home,
+        Self::Conversation,
+        Self::Work,
+        Self::YourWorld,
+        Self::Settings,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Conversation => "Conversation",
+            Self::Work => "Work",
+            Self::YourWorld => "Your World",
+            Self::Settings => "Settings",
+        }
+    }
+
+    pub const fn empty_message(self) -> &'static str {
+        match self {
+            Self::Home => "Keith is ready when you are.",
+            Self::Conversation => "Start with anything you want help thinking through or doing.",
+            Self::Work => "Ask Keith to take something on and the outcome will stay visible here.",
+            Self::YourWorld => {
+                "Keith will show saved context here when there is something to review."
+            }
+            Self::Settings => "Your privacy, connections, and preferences live here.",
+        }
+    }
+
+    pub const fn empty_action(self) -> &'static str {
+        match self {
+            Self::Home | Self::Conversation | Self::Work => "Message Keith",
+            Self::YourWorld => "Ask what Keith remembers",
+            Self::Settings => "Review settings",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "id")]
+pub enum PersonalReference {
+    Action(ActionId),
+    Goal(GoalId),
+    Plan(EntityId),
+    Child(ChildId),
+    Tool(ToolCallId),
+    Commitment(CommitmentId),
+    Schedule(JobId),
+    Confirmation(EntityId),
+    Wait(EntityId),
+    Delivery(DeliveryId),
+    Memory(EntryId),
+    Final { turn_id: TurnId, final_id: EntryId },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonalItemKind {
+    Request,
+    Goal,
+    Plan,
+    DelegatedWork,
+    Action,
+    Decision,
+    Commitment,
+    Schedule,
+    Waiting,
+    Delivery,
+    SavedContext,
+    Output,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PersonalItem {
+    pub reference: PersonalReference,
+    pub kind: PersonalItemKind,
+    pub title: String,
+    pub detail: Option<String>,
+    pub state_label: String,
+    pub occurred_at: Option<UtcTimestamp>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonalPresenceTone {
+    Ready,
+    Active,
+    Waiting,
+    NeedsYou,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PersonalPresence {
+    pub tone: PersonalPresenceTone,
+    pub label: String,
+    pub detail: Option<String>,
+    pub updated_at: UtcTimestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PersonalIntelligenceProjection {
+    pub session_id: SessionId,
+    pub session_title: String,
+    pub presence: PersonalPresence,
+    pub work: Vec<PersonalItem>,
+    pub needs_you: Vec<PersonalItem>,
+    pub completed: Vec<PersonalItem>,
+    pub upcoming: Vec<PersonalItem>,
+    pub saved_context: Vec<PersonalItem>,
+    pub outputs: Vec<PersonalItem>,
+}
+
+#[allow(clippy::too_many_lines)]
+pub fn project_personal_intelligence(snapshot: &SessionSnapshot) -> PersonalIntelligenceProjection {
+    let mut projection = PersonalIntelligenceProjection {
+        session_id: snapshot.session.session_id.clone(),
+        session_title: snapshot
+            .session
+            .title
+            .clone()
+            .unwrap_or_else(|| "New conversation".into()),
+        presence: personal_presence(snapshot),
+        work: Vec::new(),
+        needs_you: Vec::new(),
+        completed: Vec::new(),
+        upcoming: Vec::new(),
+        saved_context: Vec::new(),
+        outputs: Vec::new(),
+    };
+
+    for confirmation in &snapshot.confirmations {
+        projection.needs_you.push(PersonalItem {
+            reference: PersonalReference::Confirmation(confirmation.confirmation_id.clone()),
+            kind: PersonalItemKind::Decision,
+            title: confirmation.summary.clone(),
+            detail: Some("Keith needs your decision before continuing.".into()),
+            state_label: "Needs your decision".into(),
+            occurred_at: None,
+        });
+    }
+    for action in &snapshot.actions {
+        let item = PersonalItem {
+            reference: PersonalReference::Action(action.action_id.clone()),
+            kind: PersonalItemKind::Request,
+            title: humanize_source(&action.source),
+            detail: None,
+            state_label: humanize_state(&action.state),
+            occurred_at: Some(action.created_at),
+        };
+        push_state_item(&mut projection, item, &action.state, false);
+    }
+    for goal in &snapshot.goals {
+        let state = goal_state_name(goal.state);
+        let item = PersonalItem {
+            reference: PersonalReference::Goal(goal.goal_id.clone()),
+            kind: PersonalItemKind::Goal,
+            title: goal.objective.clone(),
+            detail: None,
+            state_label: humanize_state(state),
+            occurred_at: None,
+        };
+        match goal.state {
+            GoalState::Complete | GoalState::Cancelled => projection.completed.push(item),
+            GoalState::Blocked | GoalState::Failed | GoalState::Paused => {
+                projection.needs_you.push(item);
+            }
+            GoalState::Draft
+            | GoalState::Ready
+            | GoalState::Running
+            | GoalState::Waiting
+            | GoalState::Reviewing => projection.work.push(item),
+        }
+    }
+    for plan in &snapshot.plans {
+        let item = PersonalItem {
+            reference: PersonalReference::Plan(plan.plan_id.clone()),
+            kind: PersonalItemKind::Plan,
+            title: plan.summary.clone(),
+            detail: None,
+            state_label: humanize_state(&plan.state),
+            occurred_at: None,
+        };
+        push_state_item(&mut projection, item, &plan.state, plan.terminal);
+    }
+    for child in &snapshot.children {
+        let item = PersonalItem {
+            reference: PersonalReference::Child(child.child_id.clone()),
+            kind: PersonalItemKind::DelegatedWork,
+            title: child.objective.clone(),
+            detail: None,
+            state_label: humanize_state(&child.state),
+            occurred_at: None,
+        };
+        push_state_item(
+            &mut projection,
+            item,
+            &child.state,
+            state_is_terminal(&child.state),
+        );
+    }
+    for tool in &snapshot.tools {
+        let title = tool
+            .tool
+            .as_deref()
+            .map_or_else(|| "Taking an action".into(), humanize_source);
+        let item = PersonalItem {
+            reference: PersonalReference::Tool(tool.tool_call_id.clone()),
+            kind: PersonalItemKind::Action,
+            title,
+            detail: None,
+            state_label: humanize_state(&tool.state),
+            occurred_at: None,
+        };
+        push_state_item(&mut projection, item, &tool.state, tool.terminal);
+    }
+    for wait in &snapshot.waits {
+        let item = PersonalItem {
+            reference: PersonalReference::Wait(wait.wait_id.clone()),
+            kind: PersonalItemKind::Waiting,
+            title: "Waiting before continuing".into(),
+            detail: None,
+            state_label: humanize_state(&wait.state),
+            occurred_at: None,
+        };
+        push_state_item(&mut projection, item, &wait.state, wait.terminal);
+    }
+    for commitment in &snapshot.commitments {
+        let item = PersonalItem {
+            reference: PersonalReference::Commitment(commitment.commitment_id.clone()),
+            kind: PersonalItemKind::Commitment,
+            title: commitment.summary.clone(),
+            detail: commitment.due_at.map(|due| format!("Due {due:?}")),
+            state_label: humanize_state(&commitment.state),
+            occurred_at: commitment.due_at,
+        };
+        if commitment.terminal {
+            push_state_item(&mut projection, item, &commitment.state, true);
+        } else if state_needs_attention(&commitment.state) {
+            projection.needs_you.push(item);
+        } else {
+            projection.upcoming.push(item);
+        }
+    }
+    for schedule in &snapshot.schedules {
+        let item = PersonalItem {
+            reference: PersonalReference::Schedule(schedule.job_id.clone()),
+            kind: PersonalItemKind::Schedule,
+            title: if schedule.paused {
+                "A paused scheduled task".into()
+            } else {
+                "Scheduled work".into()
+            },
+            detail: schedule.next_run.map(|next| format!("Next {next:?}")),
+            state_label: if schedule.paused {
+                "Paused".into()
+            } else {
+                "Upcoming".into()
+            },
+            occurred_at: schedule.next_run,
+        };
+        if schedule.paused {
+            projection.needs_you.push(item);
+        } else {
+            projection.upcoming.push(item);
+        }
+    }
+    for delivery in &snapshot.deliveries {
+        let item = PersonalItem {
+            reference: PersonalReference::Delivery(delivery.delivery_id.clone()),
+            kind: PersonalItemKind::Delivery,
+            title: if delivery.acknowledged {
+                "Result delivered".into()
+            } else {
+                "Delivering your result".into()
+            },
+            detail: None,
+            state_label: humanize_state(&delivery.state),
+            occurred_at: None,
+        };
+        push_state_item(&mut projection, item, &delivery.state, delivery.terminal);
+    }
+    for memory in &snapshot.memory_changes {
+        projection.saved_context.push(PersonalItem {
+            reference: PersonalReference::Memory(memory.entry_id.clone()),
+            kind: PersonalItemKind::SavedContext,
+            title: memory_title(memory.change),
+            detail: Some(humanize_source(&memory.source)),
+            state_label: "Saved context".into(),
+            occurred_at: Some(memory.occurred_at),
+        });
+    }
+    if let Some(terminal) = &snapshot.terminal {
+        let state_label = match terminal.status {
+            TurnTerminalStatus::Completed => "Completed",
+            TurnTerminalStatus::Failed => "Could not finish",
+            TurnTerminalStatus::Cancelled => "Stopped",
+            TurnTerminalStatus::Exhausted => "Reached its limit",
+        };
+        let output = PersonalItem {
+            reference: PersonalReference::Final {
+                turn_id: terminal.turn_id.clone(),
+                final_id: terminal.final_id.clone(),
+            },
+            kind: PersonalItemKind::Output,
+            title: "Conversation result".into(),
+            detail: terminal.detail.clone(),
+            state_label: state_label.into(),
+            occurred_at: None,
+        };
+        projection.outputs.push(output.clone());
+        match terminal.status {
+            TurnTerminalStatus::Completed | TurnTerminalStatus::Cancelled => {
+                projection.completed.push(output);
+            }
+            TurnTerminalStatus::Failed | TurnTerminalStatus::Exhausted => {
+                projection.needs_you.push(output);
+            }
+        }
+    }
+
+    projection
+}
+
+fn personal_presence(snapshot: &SessionSnapshot) -> PersonalPresence {
+    let presence = &snapshot.presence;
+    let (tone, label, detail) = match presence.state {
+        PresenceState::Available => (PersonalPresenceTone::Ready, "Ready when you are", None),
+        PresenceState::Thinking => (
+            PersonalPresenceTone::Active,
+            "Working on it",
+            Some("Keith is considering the next step.".into()),
+        ),
+        PresenceState::UsingTools => (
+            PersonalPresenceTone::Active,
+            "Taking action",
+            Some("Keith is using an available capability.".into()),
+        ),
+        PresenceState::WaitingChild => (
+            PersonalPresenceTone::Waiting,
+            "Coordinating the work",
+            Some("Keith is waiting for delegated work to return.".into()),
+        ),
+        PresenceState::WaitingExternal => (
+            PersonalPresenceTone::Waiting,
+            "Waiting before continuing",
+            presence
+                .next_wake
+                .map(|next| format!("Next check {next:?}")),
+        ),
+        PresenceState::PausedForUser => (
+            PersonalPresenceTone::NeedsYou,
+            "Needs your input",
+            presence.safe_error.clone(),
+        ),
+        PresenceState::Scheduled => (
+            PersonalPresenceTone::Waiting,
+            "Scheduled",
+            presence.next_wake.map(|next| format!("Next run {next:?}")),
+        ),
+        PresenceState::Completed => (
+            PersonalPresenceTone::Complete,
+            "Finished",
+            presence.safe_error.clone(),
+        ),
+        PresenceState::Failed => (
+            PersonalPresenceTone::Failed,
+            "Could not finish",
+            presence.safe_error.clone(),
+        ),
+    };
+    PersonalPresence {
+        tone,
+        label: label.into(),
+        detail,
+        updated_at: presence.updated_at,
+    }
+}
+
+fn push_state_item(
+    projection: &mut PersonalIntelligenceProjection,
+    item: PersonalItem,
+    state: &str,
+    terminal: bool,
+) {
+    if state_needs_attention(state) {
+        projection.needs_you.push(item);
+    } else if terminal || state_is_terminal(state) {
+        projection.completed.push(item);
+    } else {
+        projection.work.push(item);
+    }
+}
+
+fn state_needs_attention(state: &str) -> bool {
+    let state = state.to_ascii_lowercase();
+    ["blocked", "failed", "error", "paused", "confirm", "unknown"]
+        .iter()
+        .any(|needle| state.contains(needle))
+}
+
+fn state_is_terminal(state: &str) -> bool {
+    let state = state.to_ascii_lowercase();
+    [
+        "complete",
+        "completed",
+        "done",
+        "sent",
+        "fulfilled",
+        "cancelled",
+        "canceled",
+        "expired",
+        "archived",
+    ]
+    .iter()
+    .any(|needle| state.contains(needle))
+}
+
+fn humanize_source(source: &str) -> String {
+    let mut output = String::new();
+    for (index, word) in source
+        .split(['_', '-', '.'])
+        .filter(|word| !word.is_empty())
+        .enumerate()
+    {
+        if index > 0 {
+            output.push(' ');
+        }
+        if index == 0 {
+            let mut characters = word.chars();
+            if let Some(first) = characters.next() {
+                output.extend(first.to_uppercase());
+                output.extend(characters);
+            }
+        } else {
+            output.push_str(word);
+        }
+    }
+    if output.is_empty() {
+        "Current work".into()
+    } else {
+        output
+    }
+}
+
+fn humanize_state(state: &str) -> String {
+    humanize_source(state)
+}
+
+const fn goal_state_name(state: GoalState) -> &'static str {
+    match state {
+        GoalState::Draft => "draft",
+        GoalState::Ready => "ready",
+        GoalState::Running => "running",
+        GoalState::Waiting => "waiting",
+        GoalState::Reviewing => "reviewing",
+        GoalState::Paused => "paused",
+        GoalState::Blocked => "blocked",
+        GoalState::Complete => "complete",
+        GoalState::Failed => "failed",
+        GoalState::Cancelled => "cancelled",
+    }
+}
+
+fn memory_title(change: MemoryChangeKind) -> String {
+    match change {
+        MemoryChangeKind::Created => "Keith saved something for later".into(),
+        MemoryChangeKind::Updated => "Saved context was updated".into(),
+        MemoryChangeKind::Deleted => "Saved context was forgotten".into(),
+        MemoryChangeKind::Consolidated => "Saved context was organized".into(),
     }
 }
 
@@ -1467,6 +1956,134 @@ mod tests {
             .expect("completed")
             .expect("terminal not rate limited");
         assert_eq!(completed.state, PresenceState::Completed);
+    }
+
+    #[test]
+    fn personal_projection_groups_authoritative_work_without_exposing_machinery() {
+        let mut snapshot = session_snapshot();
+        snapshot.session.title = Some("Plan grandma's visit".into());
+        snapshot.actions.push(ActionProjection {
+            action_id: ActionId::new(),
+            source: "user_request".into(),
+            state: "running".into(),
+            created_at: UtcTimestamp::from_unix_millis(1),
+        });
+        snapshot.goals.push(GoalProjection {
+            goal_id: GoalId::new(),
+            objective: "Arrange the visit".into(),
+            state: GoalState::Blocked,
+        });
+        snapshot
+            .confirmations
+            .push(keith_protocol::ConfirmationProjection {
+                confirmation_id: EntityId::new(),
+                summary: "Book the selected train".into(),
+            });
+        snapshot.schedules.push(ScheduleProjection {
+            job_id: JobId::new(),
+            expression: ScheduleExpression::IntervalSeconds(3_600),
+            next_run: Some(UtcTimestamp::from_unix_millis(2)),
+            paused: false,
+        });
+        snapshot.memory_changes.push(MemoryChangeProjection {
+            entry_id: EntryId::new(),
+            source: "travel_preferences".into(),
+            change: MemoryChangeKind::Updated,
+            occurred_at: UtcTimestamp::from_unix_millis(3),
+        });
+
+        let personal = project_personal_intelligence(&snapshot);
+        assert_eq!(personal.session_title, "Plan grandma's visit");
+        assert_eq!(personal.presence.label, "Ready when you are");
+        assert_eq!(personal.work.len(), 1);
+        assert_eq!(personal.work[0].title, "User request");
+        assert_eq!(personal.needs_you.len(), 2);
+        assert_eq!(personal.upcoming.len(), 1);
+        assert_eq!(personal.saved_context.len(), 1);
+        let serialized = serde_json::to_string(&personal).unwrap();
+        for internal_label in ["kernel", "generation", "protocol", "queue"] {
+            assert!(!serialized.contains(internal_label));
+        }
+    }
+
+    #[test]
+    fn personal_projection_corrects_from_snapshots_and_does_not_fill_sequence_gaps() {
+        let initial = session_snapshot();
+        let mut reducer = ProjectionReducer::new(initial, virtualization()).unwrap();
+        let confirmation = envelope(
+            reducer.snapshot(),
+            Generation::new(1),
+            1,
+            1,
+            DaemonEvent::ConfirmationRequested {
+                confirmation_id: EntityId::new(),
+                summary: "Share the draft".into(),
+            },
+        );
+        reducer.apply_event(&confirmation).unwrap();
+        assert_eq!(
+            project_personal_intelligence(reducer.snapshot())
+                .needs_you
+                .len(),
+            1
+        );
+
+        let mut corrected = reducer.snapshot().clone();
+        corrected.through_sequence = Sequence::new(2);
+        corrected.revision = Revision::new(2);
+        corrected.confirmations.clear();
+        reducer.apply_snapshot(corrected).unwrap();
+        assert!(
+            project_personal_intelligence(reducer.snapshot())
+                .needs_you
+                .is_empty()
+        );
+
+        let gap = envelope(
+            reducer.snapshot(),
+            Generation::new(1),
+            4,
+            4,
+            DaemonEvent::PresenceChanged(PresenceProjection {
+                session_id: reducer.snapshot().session.session_id.clone(),
+                goal_id: None,
+                state: PresenceState::Thinking,
+                updated_at: UtcTimestamp::from_unix_millis(4),
+                next_wake: None,
+                safe_error: None,
+            }),
+        );
+        assert_eq!(reducer.apply_event(&gap).unwrap(), ReductionOutcome::Gap);
+        let personal = project_personal_intelligence(reducer.snapshot());
+        assert_eq!(personal.presence.tone, PersonalPresenceTone::Ready);
+        assert!(personal.work.is_empty());
+    }
+
+    #[test]
+    fn personal_projection_reports_terminal_failure_without_claiming_completion() {
+        let mut snapshot = session_snapshot();
+        snapshot.presence.state = PresenceState::Failed;
+        snapshot.presence.safe_error =
+            Some("Connection was lost before the result committed".into());
+        snapshot.terminal = Some(keith_protocol::TurnTerminalProjection {
+            session_id: snapshot.session.session_id.clone(),
+            turn_id: keith_agent_types::TurnId::new(),
+            final_id: EntryId::new(),
+            status: TurnTerminalStatus::Failed,
+            execution_succeeded: false,
+            final_created: true,
+            artifacts_persisted: false,
+            delivery_enqueued: false,
+            delivery_acknowledged: false,
+            detail: Some("The outcome is incomplete".into()),
+        });
+
+        let personal = project_personal_intelligence(&snapshot);
+        assert_eq!(personal.presence.tone, PersonalPresenceTone::Failed);
+        assert_eq!(personal.presence.label, "Could not finish");
+        assert_eq!(personal.needs_you.len(), 1);
+        assert!(personal.completed.is_empty());
+        assert_eq!(personal.outputs[0].state_label, "Could not finish");
     }
 
     #[test]

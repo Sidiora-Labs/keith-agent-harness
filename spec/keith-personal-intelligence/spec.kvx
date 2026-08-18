@@ -1,0 +1,232 @@
+# spec.kvx — Keith Personal Intelligence Clients
+# SINGLE SOURCE for the standalone Keith web and terminal experience.
+# This feature does not apply to the Neo/Centra unified cloud interface.
+
+[meta]
+feature      = "keith-personal-intelligence"
+title        = "Keith Personal Intelligence — consumer web experience and Codex-class terminal client"
+status       = "in_progress"
+spec_version = "1.0.0"
+intro        = "Redesign the standalone Keith web application and terminal client around one promise: Keith is a personal intelligence and dependable right hand that an ordinary person can use without learning agent infrastructure. The web application presents conversations, current work, useful outputs, and the parts of the user's world Keith is trusted to remember. The terminal client follows the Codex interaction model: native terminal scrollback, a quiet conversation canvas, a compact bottom composer, truthful live activity, and temporary overlays instead of a permanent operator dashboard. Both clients remain projections over AgentConnection and the Rust reducer; neither invents activity or creates a second agent runtime."
+
+[design]
+overview = "The web product is a consumer companion, not a control plane. SolidJS owns rendering and interaction composition while the Rust/WASM bridge owns protocol decoding, command construction, generation/sequence reduction, and resume cursors. The web design foundation imports @openai/apps-sdk-ui/css and derives Keith's colors, typography, focus treatment, density, and motion from its semantic tokens; Keith-specific CSS is limited to product layout and token aliases. The terminal product remains Rust/Ratatui and follows Codex's conversation-first structure with settled content moved into native scrollback and only the live tail, composer, and temporary overlays kept mutable."
+include  = "design.body.md"
+
+# ============================== REQUIREMENTS ==============================
+
+[req.1]
+title = "Standalone consumer product boundary"
+story = "As a person using Keith, I want capable help expressed in familiar language, so that I never have to operate agent infrastructure."
+ac_1  = "THIS feature SHALL modify only the standalone Keith clients and shared Keith client projections; it SHALL NOT modify or imitate the Neo/Centra unified cloud interface."
+ac_2  = "THE default web experience SHALL describe outcomes, conversations, current work, saved context, approvals, and completed results in ordinary language and SHALL NOT expose queues, kernels, workers, generations, raw tool-call identifiers, protocol sequences, or internal surface names."
+ac_3  = "ADVANCED diagnostics and provider configuration SHALL remain available behind an explicitly opened settings or diagnostics route and SHALL never occupy the primary navigation or conversation canvas."
+ac_4  = "EMPTY states SHALL explain what Keith can do next with a concrete action; they SHALL NOT show placeholder panels, raw counts, or implementation notes."
+ac_5  = "PRODUCT copy SHALL present Keith as a dependable personal intelligence and companion without claiming consciousness, background thought, fabricated typing, or work not represented by authoritative runtime state."
+
+[req.2]
+title = "One authoritative client state and consumer projection vocabulary"
+story = "As a user switching between web and terminal, I want the same truthful Keith state everywhere, so that presentation never becomes a second runtime."
+ac_1  = "AgentConnection snapshots, ordered events, command results, terminal frames, and the Rust ProjectionReducer SHALL remain the sole authority for conversation and activity state."
+ac_2  = "A shared consumer projection SHALL group low-level runtime facts into Conversation, Work, NeedsYou, Completed, Upcoming, SavedContext, and Outputs without discarding exact source identifiers needed for commands."
+ac_3  = "THE projection SHALL expose calm user-facing presence copy derived only from authoritative PresenceProjection and terminal state; local HTTP requests, timers, animation, and command counts SHALL NOT be presented as Keith working."
+ac_4  = "THE Solid application SHALL consume read-only snapshots from a Rust/WASM adapter and SHALL NOT define an independent message reducer, tool executor, model provider, or optimistic terminal state."
+ac_5  = "@tanstack/solid-query MAY cache bounded non-streaming catalog resources and @tanstack/solid-virtual MAY window rendered history; @tanstack/ai-solid SHALL NOT own Keith messages, execute client tools, or bypass AgentConnection."
+ac_6  = "REDUCER tests SHALL cover exact consumer grouping, correction after replacement snapshots, stream gaps, terminal failures, zero activity, and absence of fabricated work."
+
+[req.3]
+title = "Codex-class conversation-first terminal structure"
+story = "As a terminal user, I want Keith to feel as focused and reliable as Codex, so that the terminal disappears behind the conversation."
+ac_1  = "THE default TUI SHALL contain a quiet conversation transcript, a compact live activity region when authoritative activity exists, a bottom composer, and a one-line status/hint row; it SHALL NOT contain a permanent navigation sidebar or a grid of subsystem panels."
+ac_2  = "SETTLED messages SHALL be promoted into native terminal scrollback in inline viewport mode while only the uncommitted streaming tail, composer, transient notice, and open overlay remain mutable."
+ac_3  = "USER, Keith, tool/activity, warning, and terminal-result entries SHALL have distinct restrained typographic treatment, safe wrapping, code-preserving indentation, and terminal-control neutralization."
+ac_4  = "SESSION selection, command help, model selection, approvals, memory lookup, work details, and diagnostics SHALL open as temporary searchable overlays or slash-command results and SHALL return to the conversation with Escape."
+ac_5  = "THE composer SHALL support Unicode, bracketed paste, multiple lines, external editor handoff, cursor-safe edits, Enter to send, Alt-Enter for a newline, steering, cancellation, retry, branch, and resume without losing draft text."
+ac_6  = "NARROW terminals SHALL preserve the transcript and composer by reducing secondary hints; they SHALL never replace the conversation with a resize instruction."
+
+[req.4]
+title = "Continuous terminal subscription, recovery, and truth"
+story = "As a user leaving Keith open, I want events to arrive without issuing another command, so that background completion and failure are never missed."
+ac_1  = "THE TUI connection layer SHALL receive ordered events continuously while idle and while commands are in flight, using bounded channels and one negotiated client identity."
+ac_2  = "COMMAND results SHALL correlate by command ID without preventing unrelated streamed events, terminal frames, acknowledgements, cancellation, or reconnect."
+ac_3  = "RECONNECT SHALL use the latest reducer generation and sequence cursor and SHALL request replacement snapshot state on a gap without replaying an effect whose outcome is unknown."
+ac_4  = "THE UI SHALL distinguish connecting, reconnecting, caught up, waiting for Keith, paused for the user, interrupted, incomplete, failed, cancelled, and completed using authoritative state only."
+ac_5  = "PROCESS tests SHALL prove an event delivered during command-idle time appears without another outbound command, cancel stays responsive, reconnect resumes exactly, and terminal restoration occurs after error, signal, and external-editor paths."
+
+[req.5]
+title = "First-class personal-intelligence web architecture"
+story = "As an everyday user, I want one beautiful place for Keith and my ongoing life, so that deep capability feels obvious rather than technical."
+ac_1  = "THE standalone web client SHALL use SolidJS for rendering and keep the authenticated Rust server, exact-origin and CSRF mutation boundary, write-only credential path, WebSocket subscription, and Rust/WASM protocol authority."
+ac_2  = "PRIMARY navigation SHALL contain at most Home, Conversation, Work, Your World, and a compact Settings entry; the persistent conversation SHALL remain mounted while other destinations open."
+ac_3  = "HOME SHALL provide a personal brief composed only from authoritative current focus, needs-you items, completed results, upcoming schedules/commitments, and a direct message action."
+ac_4  = "WORK SHALL unify goals, plans, actions, children, tools, waits, schedules, commitments, confirmations, and deliveries into outcome-oriented Active, Needs you, Upcoming, and Completed groupings."
+ac_5  = "YOUR WORLD SHALL present user-visible saved context, knowledge, routines, preferences, and memory changes with inspect, correct, forget, and search affordances where the protocol supports them."
+ac_6  = "OUTPUTS and artifacts SHALL appear in the conversation and relevant work item with clear open, download, and provenance affordances instead of a disconnected technical panel."
+
+[req.6]
+title = "OpenAI Apps SDK UI token and CSS foundation"
+story = "As a user, I want Keith to feel composed, premium, and consistent, so that every state earns trust."
+ac_1  = "THE web bundle SHALL import @openai/apps-sdk-ui/css as the authoritative source for base reset, color, typography, radius, focus, elevation, motion, and component semantic tokens."
+ac_2  = "KEITH CSS SHALL use Apps SDK semantic variables or explicit Keith aliases of those variables for every color, font, radius, focus, surface, and motion decision; raw product color literals SHALL be prohibited outside the token adapter."
+ac_3  = "THE interface SHALL use background-color contrast, spacing, type, and restrained elevation for hierarchy; it SHALL render no decorative border strokes, glow, purple gradient, or emoji status."
+ac_4  = "LIGHT, dark, high-contrast, reduced-motion, text zoom, and forced-colors modes SHALL retain readable hierarchy and visible focus without depending on color alone."
+ac_5  = "ICONS SHALL be accessible, restrained, and sourced through an Apps-SDK-compatible Solid adapter; an icon SHALL never be the sole label for an unfamiliar or consequential action."
+ac_6  = "A build-time style audit SHALL verify the Apps SDK CSS import, token-only Keith styles, forbidden visual treatments, and absence of inline style attributes in product components."
+
+[req.7]
+title = "Conversation, activity, approvals, and recovery on the web"
+story = "As a user delegating real work, I want conversation to remain the center while Keith acts, so that I understand what happened without watching machinery."
+ac_1  = "THE conversation SHALL render keyed incremental messages, preserve reader scroll position, follow the live tail only when already near it, expose a new-activity affordance otherwise, and window long histories without clearing and rebuilding the transcript."
+ac_2  = "THE renderer SHALL safely present paragraphs, lists, links, code, tool/activity summaries, warnings, artifacts, incomplete output, and terminal results without unsafe HTML or terminal-control effects."
+ac_3  = "THE composer SHALL support Enter to send, Shift-Enter for newline, paste, draft preservation across navigation/reconnect, disabled explanation when no session is selected, steering, stop, retry, branch, and resume."
+ac_4  = "CONSEQUENTIAL confirmations SHALL use natural-language summaries, scope, consequence, and Allow once or Deny actions; raw confirmation identifiers SHALL remain internal."
+ac_5  = "NETWORK, protocol, and runtime failures SHALL retain the draft and committed transcript, state what is known, offer only safe recovery actions, and never tell the user to blindly retry an effect with unknown outcome."
+ac_6  = "THE web client SHALL not infer success from HTTP acceptance; completion, failure, artifacts, and delivery state SHALL come from authoritative snapshots, terminal frames, and events."
+
+[req.8]
+title = "Responsive, accessible, and durable web use"
+story = "As a user on any device or with assistive technology, I want the full Keith relationship to remain usable, so that capability does not depend on a desktop layout."
+ac_1  = "PHONE, tablet, laptop, wide desktop, installed desktop shell, and 200 percent text zoom SHALL preserve session switching, navigation, conversation, composer, approvals, and work inspection."
+ac_2  = "MOBILE SHALL use a real dismissible navigation/session sheet and SHALL NOT hide the only session picker or compress every destination into a horizontal strip."
+ac_3  = "CRITICAL paths SHALL meet WCAG 2.2 AA for keyboard order, visible focus, names/roles/values, landmarks, announcements, target size, contrast, zoom, and motion."
+ac_4  = "CONNECTION and presence announcements SHALL be rate-limited and meaningful; streaming text SHALL not repeatedly reread the entire conversation to screen readers."
+ac_5  = "THE browser SHALL keep credentials and bearer values out of URLs, storage, rendered markup, diagnostics, and bundles and SHALL retain the existing origin, CSRF, authentication, rate, and profile-scope defenses."
+ac_6  = "REAL Chromium journeys SHALL cover sign-in, first use, session switch, send, stream, navigate without conversation remount, approval, work inspection, memory search, refresh, disconnect/reconnect, narrow mobile, keyboard-only use, reduced motion, and secret scans."
+
+[req.9]
+title = "Cross-client quality, packaging, and parity gate"
+story = "As the owner shipping Keith, I want both clients qualified as products, so that a polished screenshot cannot hide a broken runtime path."
+ac_1  = "THE TUI and web client SHALL expose equivalent core commands through consumer-appropriate interaction while keeping diagnostics and configuration presentation platform-specific."
+ac_2  = "A parity matrix SHALL map Submit, Steer, Stop, Retry, Branch, Resume, Sessions, Model, Confirmation, Goals, Children, Schedules, Memory, Export, and Background controls to real AgentConnection commands in both clients."
+ac_3  = "TERMINAL qualification SHALL cover truecolor, 256-color, no-color, high-contrast, narrow widths, Unicode, paste, long history, continuous idle events, reconnect, SSH-like TERM values, tmux/screen-like TERM values, and restoration."
+ac_4  = "WEB qualification SHALL use production-built Solid assets and Rust/WASM output served by the real authenticated Rust server, not source-string assertions or a separate prototype route."
+ac_5  = "THE desktop and release assemblers SHALL package the same production web assets and SHALL fail when generated JS, CSS, WASM, manifests, or lockfiles are stale or missing."
+ac_6  = "THE feature SHALL complete only after focused tests, workspace formatting and linting, web typecheck/build, real browser journeys, packaging checks, Codify graph/touch checks, and the full declared client gate pass."
+
+# ================================ TASKS ==================================
+
+[task.1.1]
+title  = "Consumer projection vocabulary and authoritative client contract"
+status = "in_progress"
+wave   = 1
+do_1   = "Implement shared PersonalSurface and PersonalIntelligenceProjection types over SessionSnapshot"
+do_2   = "Map runtime state to Work, NeedsYou, Completed, Upcoming, SavedContext, Outputs, and calm truthful presence copy"
+do_3   = "Retain command identifiers internally while providing ordinary-language labels and empty-state actions"
+do_4   = "Test snapshots, replacement, gaps, zero activity, failure, correction, and no fabricated work"
+reqs   = ["1.1-1.5", "2.1-2.6"]
+symbols = ["PersonalIntelligenceProjection", "project_personal_intelligence"]
+touches = ["crates/ui-model/src/lib.rs"]
+verify_cmd = "cargo test -p keith-ui-model"
+
+[task.2.1]
+title  = "Continuous TUI subscription and correlated command dispatcher"
+status = "pending"
+wave   = 2
+do_1   = "Replace command-gated event reads with one continuous bounded connection worker"
+do_2   = "Correlate results by command ID while forwarding unrelated events and terminal frames"
+do_3   = "Resume from the latest reducer cursor, reconnect safely, and keep cancellation responsive"
+do_4   = "Add real transport tests for idle events, in-flight events, gap recovery, reconnect, and shutdown"
+reqs   = ["2.1-2.4", "4.1-4.5"]
+requires = ["1.1"]
+symbols = ["AgentCommandDispatcher"]
+touches = ["apps/agent-tui/src/connection.rs", "apps/agent-tui/src/lib.rs", "apps/agent-tui/src/main.rs"]
+verify_cmd = "cargo test -p keith-agent-tui connection"
+
+[task.2.2]
+title  = "Codex-style inline conversation TUI"
+status = "pending"
+wave   = 3
+do_1   = "Replace permanent subsystem navigation with transcript, live tail, compact composer, and status row"
+do_2   = "Use Ratatui inline viewport and insert settled transcript cells into native terminal scrollback"
+do_3   = "Implement temporary overlays for sessions, commands, models, approvals, work, memory, and diagnostics"
+do_4   = "Implement safe wrapping, code indentation, draft-preserving keyboard behavior, and transcript-preserving narrow layouts"
+do_5   = "Render only authoritative presence and terminal state as activity"
+reqs   = ["1.2-1.5", "2.2-2.4", "3.1-3.6", "4.3-4.4"]
+requires = ["2.1"]
+symbols = ["TuiOverlay", "render_conversation"]
+touches = ["apps/agent-tui/src/lib.rs", "apps/agent-tui/src/render.rs", "apps/agent-tui/src/main.rs"]
+verify_cmd = "cargo test -p keith-agent-tui"
+
+[task.2.3]
+title  = "TUI terminal behavior and restoration gate"
+status = "pending"
+wave   = 4
+do_1   = "Add deterministic terminal snapshots for wide, narrow, color, no-color, overlay, streaming, failure, and long-history states"
+do_2   = "Add PTY or VT-backed process journeys for inline scrollback, paste, resize, idle event delivery, external editor, signal, and restoration"
+do_3   = "Audit output for control injection, decorative borders, glow, purple treatments, emoji status, fabricated work, and lost transcript"
+do_4   = "Publish the terminal compatibility matrix as executable test data"
+reqs   = ["3.2-3.6", "4.1-4.5", "9.1-9.3"]
+requires = ["2.2"]
+touches = ["apps/agent-tui/Cargo.toml", "apps/agent-tui/src/*.rs", "apps/agent-tui/tests/*.rs"]
+verify_cmd = "cargo test -p keith-agent-tui"
+
+[task.3.1]
+title  = "SolidJS, Rust-WASM, and Apps SDK UI design foundation"
+status = "pending"
+wave   = 2
+do_1   = "Create the production SolidJS/Vite application and reproducible package lock"
+do_2   = "Import @openai/apps-sdk-ui/css and implement a token-only Keith adapter with forbidden-style auditing"
+do_3   = "Expose the Rust/WASM reducer, resume cursor, personal projection, and typed command builders to Solid"
+do_4   = "Teach the authenticated Rust server, desktop shell, and release assembler to serve and package hashed production assets"
+do_5   = "Add typecheck, build, stale-asset, CSP, and secret-safe bundle gates"
+reqs   = ["2.1-2.5", "5.1", "6.1-6.6", "8.5", "9.4-9.5"]
+requires = ["1.1"]
+symbols = ["BrowserProjection"]
+touches = ["apps/agent-web/Cargo.toml", "apps/agent-web/src/*.rs", "apps/agent-web/ui/*", "apps/agent-web/ui/src/*", "apps/agent-web/static/*", "apps/xtask/src/main.rs"]
+verify_cmd = "pnpm --dir apps/agent-web/ui run check && pnpm --dir apps/agent-web/ui run build && cargo test -p keith-agent-web"
+
+[task.3.2]
+title  = "Consumer Home, Conversation, Work, and Your World shell"
+status = "pending"
+wave   = 3
+do_1   = "Build a restrained responsive shell with at most Home, Conversation, Work, Your World, and Settings"
+do_2   = "Build the authoritative personal brief, outcome-oriented work groups, saved context, outputs, and meaningful empty states"
+do_3   = "Keep the conversation and subscription mounted while destinations and mobile sheets change"
+do_4   = "Remove raw subsystem panels, counts, identifiers, operator vocabulary, and placeholder forms from the default experience"
+do_5   = "Implement light, dark, high-contrast, reduced-motion, forced-colors, and text-zoom behavior from Apps SDK tokens"
+reqs   = ["1.1-1.5", "5.1-5.6", "6.1-6.6", "8.1-8.4"]
+requires = ["3.1"]
+touches = ["apps/agent-web/ui/src/*"]
+verify_cmd = "pnpm --dir apps/agent-web/ui run check && pnpm --dir apps/agent-web/ui run test"
+
+[task.3.3]
+title  = "Incremental conversation, natural approvals, and safe recovery"
+status = "pending"
+wave   = 4
+do_1   = "Render keyed, virtualized, scroll-stable conversation entries and safely structured content"
+do_2   = "Implement draft-safe send, newline, steer, stop, retry, branch, resume, session switch, and new conversation actions"
+do_3   = "Implement natural-language approvals, inline activity, artifacts, incomplete output, terminal results, and new-activity affordance"
+do_4   = "Implement exact WebSocket resume, gap replacement, reconnect, HTTP-result handling, and unknown-effect recovery without optimistic completion"
+do_5   = "Keep credentials, raw identifiers, protocol details, and unsafe HTML out of the presentation"
+reqs   = ["2.1-2.5", "5.6", "7.1-7.6", "8.4-8.5", "9.1-9.2"]
+requires = ["3.2"]
+touches = ["apps/agent-web/src/*.rs", "apps/agent-web/ui/src/*"]
+verify_cmd = "pnpm --dir apps/agent-web/ui run check && pnpm --dir apps/agent-web/ui run test && cargo test -p keith-agent-web"
+
+[task.3.4]
+title  = "Real browser accessibility, responsive, security, and reconnect gate"
+status = "pending"
+wave   = 5
+do_1   = "Replace source-string browser assertions with production-asset Chromium journeys served by the authenticated Rust server"
+do_2   = "Cover sign-in, session selection, send/stream, persistent navigation, work, saved context, approvals, refresh, reconnect, mobile sheet, keyboard, zoom, contrast, and reduced motion"
+do_3   = "Run automated accessibility checks plus explicit focus, announcement, target-size, transcript-scroll, and screen-reader-contract assertions"
+do_4   = "Retain exact-origin, CSRF, profile isolation, rate, CSP, credential, browser-storage, URL, markup, and bundle secret scans"
+do_5   = "Fail when production Solid, CSS, or WASM assets are stale or when the legacy operator shell is served"
+reqs   = ["5.1-5.6", "6.1-6.6", "7.1-7.6", "8.1-8.6", "9.4-9.5"]
+requires = ["3.3"]
+touches = ["apps/agent-web/tests/*", "apps/agent-web/ui/src/*", "apps/agent-web/src/*.rs"]
+verify_cmd = "pnpm --dir apps/agent-web/ui run test:browser && cargo test -p keith-agent-web"
+
+[task.4.1]
+title  = "Cross-client parity, packaging, and release-quality gate"
+status = "pending"
+wave   = 6
+do_1   = "Build the core-command parity matrix against real TUI and web command builders"
+do_2   = "Run the terminal compatibility matrix and production browser matrix without ignored critical journeys"
+do_3   = "Run formatting, strict Clippy, web typecheck/build, focused Rust tests, desktop packaging checks, and stale generated-asset checks"
+do_4   = "Trace every task to its symbols, touched files, Codify snapshots, Git commits, and pushed branch"
+do_5   = "Mark the feature complete only when every requirement is evidenced and no placeholder, technical default surface, or fabricated state remains"
+reqs   = ["1.1-1.5", "2.1-2.6", "3.1-3.6", "4.1-4.5", "5.1-5.6", "6.1-6.6", "7.1-7.6", "8.1-8.6", "9.1-9.6"]
+requires = ["2.3", "3.4"]
+touches = ["apps/agent-tui/*", "apps/agent-tui/src/*", "apps/agent-tui/tests/*", "apps/agent-web/*", "apps/agent-web/src/*", "apps/agent-web/tests/*", "apps/agent-web/ui/*", "crates/ui-model/src/lib.rs", "apps/xtask/src/main.rs"]
+verify_cmd = "cargo fmt --all --check && cargo clippy -p keith-ui-model -p keith-agent-tui -p keith-agent-web --all-targets -- -D warnings && cargo test -p keith-ui-model -p keith-agent-tui -p keith-agent-web && pnpm --dir apps/agent-web/ui run qualify"
