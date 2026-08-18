@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
@@ -39,7 +39,7 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::security::{BrowserSecurity, SecurityError};
-use crate::{APP_CSS, login_page, shell_page};
+use crate::{WebAssets, login_page, shell_page};
 
 mod openai_compat;
 mod platform_compat;
@@ -49,8 +49,16 @@ pub use platform_compat::PlatformCompatibilityConfig;
 
 const MAX_BROWSER_BODY_BYTES: usize = 128 * 1024;
 const EVENT_QUEUE_CAPACITY: usize = 256;
-const BOOTSTRAP_JS: &str =
-    "import init from '/assets/agent_web.js';init({module_or_path:'/assets/agent_web_bg.wasm'});";
+const UI_MANIFEST: &str = "ui/.vite/manifest.json";
+
+#[derive(Deserialize)]
+struct ViteManifestEntry {
+    file: String,
+    #[serde(rename = "isEntry")]
+    is_entry: Option<bool>,
+    #[serde(default)]
+    css: Vec<String>,
+}
 
 pub struct WebServerConfig {
     pub bind: SocketAddr,
@@ -142,8 +150,10 @@ struct AppState {
     asset_root: PathBuf,
     openai_compatibility: Option<Arc<openai_compat::OpenAiCompatibility>>,
     platform_compatibility: Option<Arc<platform_compat::PlatformCompatibility>>,
-    catalog_cache: Arc<Mutex<Option<(Vec<ProfileSummary>, Vec<SessionSummary>)>>>,
+    catalog_cache: CatalogCache,
 }
+
+type CatalogCache = Arc<Mutex<Option<(Vec<ProfileSummary>, Vec<SessionSummary>)>>>;
 
 pub struct WebServer {
     state: AppState,
@@ -204,8 +214,7 @@ impl WebServer {
             .route("/", get(app))
             .route("/login", get(login))
             .route("/auth/session", post(create_session))
-            .route("/assets/app.css", get(stylesheet))
-            .route("/assets/bootstrap.js", get(bootstrap_script))
+            .route("/assets/ui/{*path}", get(ui_asset))
             .route("/assets/agent_web.js", get(wasm_javascript))
             .route("/assets/agent_web_bg.wasm", get(wasm_binary))
             .route("/api/profiles/{profile}/commands", post(command))
@@ -434,8 +443,11 @@ impl ServerArguments {
     }
 }
 
-async fn login() -> Response {
-    html_response(login_page().to_owned())
+async fn login(State(state): State<AppState>) -> Response {
+    match load_web_assets(&state.asset_root) {
+        Ok(assets) => html_response(login_page(&assets.styles[0])),
+        Err(error) => safe_error(StatusCode::SERVICE_UNAVAILABLE, &error),
+    }
 }
 
 #[derive(Deserialize)]
@@ -485,7 +497,10 @@ async fn app(
     match catalog {
         Ok(Ok((profiles, mut sessions))) => {
             prioritize_session(&mut sessions, selection.session.as_deref());
-            html_response(shell_page(&csrf, &profiles, &sessions))
+            match load_web_assets(&state.asset_root) {
+                Ok(assets) => html_response(shell_page(&csrf, &profiles, &sessions, &assets)),
+                Err(error) => safe_error(StatusCode::SERVICE_UNAVAILABLE, &error),
+            }
         }
         Ok(Err(error)) => safe_error(StatusCode::SERVICE_UNAVAILABLE, &error.to_string()),
         Err(_) => safe_error(
@@ -508,28 +523,33 @@ fn prioritize_session(sessions: &mut Vec<SessionSummary>, requested: Option<&str
     }
 }
 
-async fn stylesheet() -> Response {
-    asset_response("text/css; charset=utf-8", APP_CSS.as_bytes().to_vec(), true)
-}
-
-async fn bootstrap_script() -> Response {
-    asset_response(
-        "text/javascript; charset=utf-8",
-        BOOTSTRAP_JS.as_bytes().to_vec(),
-        true,
-    )
+async fn ui_asset(State(state): State<AppState>, Path(path): Path<String>) -> Response {
+    let Some(path) = safe_ui_asset_path(&path) else {
+        return safe_error(StatusCode::NOT_FOUND, "asset unavailable");
+    };
+    let media_type = match path.extension().and_then(|value| value.to_str()) {
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    };
+    file_asset(&state.asset_root.join("ui"), &path, media_type)
 }
 
 async fn wasm_javascript(State(state): State<AppState>) -> Response {
     file_asset(
         &state.asset_root,
-        "agent_web.js",
+        FsPath::new("agent_web.js"),
         "text/javascript; charset=utf-8",
     )
 }
 
 async fn wasm_binary(State(state): State<AppState>) -> Response {
-    file_asset(&state.asset_root, "agent_web_bg.wasm", "application/wasm")
+    file_asset(
+        &state.asset_root,
+        FsPath::new("agent_web_bg.wasm"),
+        "application/wasm",
+    )
 }
 
 async fn command(
@@ -1172,7 +1192,49 @@ fn html_response(html: String) -> Response {
     response
 }
 
-fn file_asset(root: &FsPath, filename: &str, media_type: &'static str) -> Response {
+fn load_web_assets(root: &FsPath) -> Result<WebAssets, String> {
+    let encoded = std::fs::read(root.join(UI_MANIFEST))
+        .map_err(|_| "Keith's production interface is unavailable".to_owned())?;
+    let manifest = serde_json::from_slice::<BTreeMap<String, ViteManifestEntry>>(&encoded)
+        .map_err(|_| "Keith's production interface manifest is invalid".to_owned())?;
+    let entry = manifest
+        .get("src/index.tsx")
+        .filter(|entry| entry.is_entry == Some(true))
+        .ok_or_else(|| "Keith's production interface entry is unavailable".to_owned())?;
+    let script = validated_ui_url(root, &entry.file)?;
+    let styles = entry
+        .css
+        .iter()
+        .map(|path| validated_ui_url(root, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    if styles.is_empty() {
+        return Err("Keith's production interface stylesheet is unavailable".into());
+    }
+    Ok(WebAssets { script, styles })
+}
+
+fn validated_ui_url(root: &FsPath, path: &str) -> Result<String, String> {
+    let relative = safe_ui_asset_path(path)
+        .ok_or_else(|| "Keith's production interface contains an unsafe asset path".to_owned())?;
+    if !root.join("ui").join(&relative).is_file() {
+        return Err("Keith's production interface asset is unavailable".into());
+    }
+    Ok(format!("/assets/ui/{}", relative.to_string_lossy()))
+}
+
+fn safe_ui_asset_path(path: &str) -> Option<PathBuf> {
+    let path = FsPath::new(path);
+    if path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
+fn file_asset(root: &FsPath, filename: &FsPath, media_type: &'static str) -> Response {
     match std::fs::read(root.join(filename)) {
         Ok(bytes) => asset_response(media_type, bytes, false),
         Err(_) => safe_error(StatusCode::NOT_FOUND, "asset unavailable"),
@@ -1219,8 +1281,6 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use ring::digest::{SHA256, digest};
-
     use super::*;
 
     #[test]
@@ -1369,11 +1429,22 @@ mod tests {
     }
 
     #[test]
-    fn asset_names_are_fixed_and_credentials_never_enter_bootstrap() {
-        assert!(!BOOTSTRAP_JS.contains("localStorage"));
-        assert!(!BOOTSTRAP_JS.contains("sessionStorage"));
-        assert!(!BOOTSTRAP_JS.contains("token"));
-        let digest = digest(&SHA256, BOOTSTRAP_JS.as_bytes());
-        assert_eq!(digest.as_ref().len(), 32);
+    fn hashed_production_assets_are_loaded_without_path_escape() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("ui/.vite")).unwrap();
+        std::fs::create_dir_all(root.path().join("ui/assets")).unwrap();
+        std::fs::write(root.path().join("ui/assets/keith-a.js"), "module").unwrap();
+        std::fs::write(root.path().join("ui/assets/keith-a.css"), "tokens").unwrap();
+        std::fs::write(
+            root.path().join(UI_MANIFEST),
+            r#"{"src/index.tsx":{"file":"assets/keith-a.js","isEntry":true,"css":["assets/keith-a.css"]}}"#,
+        )
+        .unwrap();
+        let assets = load_web_assets(root.path()).unwrap();
+        assert_eq!(assets.script, "/assets/ui/assets/keith-a.js");
+        assert_eq!(assets.styles, ["/assets/ui/assets/keith-a.css"]);
+        assert!(safe_ui_asset_path("assets/keith-a.js").is_some());
+        assert!(safe_ui_asset_path("../agent_web.js").is_none());
+        assert!(safe_ui_asset_path("/etc/passwd").is_none());
     }
 }

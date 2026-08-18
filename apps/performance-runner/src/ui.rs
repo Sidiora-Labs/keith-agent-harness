@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use keith_agent_tui::{Accessibility, TuiApp, render};
 use keith_agent_types::{MessageId, Revision, Sequence};
-use keith_agent_web::shell_page;
+use keith_agent_web::{WebAssets, shell_page};
 use keith_protocol::{
     DaemonEvent, EventEnvelope, MessageProjection, MessageRole, SessionSnapshot, WireMessage,
 };
@@ -80,7 +80,15 @@ pub fn benchmark(snapshot: &SessionSnapshot, iterations: usize) -> Result<Measur
         .collect::<Vec<_>>();
     for _ in 0..iterations {
         let started = Instant::now();
-        let document = shell_page("performance-csrf", &profiles, &sessions);
+        let document = shell_page(
+            "performance-csrf",
+            &profiles,
+            &sessions,
+            &WebAssets {
+                script: "/assets/ui/performance.js".into(),
+                styles: vec!["/assets/ui/performance.css".into()],
+            },
+        );
         if document.is_empty() {
             return Err("web shell rendering produced an empty document".into());
         }

@@ -229,6 +229,7 @@ impl DesktopLifecycle {
             || !config.web_executable.is_file()
             || !config.asset_root.join("agent_web.js").is_file()
             || !config.asset_root.join("agent_web_bg.wasm").is_file()
+            || !valid_production_web_assets(&config.asset_root)
             || !config.workspace_root.is_dir()
             || config.login_secret_env.is_empty()
             || config.credential_key_env.is_empty()
@@ -440,6 +441,42 @@ impl DesktopLifecycle {
             .join("crashes")
             .join(format!("{label}-{}.stderr", EntityId::new()))
     }
+}
+
+fn valid_production_web_assets(root: &Path) -> bool {
+    let manifest_path = root.join("ui/.vite/manifest.json");
+    let Ok(encoded) = fs::read(manifest_path) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&encoded) else {
+        return false;
+    };
+    let Some(entry) = manifest.get("src/index.tsx") else {
+        return false;
+    };
+    let Some(script) = entry.get("file").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(styles) = entry.get("css").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    entry.get("isEntry").and_then(serde_json::Value::as_bool) == Some(true)
+        && safe_relative_asset(script)
+        && root.join("ui").join(script).is_file()
+        && !styles.is_empty()
+        && styles.iter().all(|style| {
+            style.as_str().is_some_and(|path| {
+                safe_relative_asset(path) && root.join("ui").join(path).is_file()
+            })
+        })
+}
+
+fn safe_relative_asset(value: &str) -> bool {
+    let path = Path::new(value);
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 impl Drop for DesktopLifecycle {

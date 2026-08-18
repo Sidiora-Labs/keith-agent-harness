@@ -115,6 +115,16 @@ fn release(root: &Path) -> Result<(), String> {
 
     run(
         root,
+        "pnpm",
+        &["--dir", "apps/agent-web/ui", "install", "--frozen-lockfile"],
+    )?;
+    run(
+        root,
+        "pnpm",
+        &["--dir", "apps/agent-web/ui", "run", "build"],
+    )?;
+    run(
+        root,
         "cargo",
         &["build", "--workspace", "--bins", "--release", "--locked"],
     )?;
@@ -208,6 +218,7 @@ fn assemble_release(
     if !status.success() {
         return Err(format!("wasm-bindgen failed with {status}"));
     }
+    copy_tree(&root.join("apps/agent-web/static/ui"), &web.join("ui"))?;
     copy_tree(
         &root.join("packaging/builtins"),
         &destination.join("builtins"),
@@ -241,6 +252,11 @@ fn assemble_release(
     .map_err(|error| error.to_string())?;
     fs::copy(root.join("Cargo.lock"), provenance.join("Cargo.lock"))
         .map_err(|error| error.to_string())?;
+    fs::copy(
+        root.join("apps/agent-web/ui/pnpm-lock.yaml"),
+        provenance.join("web-pnpm-lock.yaml"),
+    )
+    .map_err(|error| error.to_string())?;
     fs::write(
         schemas.join("agent-connection.md"),
         keith_protocol::schema_markdown().map_err(|error| error.to_string())?,

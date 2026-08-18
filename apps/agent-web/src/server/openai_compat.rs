@@ -252,6 +252,7 @@ async fn complete_once(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn stream_completion(
     bridge: DaemonBridge,
     compatibility: Arc<OpenAiCompatibility>,
@@ -437,7 +438,7 @@ impl OpenAiStreamProjection {
                         &self.id,
                         self.created,
                         &self.model,
-                        metadata,
+                        &metadata,
                     )]
                 }
             }
@@ -445,7 +446,7 @@ impl OpenAiStreamProjection {
                 &self.id,
                 self.created,
                 &self.model,
-                json!({
+                &json!({
                     "keith_event": {
                         "type": "snapshot",
                         "session_id": frame.snapshot.session.session_id,
@@ -459,14 +460,14 @@ impl OpenAiStreamProjection {
                 &self.id,
                 self.created,
                 &self.model,
-                json!({"keith_event": {"type": "terminal", "frame": frame}}),
+                &json!({"keith_event": {"type": "terminal", "frame": frame}}),
             )],
             _ => Vec::new(),
         }
     }
 }
 
-fn activity_chunk(id: &str, created: i64, model: &str, metadata: Value) -> Value {
+fn activity_chunk(id: &str, created: i64, model: &str, metadata: &Value) -> Value {
     json!({
         "id": id,
         "object": "chat.completion.chunk",

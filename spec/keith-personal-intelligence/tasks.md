@@ -10,7 +10,7 @@
     - Retain command identifiers internally while providing ordinary-language labels and empty-state actions
     - Test snapshots, replacement, gaps, zero activity, failure, correction, and no fabricated work
     - _Requirements: 1.1-1.5, 2.1-2.6_
-  - [-] 2.1 Continuous TUI subscription and correlated command dispatcher
+  - [x] 2.1 Continuous TUI subscription and correlated command dispatcher
     - Replace command-gated event reads with one continuous bounded connection worker
     - Correlate results by command ID while forwarding unrelated events and terminal frames
     - Resume from the latest reducer cursor, reconnect safely, and keep cancellation responsive
@@ -29,7 +29,7 @@
     - Audit output for control injection, decorative borders, glow, purple treatments, emoji status, fabricated work, and lost transcript
     - Publish the terminal compatibility matrix as executable test data
     - _Requirements: 3.2-3.6, 4.1-4.5, 9.1-9.3_
-  - [ ] 3.1 SolidJS, Rust-WASM, and Apps SDK UI design foundation
+  - [-] 3.1 SolidJS, Rust-WASM, and Apps SDK UI design foundation
     - Create the production SolidJS/Vite application and reproducible package lock
     - Import @openai/apps-sdk-ui/css and implement a token-only Keith adapter with forbidden-style auditing
     - Expose the Rust/WASM reducer, resume cursor, personal projection, and typed command builders to Solid

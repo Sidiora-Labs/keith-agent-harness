@@ -16,6 +16,15 @@ fn platform_desktop_startup_connects_and_stops_owned_daemon() {
     fs::create_dir(&assets).unwrap();
     fs::write(assets.join("agent_web.js"), b"packaged javascript").unwrap();
     fs::write(assets.join("agent_web_bg.wasm"), b"packaged wasm").unwrap();
+    fs::create_dir_all(assets.join("ui/.vite")).unwrap();
+    fs::create_dir_all(assets.join("ui/assets")).unwrap();
+    fs::write(assets.join("ui/assets/keith.js"), b"packaged application").unwrap();
+    fs::write(assets.join("ui/assets/keith.css"), b"packaged tokens").unwrap();
+    fs::write(
+        assets.join("ui/.vite/manifest.json"),
+        br#"{"src/index.tsx":{"file":"assets/keith.js","isEntry":true,"css":["assets/keith.css"]}}"#,
+    )
+    .unwrap();
     let config = DesktopProcessConfig {
         settings,
         workspace_root: directory.path().to_path_buf(),

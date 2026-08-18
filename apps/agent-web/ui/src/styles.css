@@ -1,0 +1,191 @@
+@import "@openai/apps-sdk-ui/css";
+
+:root {
+  --keith-canvas: var(--color-surface);
+  --keith-layer: var(--color-surface-secondary);
+  --keith-layer-raised: var(--color-surface-elevated);
+  --keith-text: var(--color-text);
+  --keith-text-muted: var(--color-text-secondary);
+  --keith-action: var(--color-background-primary-solid);
+  --keith-action-hover: var(--color-background-primary-solid-hover);
+  --keith-action-text: var(--color-text-primary-solid);
+  --keith-focus: var(--color-ring);
+  --keith-danger: var(--color-text-danger);
+  --keith-radius-small: var(--radius-lg);
+  --keith-radius-large: var(--radius-3xl);
+  --keith-elevation: var(--shadow-200);
+  --keith-font: var(--font-sans);
+  --keith-motion-duration: var(--transition-duration-basic);
+  --keith-motion-curve: var(--cubic-enter);
+}
+
+html,
+body,
+#keith-app {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--keith-canvas);
+  color: var(--keith-text);
+  font-family: var(--keith-font);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+a:focus-visible {
+  outline: var(--spacing) solid var(--keith-focus);
+  outline-offset: var(--spacing);
+}
+
+.foundation-shell {
+  min-height: 100vh;
+  background: var(--keith-canvas);
+}
+
+.foundation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(var(--spacing) * 4);
+  padding: calc(var(--spacing) * 6) clamp(calc(var(--spacing) * 5), 5vw, calc(var(--spacing) * 16));
+  background: var(--keith-layer);
+}
+
+.foundation-header h1,
+.foundation-welcome h2,
+.foundation-recents h2 {
+  margin: 0;
+  letter-spacing: var(--font-heading-lg-tracking);
+}
+
+.foundation-header h1 {
+  font-size: var(--font-heading-md-size);
+  line-height: var(--font-heading-md-line-height);
+  font-weight: var(--font-heading-md-weight);
+}
+
+.foundation-kicker,
+.foundation-status {
+  margin: 0;
+  color: var(--keith-text-muted);
+  font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
+}
+
+.foundation-main {
+  width: min(calc(100% - calc(var(--spacing) * 10)), 72rem);
+  margin: 0 auto;
+  padding: clamp(calc(var(--spacing) * 10), 8vw, calc(var(--spacing) * 24)) 0;
+}
+
+.foundation-welcome {
+  max-width: 42rem;
+}
+
+.foundation-welcome h2 {
+  margin-top: calc(var(--spacing) * 3);
+  font-size: clamp(var(--font-heading-xl-size), 5vw, var(--font-heading-3xl-size));
+  line-height: 1.08;
+  font-weight: var(--font-heading-3xl-weight);
+}
+
+.foundation-welcome p,
+.foundation-recents p,
+.foundation-recents li {
+  color: var(--keith-text-muted);
+  font-size: var(--font-text-md-size);
+  line-height: var(--font-text-md-line-height);
+}
+
+.foundation-recents {
+  margin-top: clamp(calc(var(--spacing) * 12), 10vw, calc(var(--spacing) * 28));
+  padding: calc(var(--spacing) * 6);
+  background: var(--keith-layer);
+  border-radius: var(--keith-radius-large);
+}
+
+.foundation-recents h2 {
+  font-size: var(--font-heading-sm-size);
+  line-height: var(--font-heading-sm-line-height);
+}
+
+.foundation-recents ul {
+  display: grid;
+  gap: calc(var(--spacing) * 2);
+  margin: calc(var(--spacing) * 4) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.login-shell {
+  width: min(calc(100% - calc(var(--spacing) * 10)), 28rem);
+  margin: 12vh auto;
+  padding: calc(var(--spacing) * 8);
+  background: var(--keith-layer);
+  border-radius: var(--keith-radius-large);
+  box-shadow: var(--keith-elevation);
+}
+
+.login-shell h1,
+.login-shell p {
+  margin-top: 0;
+}
+
+.login-shell form {
+  display: grid;
+  gap: calc(var(--spacing) * 3);
+}
+
+.login-shell input,
+.login-shell button {
+  appearance: none;
+  min-height: var(--control-size-3xl);
+  padding: 0 calc(var(--spacing) * 4);
+  border-radius: var(--keith-radius-small);
+}
+
+.login-shell input {
+  background: var(--keith-layer-raised);
+  color: var(--keith-text);
+}
+
+.login-shell button {
+  background: var(--keith-action);
+  color: var(--keith-action-text);
+  cursor: pointer;
+}
+
+.login-shell button:hover {
+  background: var(--keith-action-hover);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto;
+    transition-duration: 0s;
+    animation-duration: 0s;
+  }
+}
+
+@media (forced-colors: active) {
+  button:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible,
+  a:focus-visible {
+    outline-color: Highlight;
+  }
+}

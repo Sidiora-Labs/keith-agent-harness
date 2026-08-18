@@ -39,35 +39,8 @@ url.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true, features = ["wasm_js"] }
-js-sys.workspace = true
 ulid.workspace = true
 wasm-bindgen.workspace = true
-
-[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
-workspace = true
-features = [
-    "CloseEvent",
-    "Document",
-    "Element",
-    "Event",
-    "EventTarget",
-    "Headers",
-    "HtmlElement",
-    "HtmlFormElement",
-    "HtmlInputElement",
-    "HtmlSelectElement",
-    "HtmlTextAreaElement",
-    "Location",
-    "MessageEvent",
-    "Node",
-    "NodeList",
-    "Request",
-    "RequestInit",
-    "Response",
-    "WebSocket",
-    "Window",
-    "XmlHttpRequest",
-]
 
 [dev-dependencies]
 tempfile.workspace = true

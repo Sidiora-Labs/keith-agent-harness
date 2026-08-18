@@ -120,7 +120,7 @@ verify_cmd = "cargo test -p keith-ui-model"
 
 [task.2.1]
 title  = "Continuous TUI subscription and correlated command dispatcher"
-status = "in_progress"
+status = "done"
 wave   = 2
 do_1   = "Replace command-gated event reads with one continuous bounded connection worker"
 do_2   = "Correlate results by command ID while forwarding unrelated events and terminal frames"
@@ -162,7 +162,7 @@ verify_cmd = "cargo test -p keith-agent-tui"
 
 [task.3.1]
 title  = "SolidJS, Rust-WASM, and Apps SDK UI design foundation"
-status = "pending"
+status = "in_progress"
 wave   = 2
 do_1   = "Create the production SolidJS/Vite application and reproducible package lock"
 do_2   = "Import @openai/apps-sdk-ui/css and implement a token-only Keith adapter with forbidden-style auditing"

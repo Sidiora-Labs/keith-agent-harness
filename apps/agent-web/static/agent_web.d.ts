@@ -1,21 +1,67 @@
 /* tslint:disable */
 /* eslint-disable */
 
-export function start(): void;
+/**
+ * The browser's only protocol authority. Solid renders the serialized projection and sends the
+ * typed envelopes built here; it never reduces daemon events or constructs wire commands.
+ */
+export class BrowserProjection {
+    free(): void;
+    [Symbol.dispose](): void;
+    apply_wire_message(encoded: string): string;
+    attach_session(session_id: string): string;
+    branch(session_id: string): string;
+    cancel(session_id: string): string;
+    create_child(session_id: string, objective: string): string;
+    create_goal(session_id: string, objective: string): string;
+    create_schedule(profile_id: string, session_id: string | null | undefined, prompt: string, interval_seconds: bigint): string;
+    create_session(profile_id: string, workspace_id: string, title?: string | null): string;
+    current_view(): string;
+    export_session(session_id: string): string;
+    list_sessions(profile_id?: string | null): string;
+    constructor();
+    query_memory(profile_id: string, query: string): string;
+    resolve_confirmation(session_id: string, confirmation_id: string, allow: boolean): string;
+    resume(session_id: string): string;
+    retry(session_id: string): string;
+    select_model(session_id: string, provider: string, model: string): string;
+    set_background(profile_id: string, mode: string): string;
+    steer(session_id: string, text: string): string;
+    submit_prompt(session_id: string, text: string): string;
+}
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly start: () => void;
-    readonly __wasm_bindgen_func_elem_321: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_321_1: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_321_2: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_323: (a: number, b: number) => void;
-    readonly __wbindgen_export: (a: number, b: number) => number;
-    readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_export3: (a: number) => void;
-    readonly __wbindgen_export4: (a: number, b: number) => void;
+    readonly __wbg_browserprojection_free: (a: number, b: number) => void;
+    readonly browserprojection_apply_wire_message: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly browserprojection_attach_session: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly browserprojection_branch: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly browserprojection_cancel: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly browserprojection_create_child: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly browserprojection_create_goal: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly browserprojection_create_schedule: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint) => [number, number, number, number];
+    readonly browserprojection_create_session: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly browserprojection_current_view: (a: number) => [number, number, number, number];
+    readonly browserprojection_export_session: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly browserprojection_list_sessions: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly browserprojection_new: () => number;
+    readonly browserprojection_query_memory: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly browserprojection_resolve_confirmation: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly browserprojection_resume: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly browserprojection_retry: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly browserprojection_select_model: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly browserprojection_set_background: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly browserprojection_steer: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly browserprojection_submit_prompt: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly __wbindgen_exn_store: (a: number) => void;
+    readonly __externref_table_alloc: () => number;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+    readonly __externref_table_dealloc: (a: number) => void;
+    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_start: () => void;
 }
 
