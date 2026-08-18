@@ -55,10 +55,30 @@ export interface PersonalProjection {
 }
 
 export interface BrowserView {
-  snapshot?: Record<string, unknown>
-  personal?: PersonalProjection
-  resume?: ResumeCursor
+  snapshot?: BrowserSnapshot | null
+  personal?: PersonalProjection | null
+  resume?: ResumeCursor | null
   snapshot_required: boolean
+}
+
+export interface BrowserMessage {
+  message_id: string
+  final_id?: string
+  role: "user" | "assistant" | "tool" | "system"
+  text: string
+  committed: boolean
+}
+
+export interface BrowserSnapshot {
+  messages: BrowserMessage[]
+  presence: {
+    state: string
+    updated_at: string
+  }
+  terminal?: {
+    status: "completed" | "failed" | "cancelled" | "exhausted"
+    detail?: string
+  }
 }
 
 export interface BrowserProjectionBridge {

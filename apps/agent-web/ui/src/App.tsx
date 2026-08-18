@@ -1,52 +1,43 @@
-import { For, Show, createResource } from "solid-js"
+import { createEffect, createResource, createSignal } from "solid-js"
+import { AppShell, type Destination } from "./AppShell"
 import { createBrowserProjection } from "./bridge"
-import type { BootstrapData } from "./types"
+import type { BootstrapData, BrowserView } from "./types"
 
 export interface AppProps {
   bootstrap: BootstrapData
 }
 
+const emptyView: BrowserView = { snapshot_required: false }
+
 export function App(props: AppProps) {
+  const [destination, setDestination] = createSignal<Destination>("home")
+  const [selectedSession, setSelectedSession] = createSignal(
+    props.bootstrap.sessions[0]?.session_id
+  )
+  const [view, setView] = createSignal<BrowserView>(emptyView)
   const [bridge] = createResource(createBrowserProjection)
-  const firstSession = () => props.bootstrap.sessions[0]
+
+  createEffect(() => {
+    const projection = bridge()
+    if (!projection) return
+    setView(JSON.parse(projection.current_view()) as BrowserView)
+  })
+
+  const connectionLabel = () => {
+    if (bridge.loading) return "Opening Keith"
+    if (bridge.error) return "Keith is unavailable"
+    return view().personal?.presence.label ?? "Not connected"
+  }
 
   return (
-    <div class="foundation-shell">
-      <header class="foundation-header">
-        <div>
-          <p class="foundation-kicker">Personal intelligence</p>
-          <h1>Keith</h1>
-        </div>
-        <p class="foundation-status" role="status" aria-live="polite">
-          {bridge.loading ? "Connecting" : bridge.error ? "Connection unavailable" : "Ready"}
-        </p>
-      </header>
-      <main class="foundation-main">
-        <section class="foundation-welcome" aria-labelledby="welcome-title">
-          <p class="foundation-kicker">Good to see you</p>
-          <h2 id="welcome-title">What can I take care of?</h2>
-          <p>
-            Start a conversation and Keith will keep the work, decisions, and finished results
-            together.
-          </p>
-          <Show when={firstSession()} fallback={<p>Keith is ready when you are.</p>}>
-            {(session) => <p>Continue {session().title ?? "your conversation"}.</p>}
-          </Show>
-        </section>
-        <section class="foundation-recents" aria-labelledby="recent-title">
-          <h2 id="recent-title">Recent conversations</h2>
-          <Show
-            when={props.bootstrap.sessions.length > 0}
-            fallback={<p>Ask Keith for help and your conversation will stay here.</p>}
-          >
-            <ul>
-              <For each={props.bootstrap.sessions}>
-                {(session) => <li>{session.title ?? "New conversation"}</li>}
-              </For>
-            </ul>
-          </Show>
-        </section>
-      </main>
-    </div>
+    <AppShell
+      destination={destination}
+      setDestination={setDestination}
+      view={view}
+      sessions={props.bootstrap.sessions}
+      selectedSession={selectedSession}
+      setSelectedSession={setSelectedSession}
+      connectionLabel={connectionLabel}
+    />
   )
 }

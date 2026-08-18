@@ -16,7 +16,7 @@
     - Resume from the latest reducer cursor, reconnect safely, and keep cancellation responsive
     - Add real transport tests for idle events, in-flight events, gap recovery, reconnect, and shutdown
     - _Requirements: 2.1-2.4, 4.1-4.5_
-  - [-] 2.2 Codex-style inline conversation TUI
+  - [x] 2.2 Codex-style inline conversation TUI
     - Replace permanent subsystem navigation with transcript, live tail, compact composer, and status row
     - Use Ratatui inline viewport and insert settled transcript cells into native terminal scrollback
     - Implement temporary overlays for sessions, commands, models, approvals, work, memory, and diagnostics
@@ -36,7 +36,7 @@
     - Teach the authenticated Rust server, desktop shell, and release assembler to serve and package hashed production assets
     - Add typecheck, build, stale-asset, CSP, and secret-safe bundle gates
     - _Requirements: 2.1-2.5, 5.1, 6.1-6.6, 8.5, 9.4-9.5_
-  - [ ] 3.2 Consumer Home, Conversation, Work, and Your World shell
+  - [-] 3.2 Consumer Home, Conversation, Work, and Your World shell
     - Build a restrained responsive shell with at most Home, Conversation, Work, Your World, and Settings
     - Build the authoritative personal brief, outcome-oriented work groups, saved context, outputs, and meaningful empty states
     - Keep the conversation and subscription mounted while destinations and mobile sheets change

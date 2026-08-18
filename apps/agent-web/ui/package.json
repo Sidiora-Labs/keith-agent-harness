@@ -19,6 +19,7 @@
     "tailwindcss": "4.2.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "4.2.0",
     "@types/node": "22.19.11",
     "jsdom": "29.1.1",
     "typescript": "5.8.2",

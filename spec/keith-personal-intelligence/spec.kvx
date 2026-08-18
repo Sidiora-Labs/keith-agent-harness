@@ -134,7 +134,7 @@ verify_cmd = "cargo test -p keith-agent-tui connection"
 
 [task.2.2]
 title  = "Codex-style inline conversation TUI"
-status = "in_progress"
+status = "done"
 wave   = 3
 do_1   = "Replace permanent subsystem navigation with transcript, live tail, compact composer, and status row"
 do_2   = "Use Ratatui inline viewport and insert settled transcript cells into native terminal scrollback"
@@ -177,7 +177,7 @@ verify_cmd = "pnpm --dir apps/agent-web/ui run check && pnpm --dir apps/agent-we
 
 [task.3.2]
 title  = "Consumer Home, Conversation, Work, and Your World shell"
-status = "pending"
+status = "in_progress"
 wave   = 3
 do_1   = "Build a restrained responsive shell with at most Home, Conversation, Work, Your World, and Settings"
 do_2   = "Build the authoritative personal brief, outcome-oriented work groups, saved context, outputs, and meaningful empty states"
