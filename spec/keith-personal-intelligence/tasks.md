@@ -4,13 +4,13 @@
 
 ## Tasks
 
-  - [-] 1.1 Consumer projection vocabulary and authoritative client contract
+  - [x] 1.1 Consumer projection vocabulary and authoritative client contract
     - Implement shared PersonalSurface and PersonalIntelligenceProjection types over SessionSnapshot
     - Map runtime state to Work, NeedsYou, Completed, Upcoming, SavedContext, Outputs, and calm truthful presence copy
     - Retain command identifiers internally while providing ordinary-language labels and empty-state actions
     - Test snapshots, replacement, gaps, zero activity, failure, correction, and no fabricated work
     - _Requirements: 1.1-1.5, 2.1-2.6_
-  - [ ] 2.1 Continuous TUI subscription and correlated command dispatcher
+  - [-] 2.1 Continuous TUI subscription and correlated command dispatcher
     - Replace command-gated event reads with one continuous bounded connection worker
     - Correlate results by command ID while forwarding unrelated events and terminal frames
     - Resume from the latest reducer cursor, reconnect safely, and keep cancellation responsive

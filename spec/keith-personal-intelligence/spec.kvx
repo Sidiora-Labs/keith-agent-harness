@@ -107,7 +107,7 @@ ac_6  = "THE feature SHALL complete only after focused tests, workspace formatti
 
 [task.1.1]
 title  = "Consumer projection vocabulary and authoritative client contract"
-status = "in_progress"
+status = "done"
 wave   = 1
 do_1   = "Implement shared PersonalSurface and PersonalIntelligenceProjection types over SessionSnapshot"
 do_2   = "Map runtime state to Work, NeedsYou, Completed, Upcoming, SavedContext, Outputs, and calm truthful presence copy"
@@ -120,7 +120,7 @@ verify_cmd = "cargo test -p keith-ui-model"
 
 [task.2.1]
 title  = "Continuous TUI subscription and correlated command dispatcher"
-status = "pending"
+status = "in_progress"
 wave   = 2
 do_1   = "Replace command-gated event reads with one continuous bounded connection worker"
 do_2   = "Correlate results by command ID while forwarding unrelated events and terminal frames"

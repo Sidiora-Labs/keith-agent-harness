@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -17,9 +19,12 @@ use keith_protocol::{
 use thiserror::Error;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::HeaderValue;
+use tungstenite::stream::MaybeTlsStream;
 use url::Url;
 
 const MAX_REMOTE_MESSAGE_BYTES: usize = 8 * 1_024 * 1_024;
+const MAX_DISPATCH_EVENTS: usize = 512;
+const DISPATCH_POLL_INTERVAL: Duration = Duration::from_millis(75);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SupervisedLocalConfig {
@@ -84,8 +89,14 @@ impl AgentConnectionClient {
             client_id.clone(),
             resume,
         )))?;
-        let WireMessage::ServerHello(server) = transport.receive()? else {
-            return Err(TuiConnectionError::MissingServerHello);
+        let deadline = Instant::now() + startup_timeout;
+        let server = loop {
+            match transport.receive() {
+                Ok(WireMessage::ServerHello(server)) => break server,
+                Ok(_) => return Err(TuiConnectionError::MissingServerHello),
+                Err(error) if error.is_timed_out() && Instant::now() < deadline => {}
+                Err(error) => return Err(error.into()),
+            }
         };
         Ok(Self {
             mode,
@@ -130,21 +141,37 @@ impl AgentConnectionClient {
         let command_id = command.command_id.clone();
         self.transport.send(&WireMessage::Command(command))?;
         loop {
-            match self.transport.receive()? {
-                WireMessage::CommandResult(result) if result.command_id == command_id => {
+            match self.transport.receive() {
+                Ok(WireMessage::CommandResult(result)) if result.command_id == command_id => {
                     return Ok(result);
                 }
-                WireMessage::CommandResult(_) => {
+                Ok(WireMessage::CommandResult(_)) => {
                     return Err(TuiConnectionError::UnexpectedCommandResult);
                 }
-                message @ (WireMessage::Event(_)
-                | WireMessage::Snapshot(_)
-                | WireMessage::Terminal(_)) => on_message(message),
-                WireMessage::ServerHello(_)
-                | WireMessage::ClientHello(_)
-                | WireMessage::Command(_) => {}
+                Ok(
+                    message @ (WireMessage::Event(_)
+                    | WireMessage::Snapshot(_)
+                    | WireMessage::Terminal(_)),
+                ) => on_message(message),
+                Ok(
+                    WireMessage::ServerHello(_)
+                    | WireMessage::ClientHello(_)
+                    | WireMessage::Command(_),
+                ) => {}
+                Err(error) if error.is_timed_out() => {}
+                Err(error) => return Err(error.into()),
             }
         }
+    }
+
+    fn send_command(&mut self, mut command: CommandEnvelope) -> Result<(), TuiConnectionError> {
+        command.protocol = self.server.protocol;
+        self.transport.send(&WireMessage::Command(command))?;
+        Ok(())
+    }
+
+    fn receive_next(&mut self) -> Result<WireMessage, TuiConnectionError> {
+        self.transport.receive().map_err(TuiConnectionError::from)
     }
 
     pub const fn protocol(&self) -> ProtocolVersion {
@@ -173,11 +200,12 @@ pub enum DispatchEvent {
 pub struct AgentCommandDispatcher {
     supervised_daemon: Option<Child>,
     commands: Option<SyncSender<CommandEnvelope>>,
-    event_sender: mpsc::Sender<DispatchEvent>,
+    event_sender: SyncSender<DispatchEvent>,
     events: Receiver<DispatchEvent>,
     dispatch_mode: ConnectionMode,
     client_id: ClientId,
     startup_timeout: Duration,
+    shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     priority_workers: Vec<JoinHandle<()>>,
 }
@@ -185,22 +213,22 @@ pub struct AgentCommandDispatcher {
 impl AgentCommandDispatcher {
     pub fn new(mut owner: AgentConnectionClient, startup_timeout: Duration) -> Self {
         let dispatch_mode = parallel_mode(&owner.mode);
+        owner.mode.clone_from(&dispatch_mode);
         let client_id = owner.client_id.clone();
         let supervised_daemon = owner.supervised_daemon.take();
-        drop(owner);
         let (command_sender, command_receiver) =
             mpsc::sync_channel::<CommandEnvelope>(MAX_DISPATCHED_COMMANDS);
-        let (event_sender, event_receiver) = mpsc::channel();
-        let worker_mode = dispatch_mode.clone();
-        let worker_client_id = client_id.clone();
+        let (event_sender, event_receiver) = mpsc::sync_channel(MAX_DISPATCH_EVENTS);
         let worker_events = event_sender.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
         let worker = thread::spawn(move || {
             command_worker(
-                &worker_mode,
-                &worker_client_id,
+                owner,
                 startup_timeout,
                 &command_receiver,
                 &worker_events,
+                &worker_shutdown,
             );
         });
         Self {
@@ -211,6 +239,7 @@ impl AgentCommandDispatcher {
             dispatch_mode,
             client_id,
             startup_timeout,
+            shutdown,
             worker: Some(worker),
             priority_workers: Vec::new(),
         }
@@ -271,11 +300,10 @@ impl AgentCommandDispatcher {
 
 impl Drop for AgentCommandDispatcher {
     fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
         self.commands.take();
         self.reap_priority_workers();
-        if self.worker.as_ref().is_some_and(JoinHandle::is_finished)
-            && let Some(worker) = self.worker.take()
-        {
+        if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
         if let Some(child) = &mut self.supervised_daemon {
@@ -295,47 +323,98 @@ fn parallel_mode(mode: &ConnectionMode) -> ConnectionMode {
 }
 
 fn command_worker(
-    mode: &ConnectionMode,
-    client_id: &ClientId,
+    mut client: AgentConnectionClient,
     startup_timeout: Duration,
     commands: &Receiver<CommandEnvelope>,
-    events: &mpsc::Sender<DispatchEvent>,
+    events: &SyncSender<DispatchEvent>,
+    shutdown: &AtomicBool,
 ) {
-    let mut client =
-        AgentConnectionClient::connect(mode.clone(), client_id.clone(), None, startup_timeout).ok();
-    while let Ok(command) = commands.recv() {
-        if client.is_none() {
-            match AgentConnectionClient::connect(
-                mode.clone(),
-                client_id.clone(),
-                None,
-                startup_timeout,
-            ) {
-                Ok(reconnected) => {
-                    client = Some(reconnected);
-                    let _ = events.send(DispatchEvent::Reconnected);
+    let mut pending = BTreeSet::new();
+    loop {
+        loop {
+            match commands.try_recv() {
+                Ok(command) => {
+                    let command_id = command.command_id.clone();
+                    match client.send_command(command) {
+                        Ok(()) => {
+                            pending.insert(command_id);
+                        }
+                        Err(error) => {
+                            let _ = events.send(DispatchEvent::CommandFailed(error.to_string()));
+                            if !recover_connection(
+                                &mut client,
+                                startup_timeout,
+                                &mut pending,
+                                events,
+                                shutdown,
+                            ) {
+                                return;
+                            }
+                        }
+                    }
                 }
-                Err(error) => {
-                    let _ = events.send(DispatchEvent::CommandFailed(error.to_string()));
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return,
+            }
+        }
+        match client.receive_next() {
+            Ok(message) => {
+                if let WireMessage::CommandResult(result) = &message {
+                    pending.remove(&result.command_id);
+                }
+                if events
+                    .send(DispatchEvent::Message(Box::new(message)))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(TuiConnectionError::Transport(error)) if error.is_timed_out() => {}
+            Err(error) => {
+                if !recover_connection(&mut client, startup_timeout, &mut pending, events, shutdown)
+                {
                     let _ = events.send(DispatchEvent::ReconnectFailed(error.to_string()));
-                    continue;
+                    return;
                 }
             }
         }
-        let Some(active) = &mut client else {
-            continue;
-        };
-        if let Err(error) = forward_command(active, command, events) {
-            let _ = events.send(DispatchEvent::CommandFailed(error.to_string()));
-            let _ = events.send(DispatchEvent::Reconnecting);
-            match active.reconnect(None, startup_timeout) {
-                Ok(()) => {
-                    let _ = events.send(DispatchEvent::Reconnected);
+    }
+}
+
+fn recover_connection(
+    client: &mut AgentConnectionClient,
+    startup_timeout: Duration,
+    pending: &mut BTreeSet<keith_agent_types::CommandId>,
+    events: &SyncSender<DispatchEvent>,
+    shutdown: &AtomicBool,
+) -> bool {
+    for _ in pending.iter() {
+        let _ = events.send(DispatchEvent::CommandFailed(
+            "Connection changed before the command result; refreshing authoritative state".into(),
+        ));
+    }
+    pending.clear();
+    if events.send(DispatchEvent::Reconnecting).is_err() {
+        return false;
+    }
+    loop {
+        if shutdown.load(Ordering::Acquire) {
+            return false;
+        }
+        match client.reconnect(None, startup_timeout) {
+            Ok(()) => return events.send(DispatchEvent::Reconnected).is_ok(),
+            Err(error) => {
+                if events
+                    .send(DispatchEvent::ReconnectFailed(error.to_string()))
+                    .is_err()
+                {
+                    return false;
                 }
-                Err(reconnect_error) => {
-                    let _ =
-                        events.send(DispatchEvent::ReconnectFailed(reconnect_error.to_string()));
-                    client = None;
+                for _ in 0..10 {
+                    if shutdown.load(Ordering::Acquire) {
+                        return false;
+                    }
+                    thread::sleep(Duration::from_millis(50));
                 }
             }
         }
@@ -345,7 +424,7 @@ fn command_worker(
 fn forward_command(
     client: &mut AgentConnectionClient,
     command: CommandEnvelope,
-    events: &mpsc::Sender<DispatchEvent>,
+    events: &SyncSender<DispatchEvent>,
 ) -> Result<(), TuiConnectionError> {
     let result = client.execute(command, |message| {
         let _ = events.send(DispatchEvent::Message(Box::new(message)));
@@ -431,7 +510,21 @@ fn open_transport(
             let authorization = HeaderValue::from_str(&format!("Bearer {bearer_token}"))
                 .map_err(|_| TuiConnectionError::InvalidAuthorization)?;
             request.headers_mut().insert("authorization", authorization);
-            let (socket, _) = tungstenite::connect(request)?;
+            let (mut socket, _) = tungstenite::connect(request)?;
+            match socket.get_mut() {
+                MaybeTlsStream::Plain(stream) => {
+                    stream
+                        .set_read_timeout(Some(DISPATCH_POLL_INTERVAL))
+                        .map_err(keith_connection::ConnectionError::from)?;
+                }
+                MaybeTlsStream::Rustls(stream) => {
+                    stream
+                        .sock
+                        .set_read_timeout(Some(DISPATCH_POLL_INTERVAL))
+                        .map_err(keith_connection::ConnectionError::from)?;
+                }
+                _ => {}
+            }
             Ok((
                 Box::new(WebSocketTransport::new(
                     socket,
@@ -446,6 +539,8 @@ fn open_transport(
 
 fn open_local(path: &Path) -> Result<BoxedTransport, TuiConnectionError> {
     let stream = keith_connection::connect_local(path)?;
+    keith_connection::set_local_read_timeout(&stream, Some(DISPATCH_POLL_INTERVAL))
+        .map_err(keith_connection::ConnectionError::from)?;
     Ok(Box::new(FramedTransport::new(stream, WireFormat::Json)))
 }
 
@@ -772,11 +867,8 @@ mod tests {
         let (release_sender, release_receiver) = mpsc::channel();
         let server = thread::spawn(move || {
             let owner_stream = keith_connection::accept_local(&listener).unwrap();
-            let owner = negotiate_local_client(owner_stream);
-
-            let worker_stream = keith_connection::accept_local(&listener).unwrap();
             let primary = thread::spawn(move || {
-                let mut transport = negotiate_local_client(worker_stream);
+                let mut transport = negotiate_local_client(owner_stream);
                 let WireMessage::Command(command) = transport.receive().unwrap() else {
                     panic!("primary command required");
                 };
@@ -796,7 +888,6 @@ mod tests {
             cancel_received_sender.send(()).unwrap();
             complete_command(&mut cancel_transport, command.command_id);
             primary.join().unwrap();
-            drop(owner);
         });
 
         let client_id = ClientId::new();
@@ -846,6 +937,67 @@ mod tests {
             }
         }
         assert_eq!(completed, 2);
+        drop(dispatcher);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn dispatcher_delivers_events_while_no_command_is_in_flight() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.sock");
+        let listener = keith_connection::bind_permissioned_local(&path).unwrap();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let stream = keith_connection::accept_local(&listener).unwrap();
+            let mut transport = negotiate_local_client(stream);
+            thread::sleep(Duration::from_millis(175));
+            transport
+                .send(&WireMessage::Event(EventEnvelope {
+                    protocol: CURRENT_PROTOCOL_VERSION,
+                    root_tree_id: RootTreeId::new(),
+                    generation: Generation::new(1),
+                    first_sequence: Sequence::new(1),
+                    sequence: Sequence::new(1),
+                    occurred_at: UtcTimestamp::UNIX_EPOCH,
+                    event: DaemonEvent::Warning(CommonError::new(
+                        ErrorCode::Unavailable,
+                        "idle event arrived",
+                        true,
+                    )),
+                }))
+                .unwrap();
+            release_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+        });
+        let client = AgentConnectionClient::connect(
+            ConnectionMode::Attach { socket_path: path },
+            ClientId::new(),
+            None,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let dispatcher = AgentCommandDispatcher::new(client, Duration::from_secs(1));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut observed = false;
+        while Instant::now() < deadline {
+            if let Some(DispatchEvent::Message(message)) = dispatcher.try_next()
+                && matches!(
+                    *message,
+                    WireMessage::Event(EventEnvelope {
+                        event: DaemonEvent::Warning(ref warning),
+                        ..
+                    }) if warning.message == "idle event arrived"
+                )
+            {
+                observed = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(observed, "idle event did not reach the TUI dispatcher");
+        release_sender.send(()).unwrap();
         drop(dispatcher);
         server.join().unwrap();
     }

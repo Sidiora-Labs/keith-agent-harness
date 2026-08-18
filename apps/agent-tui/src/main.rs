@@ -85,9 +85,7 @@ fn event_loop(
                 DispatchEvent::Reconnecting => app.report_reconnecting(),
                 DispatchEvent::Reconnected => {
                     app.report_reconnected();
-                    if let Some(session_id) = app.attached_session.clone() {
-                        app.attach(session_id);
-                    }
+                    app.resume_attached_session();
                 }
                 DispatchEvent::ReconnectFailed(error) => app.report_reconnect_failure(error),
             }

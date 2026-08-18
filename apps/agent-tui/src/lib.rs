@@ -185,19 +185,29 @@ impl TuiApp {
     }
 
     pub fn attach(&mut self, session_id: SessionId) {
-        let resume = self.reducer.as_ref().map(|reducer| {
+        let resume = self.resume_cursor();
+        self.attached_session = Some(session_id.clone());
+        self.enqueue(ClientCommand::AttachSession(AttachSession {
+            session_id,
+            resume,
+        }));
+    }
+
+    pub fn resume_attached_session(&mut self) {
+        if let Some(session_id) = self.attached_session.clone() {
+            self.attach(session_id);
+        }
+    }
+
+    pub fn resume_cursor(&self) -> Option<keith_protocol::ResumeCursor> {
+        self.reducer.as_ref().map(|reducer| {
             let snapshot = reducer.snapshot();
             keith_protocol::ResumeCursor {
                 root_tree_id: snapshot.session.root_tree_id.clone(),
                 generation: snapshot.generation,
                 last_sequence: snapshot.through_sequence,
             }
-        });
-        self.attached_session = Some(session_id.clone());
-        self.enqueue(ClientCommand::AttachSession(AttachSession {
-            session_id,
-            resume,
-        }));
+        })
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
