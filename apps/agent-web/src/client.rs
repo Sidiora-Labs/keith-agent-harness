@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use keith_agent_types::{
@@ -23,7 +24,23 @@ struct BrowserView<'a> {
     snapshot: Option<&'a keith_protocol::SessionSnapshot>,
     personal: Option<PersonalIntelligenceProjection>,
     resume: Option<keith_protocol::ResumeCursor>,
+    sessions: &'a [keith_protocol::SessionSummary],
+    last_command: Option<&'a BrowserCommandReceipt>,
     snapshot_required: bool,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BrowserCommandState {
+    Accepted,
+    Updated,
+    Rejected,
+}
+
+#[derive(Serialize)]
+struct BrowserCommandReceipt {
+    state: BrowserCommandState,
+    message: String,
 }
 
 /// The browser's only protocol authority. Solid renders the serialized projection and sends the
@@ -32,8 +49,11 @@ struct BrowserView<'a> {
 pub struct BrowserProjection {
     client_id: ClientId,
     reducer: Option<ProjectionReducer>,
+    sessions: Vec<keith_protocol::SessionSummary>,
     snapshot_required: bool,
     last_prompt: Option<String>,
+    pending_prompts: HashMap<CommandId, String>,
+    last_command: Option<BrowserCommandReceipt>,
 }
 
 #[wasm_bindgen]
@@ -43,8 +63,11 @@ impl BrowserProjection {
         Self {
             client_id: ClientId::new(),
             reducer: None,
+            sessions: Vec::new(),
             snapshot_required: false,
             last_prompt: None,
+            pending_prompts: HashMap::new(),
+            last_command: None,
         }
     }
 
@@ -68,6 +91,8 @@ impl BrowserProjection {
             snapshot,
             personal,
             resume,
+            sessions: &self.sessions,
+            last_command: self.last_command.as_ref(),
             snapshot_required: self.snapshot_required,
         })
         .map_err(js_error)
@@ -123,17 +148,19 @@ impl BrowserProjection {
     pub fn submit_prompt(&mut self, session_id: &str, text: String) -> Result<String, JsValue> {
         let session_id = parse::<SessionId>(session_id)?;
         let text = nonempty(text, "message")?;
-        self.last_prompt = Some(text.clone());
-        self.command(
+        let envelope = self.command_envelope(
             Some(session_id.clone()),
             ClientCommand::SubmitPrompt(SubmitPrompt {
                 session_id,
-                text,
+                text: text.clone(),
                 artifacts: Vec::new(),
                 delivery: DeliveryPolicy::Immediate,
                 reply_route: None,
             }),
-        )
+        );
+        self.pending_prompts
+            .insert(envelope.command_id.clone(), text);
+        encode_command(&envelope)
     }
 
     pub fn steer(&self, session_id: &str, text: String) -> Result<String, JsValue> {
@@ -348,10 +375,41 @@ impl BrowserProjection {
     fn reduce(&mut self, message: WireMessage) -> Result<(), JsValue> {
         match message {
             WireMessage::CommandResult(result) => {
-                if let CommandResult::Data(payload) = result.result
-                    && let ResponsePayload::Snapshot(snapshot) = *payload
-                {
-                    self.install_snapshot(*snapshot)?;
+                let pending_prompt = self.pending_prompts.remove(&result.command_id);
+                match result.result {
+                    CommandResult::Accepted { .. } => {
+                        if let Some(prompt) = pending_prompt {
+                            self.last_prompt = Some(prompt);
+                        }
+                        self.last_command = Some(BrowserCommandReceipt {
+                            state: BrowserCommandState::Accepted,
+                            message: "Keith received the request.".into(),
+                        });
+                    }
+                    CommandResult::Rejected(error) => {
+                        self.last_command = Some(BrowserCommandReceipt {
+                            state: BrowserCommandState::Rejected,
+                            message: error.error.message,
+                        });
+                    }
+                    CommandResult::Data(payload) => {
+                        if let Some(prompt) = pending_prompt {
+                            self.last_prompt = Some(prompt);
+                        }
+                        match *payload {
+                            ResponsePayload::Snapshot(snapshot) => {
+                                self.install_snapshot(*snapshot)?;
+                            }
+                            ResponsePayload::Sessions(sessions) => {
+                                self.sessions = sessions;
+                            }
+                            _ => {}
+                        }
+                        self.last_command = Some(BrowserCommandReceipt {
+                            state: BrowserCommandState::Updated,
+                            message: "Keith confirmed the update.".into(),
+                        });
+                    }
                 }
             }
             WireMessage::Snapshot(frame) => self.install_snapshot(*frame.snapshot)?,
@@ -388,6 +446,9 @@ impl BrowserProjection {
         } else if let Some(reducer) = &mut self.reducer {
             reducer.apply_snapshot(snapshot).map_err(js_error)?;
         }
+        if let Some(snapshot) = self.reducer.as_ref().map(ProjectionReducer::snapshot) {
+            upsert_session(&mut self.sessions, snapshot.session.clone());
+        }
         self.snapshot_required = false;
         Ok(())
     }
@@ -397,15 +458,40 @@ impl BrowserProjection {
         session_id: Option<SessionId>,
         command: ClientCommand,
     ) -> Result<String, JsValue> {
-        serde_json::to_string(&CommandEnvelope {
+        encode_command(&self.command_envelope(session_id, command))
+    }
+
+    fn command_envelope(
+        &self,
+        session_id: Option<SessionId>,
+        command: ClientCommand,
+    ) -> CommandEnvelope {
+        CommandEnvelope {
             protocol: CURRENT_PROTOCOL_VERSION,
             command_id: CommandId::new(),
             client_id: self.client_id.clone(),
             sent_at: UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
             session_id,
             command,
-        })
-        .map_err(js_error)
+        }
+    }
+}
+
+fn encode_command(envelope: &CommandEnvelope) -> Result<String, JsValue> {
+    serde_json::to_string(envelope).map_err(js_error)
+}
+
+fn upsert_session(
+    sessions: &mut Vec<keith_protocol::SessionSummary>,
+    session: keith_protocol::SessionSummary,
+) {
+    if let Some(existing) = sessions
+        .iter_mut()
+        .find(|candidate| candidate.session_id == session.session_id)
+    {
+        *existing = session;
+    } else {
+        sessions.insert(0, session);
     }
 }
 
@@ -440,4 +526,76 @@ fn nonempty(value: String, label: &str) -> Result<String, JsValue> {
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use keith_agent_types::{CommonError, ErrorCode};
+    use keith_protocol::{CommandError, CommandResultEnvelope};
+
+    use super::*;
+
+    fn result(command_id: CommandId, result: CommandResult) -> WireMessage {
+        WireMessage::CommandResult(CommandResultEnvelope {
+            protocol: CURRENT_PROTOCOL_VERSION,
+            command_id,
+            completed_at: UtcTimestamp::UNIX_EPOCH,
+            result,
+        })
+    }
+
+    fn envelope(encoded: &str) -> CommandEnvelope {
+        serde_json::from_str(encoded).unwrap()
+    }
+
+    #[test]
+    fn only_confirmed_prompts_become_safely_retryable() {
+        let mut projection = BrowserProjection::new();
+        let session = SessionId::new();
+        let first = envelope(
+            &projection
+                .submit_prompt(&session.to_string(), "confirmed request".into())
+                .unwrap(),
+        );
+        projection
+            .reduce(result(
+                first.command_id,
+                CommandResult::Accepted { action_id: None },
+            ))
+            .unwrap();
+
+        let uncertain = envelope(
+            &projection
+                .submit_prompt(&session.to_string(), "unknown outcome".into())
+                .unwrap(),
+        );
+        let retry = envelope(&projection.retry(&session.to_string()).unwrap());
+        assert!(matches!(
+            retry.command,
+            ClientCommand::SubmitPrompt(SubmitPrompt { text, .. }) if text == "confirmed request"
+        ));
+
+        let uncertain_id = uncertain.command_id.to_string();
+        projection
+            .reduce(result(
+                uncertain.command_id,
+                CommandResult::Rejected(CommandError {
+                    error: CommonError::new(
+                        ErrorCode::InvalidInput,
+                        "Request was not accepted",
+                        false,
+                    ),
+                    unsupported_feature: None,
+                }),
+            ))
+            .unwrap();
+        let view = projection.current_view().unwrap();
+        let parsed = serde_json::from_str::<serde_json::Value>(&view).unwrap();
+        assert_eq!(parsed["last_command"]["state"], "rejected");
+        assert_eq!(
+            parsed["last_command"]["message"],
+            "Request was not accepted"
+        );
+        assert!(!view.contains(&uncertain_id));
+    }
 }

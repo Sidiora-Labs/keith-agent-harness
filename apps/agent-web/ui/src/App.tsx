@@ -1,7 +1,8 @@
 import { createEffect, createResource, createSignal } from "solid-js"
 import { AppShell, type Destination } from "./AppShell"
 import { createBrowserProjection } from "./bridge"
-import type { BootstrapData, BrowserView } from "./types"
+import { createKeithConnection } from "./connection"
+import type { BootstrapData, BrowserView, SessionSummary } from "./types"
 
 export interface AppProps {
   bootstrap: BootstrapData
@@ -14,18 +15,31 @@ export function App(props: AppProps) {
   const [selectedSession, setSelectedSession] = createSignal(
     props.bootstrap.sessions[0]?.session_id
   )
+  const [sessions, setSessions] = createSignal<SessionSummary[]>(props.bootstrap.sessions)
   const [view, setView] = createSignal<BrowserView>(emptyView)
   const [bridge] = createResource(createBrowserProjection)
 
+  const controller = createKeithConnection({
+    bootstrap: props.bootstrap,
+    bridge: () => bridge(),
+    view,
+    setView,
+    sessions,
+    setSessions,
+    selectedSession,
+    setSelectedSession
+  })
+
   createEffect(() => {
     const projection = bridge()
-    if (!projection) return
+    if (!projection || selectedSession()) return
     setView(JSON.parse(projection.current_view()) as BrowserView)
   })
 
   const connectionLabel = () => {
-    if (bridge.loading) return "Opening Keith"
+    if (bridge.loading || controller.connectionState() === "opening") return "Opening Keith"
     if (bridge.error) return "Keith is unavailable"
+    if (controller.connectionState() === "reconnecting") return "Reconnecting"
     return view().personal?.presence.label ?? "Not connected"
   }
 
@@ -34,10 +48,11 @@ export function App(props: AppProps) {
       destination={destination}
       setDestination={setDestination}
       view={view}
-      sessions={props.bootstrap.sessions}
+      sessions={sessions()}
       selectedSession={selectedSession}
-      setSelectedSession={setSelectedSession}
+      setSelectedSession={controller.selectSession}
       connectionLabel={connectionLabel}
+      controller={controller}
     />
   )
 }

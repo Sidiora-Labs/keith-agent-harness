@@ -46,3 +46,4 @@ wasm-bindgen.workspace = true
 tempfile.workspace = true
 tungstenite.workspace = true
 ureq.workspace = true
+wasm-bindgen.workspace = true

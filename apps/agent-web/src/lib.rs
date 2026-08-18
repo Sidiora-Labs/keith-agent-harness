@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 mod client;
 #[cfg(not(target_arch = "wasm32"))]
 mod security;

@@ -1,5 +1,8 @@
-import { For, Show, createMemo, createSignal, type Accessor } from "solid-js"
+import { createVirtualizer } from "@tanstack/solid-virtual"
+import { For, Show, createEffect, createMemo, createSignal, type Accessor } from "solid-js"
+import type { KeithController } from "./connection"
 import type {
+  BrowserMessage,
   BrowserView,
   PersonalItem,
   PersonalProjection,
@@ -17,6 +20,7 @@ export interface ShellProps {
   selectedSession: Accessor<string | undefined>
   setSelectedSession: (session: string) => void
   connectionLabel: Accessor<string>
+  controller: KeithController
 }
 
 const destinations: Array<{ id: Exclude<Destination, "settings">; label: string }> = [
@@ -142,9 +146,10 @@ export function AppShell(props: ShellProps) {
           sessions={props.sessions}
           selectedSession={props.selectedSession}
           setSelectedSession={(session) => {
-            props.setSelectedSession(session)
+            props.controller.selectSession(session)
             choose("conversation")
           }}
+          newConversation={props.controller.newConversation}
         />
       </aside>
 
@@ -154,12 +159,14 @@ export function AppShell(props: ShellProps) {
             <HomeView
               personal={props.view().personal ?? undefined}
               messageKeith={() => choose("conversation")}
+              controller={props.controller}
             />
           </Show>
           <Show when={props.destination() === "work"}>
             <WorkView
               personal={props.view().personal ?? undefined}
               messageKeith={() => choose("conversation")}
+              controller={props.controller}
             />
           </Show>
           <Show when={props.destination() === "world"}>
@@ -180,13 +187,18 @@ export function AppShell(props: ShellProps) {
           selected={selected}
           selectedSession={props.selectedSession}
           setSelectedSession={props.setSelectedSession}
+          controller={props.controller}
         />
       </div>
     </div>
   )
 }
 
-function HomeView(props: { personal?: PersonalProjection; messageKeith: () => void }) {
+function HomeView(props: {
+  personal?: PersonalProjection
+  messageKeith: () => void
+  controller: KeithController
+}) {
   const hasBrief = () =>
     Boolean(
       props.personal &&
@@ -228,13 +240,23 @@ function HomeView(props: { personal?: PersonalProjection; messageKeith: () => vo
         </section>
       </Show>
       <Show when={(props.personal?.outputs.length ?? 0) > 0}>
-        <ItemSection title="Ready for you" items={props.personal?.outputs ?? []} tone="output" />
+        <ItemSection
+          title="Ready for you"
+          items={props.personal?.outputs ?? []}
+          tone="output"
+          openResult={props.messageKeith}
+          download={props.controller.exportResult}
+        />
       </Show>
     </div>
   )
 }
 
-function WorkView(props: { personal?: PersonalProjection; messageKeith: () => void }) {
+function WorkView(props: {
+  personal?: PersonalProjection
+  messageKeith: () => void
+  controller: KeithController
+}) {
   const total = () =>
     (props.personal?.work.length ?? 0) +
     (props.personal?.needs_you.length ?? 0) +
@@ -264,6 +286,13 @@ function WorkView(props: { personal?: PersonalProjection; messageKeith: () => vo
           <ItemSection title="Active" items={props.personal?.work ?? []} />
           <ItemSection title="Upcoming" items={props.personal?.upcoming ?? []} />
           <ItemSection title="Completed" items={props.personal?.completed ?? []} />
+          <ItemSection
+            title="Outputs"
+            items={props.personal?.outputs ?? []}
+            tone="output"
+            openResult={props.messageKeith}
+            download={props.controller.exportResult}
+          />
         </div>
       </Show>
     </div>
@@ -303,8 +332,9 @@ function ConversationPane(props: {
   selected: Accessor<SessionSummary | undefined>
   selectedSession: Accessor<string | undefined>
   setSelectedSession: (session: string) => void
+  controller: KeithController
 }) {
-  const messages = () => props.view().snapshot?.messages ?? []
+  const messages = stableMessages(() => props.view().snapshot?.messages ?? [])
   return (
     <section
       class="conversation-pane"
@@ -321,13 +351,68 @@ function ConversationPane(props: {
           <SessionList
             sessions={props.sessions}
             selectedSession={props.selectedSession}
-            setSelectedSession={props.setSelectedSession}
+            setSelectedSession={props.controller.selectSession}
+            newConversation={props.controller.newConversation}
           />
         </details>
       </header>
-      <div class="conversation-scroll" role="log" aria-live="polite" aria-relevant="additions text">
+      <ConversationHistory messages={messages} view={props.view} controller={props.controller} />
+      <ConversationComposer
+        selectedSession={props.selectedSession}
+        controller={props.controller}
+        presenceTone={() => props.view().personal?.presence.tone}
+      />
+    </section>
+  )
+}
+
+function ConversationHistory(props: {
+  messages: Accessor<BrowserMessage[]>
+  view: Accessor<BrowserView>
+  controller: KeithController
+}) {
+  let scroll: HTMLDivElement | undefined
+  const [nearTail, setNearTail] = createSignal(true)
+  const [newActivity, setNewActivity] = createSignal(false)
+  let previousCount = 0
+  const followTail = () => {
+    if (!scroll) return
+    scroll.scrollTop = scroll.scrollHeight
+    setNearTail(true)
+    setNewActivity(false)
+  }
+  createEffect(() => {
+    const count = props.messages().length
+    if (count > previousCount) {
+      queueMicrotask(() => {
+        if (nearTail()) followTail()
+        else setNewActivity(true)
+      })
+    }
+    previousCount = count
+  })
+  const approvals = () =>
+    (props.view().personal?.needs_you ?? []).filter(
+      (item) => item.reference.kind === "confirmation"
+    )
+  const outputs = () => props.view().personal?.outputs ?? []
+  return (
+    <div class="conversation-history">
+      <div
+        ref={scroll}
+        class="conversation-scroll"
+        role="log"
+        aria-live="off"
+        aria-label="Conversation history"
+        onScroll={() => {
+          if (!scroll) return
+          const isNear = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 120
+          setNearTail(isNear)
+          if (isNear) setNewActivity(false)
+        }}
+      >
         <Show
-          when={messages().length > 0}
+          when={props.messages().length > 0}
           fallback={
             <div class="conversation-empty">
               <p class="eyebrow">A quiet place to think together</p>
@@ -336,17 +421,171 @@ function ConversationPane(props: {
             </div>
           }
         >
-          <For each={messages()}>
-            {(message) => (
-              <article class="message" data-role={message.role}>
-                <p class="message-author">{message.role === "user" ? "You" : "Keith"}</p>
-                <p>{message.text}</p>
-              </article>
-            )}
-          </For>
+          <Show
+            when={props.messages().length > 60}
+            fallback={<For each={props.messages()}>{(message) => <MessageEntry message={message} />}</For>}
+          >
+            <VirtualConversation messages={props.messages} scroll={() => scroll} />
+          </Show>
+        </Show>
+        <Show when={props.view().personal?.presence.tone === "active" || props.view().personal?.presence.tone === "waiting"}>
+          <div class="activity-note" role="status">
+            <p>{props.view().personal?.presence.label}</p>
+            <Show when={props.view().personal?.presence.detail}>
+              <p>{props.view().personal?.presence.detail}</p>
+            </Show>
+          </div>
+        </Show>
+        <For each={approvals()}>
+          {(item) => <ConfirmationCard item={item} controller={props.controller} />}
+        </For>
+        <For each={outputs()}>
+          {(item) => <OutputCard item={item} controller={props.controller} open={followTail} />}
+        </For>
+        <Show when={props.view().snapshot?.terminal}>
+          {(terminal) => (
+            <section class="terminal-result" data-status={terminal().status}>
+              <p class="eyebrow">Result</p>
+              <h3>{terminalLabel(terminal().status)}</h3>
+              <Show when={terminal().detail}>
+                <p>{terminal().detail}</p>
+              </Show>
+            </section>
+          )}
         </Show>
       </div>
-      <form class="composer" aria-label="Message Keith">
+      <Show when={newActivity()}>
+        <button class="new-activity" type="button" onClick={followTail} aria-live="polite">
+          New activity
+        </button>
+      </Show>
+    </div>
+  )
+}
+
+function VirtualConversation(props: {
+  messages: Accessor<BrowserMessage[]>
+  scroll: Accessor<HTMLDivElement | undefined>
+}) {
+  let canvas: HTMLDivElement | undefined
+  const virtualizer = createVirtualizer<HTMLDivElement, HTMLElement>({
+    get count() {
+      return props.messages().length
+    },
+    getScrollElement: () => props.scroll() ?? null,
+    estimateSize: () => 104,
+    getItemKey: (index) => props.messages()[index]?.message_id ?? index,
+    overscan: 8
+  })
+  createEffect(() => {
+    canvas?.style.setProperty("--virtual-height", `${virtualizer.getTotalSize()}px`)
+  })
+  return (
+    <div class="virtual-conversation" ref={canvas}>
+      <For each={virtualizer.getVirtualItems()}>
+        {(row) => {
+          const message = () => props.messages()[row.index]
+          return (
+            <Show when={message()}>
+              {(entry) => (
+                <div
+                  class="virtual-message"
+                  data-index={row.index}
+                  ref={(element) => {
+                    element.style.setProperty("--virtual-offset", `${row.start}px`)
+                    virtualizer.measureElement(element)
+                  }}
+                >
+                  <MessageEntry message={entry()} />
+                </div>
+              )}
+            </Show>
+          )
+        }}
+      </For>
+    </div>
+  )
+}
+
+function MessageEntry(props: { message: BrowserMessage }) {
+  const author = () => {
+    if (props.message.role === "user") return "You"
+    if (props.message.role === "tool") return "Activity"
+    if (props.message.role === "system") return "Notice"
+    return "Keith"
+  }
+  return (
+    <article class="message" data-role={props.message.role}>
+      <p class="message-author">{author()}</p>
+      <SafeMessageContent text={props.message.text} />
+      <Show when={!props.message.committed}>
+        <p class="incomplete-label">Keith is responding</p>
+      </Show>
+    </article>
+  )
+}
+
+function SafeMessageContent(props: { text: string }) {
+  const blocks = createMemo(() => structuredBlocks(props.text))
+  return (
+    <div class="message-content">
+      <For each={blocks()}>
+        {(block) => (
+          <Show
+            when={block.kind === "code"}
+            fallback={
+              <Show
+                when={block.kind === "list"}
+                fallback={<p><SafeInline text={block.lines[0] ?? ""} /></p>}
+              >
+                <ul>
+                  <For each={block.lines}>{(line) => <li><SafeInline text={line} /></li>}</For>
+                </ul>
+              </Show>
+            }
+          >
+            <pre><code>{block.lines.join("\n")}</code></pre>
+          </Show>
+        )}
+      </For>
+    </div>
+  )
+}
+
+function SafeInline(props: { text: string }) {
+  return (
+    <For each={linkParts(props.text)}>
+      {(part) =>
+        part.href ? (
+          <a href={part.href} target="_blank" rel="noreferrer noopener">{part.text}</a>
+        ) : (
+          part.text
+        )
+      }
+    </For>
+  )
+}
+
+function ConversationComposer(props: {
+  selectedSession: Accessor<string | undefined>
+  controller: KeithController
+  presenceTone: Accessor<string | undefined>
+}) {
+  const canSend = () =>
+    Boolean(
+      props.selectedSession() &&
+        props.controller.draft().trim() &&
+        !props.controller.uncertain()
+    )
+  return (
+    <form
+      class="composer"
+      aria-label="Message Keith"
+      onSubmit={(event) => {
+        event.preventDefault()
+        void props.controller.send()
+      }}
+    >
         <label class="visually-hidden" for="message-keith">
           Message Keith
         </label>
@@ -355,19 +594,54 @@ function ConversationPane(props: {
           rows="1"
           maxlength="65536"
           placeholder="Message Keith"
+          value={props.controller.draft()}
+          onInput={(event) => props.controller.setDraft(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault()
+              if (canSend()) void props.controller.send()
+            }
+          }}
           disabled={!props.selectedSession()}
           aria-describedby="composer-explanation"
         />
-        <button type="submit" disabled={!props.selectedSession()}>
+        <button type="submit" disabled={!canSend() || props.controller.sending()}>
           Send
         </button>
+        <div class="conversation-actions" aria-label="Conversation actions">
+          <button type="button" disabled={!canSend() || props.controller.sending()} onClick={() => void props.controller.steer()}>
+            Guide
+          </button>
+          <Show when={props.presenceTone() === "active" || props.presenceTone() === "waiting"}>
+            <button type="button" disabled={props.controller.sending()} onClick={() => void props.controller.stop()}>
+              Stop
+            </button>
+          </Show>
+          <Show when={!props.controller.uncertain()}>
+            <details>
+              <summary>More</summary>
+              <div class="more-actions">
+                <button type="button" onClick={() => void props.controller.retry()}>Try last message again</button>
+                <button type="button" onClick={() => void props.controller.branch()}>Start a new path here</button>
+                <button type="button" onClick={() => void props.controller.resume()}>Continue</button>
+              </div>
+            </details>
+          </Show>
+        </div>
+        <Show when={props.controller.notice()}>
+          <p class="composer-notice" role="status">{props.controller.notice()}</p>
+        </Show>
+        <Show when={props.controller.uncertain()}>
+          <button class="safe-recovery" type="button" onClick={props.controller.recover}>
+            Refresh what Keith knows
+          </button>
+        </Show>
         <p id="composer-explanation">
           {props.selectedSession()
             ? "Enter sends. Shift-Enter adds a new line."
             : "Choose a conversation before sending a message."}
         </p>
       </form>
-    </section>
   )
 }
 
@@ -375,10 +649,16 @@ function SessionList(props: {
   sessions: SessionSummary[]
   selectedSession: Accessor<string | undefined>
   setSelectedSession: (session: string) => void
+  newConversation?: () => Promise<void>
 }) {
   return (
     <div class="session-list" aria-label="Conversations">
       <p class="section-label">Conversations</p>
+      <Show when={props.newConversation}>
+        <button type="button" class="new-conversation" onClick={() => void props.newConversation?.()}>
+          New conversation
+        </button>
+      </Show>
       <Show
         when={props.sessions.length > 0}
         fallback={<p class="quiet-copy">Your conversations will appear here.</p>}
@@ -438,6 +718,8 @@ function ItemSection(props: {
   title: string
   items: PersonalItem[]
   tone?: "attention" | "output"
+  openResult?: () => void
+  download?: () => Promise<void>
 }) {
   return (
     <Show when={props.items.length > 0}>
@@ -454,6 +736,12 @@ function ItemSection(props: {
                   </Show>
                 </div>
                 <p class="state-label">{item.state_label}</p>
+                <Show when={props.tone === "output"}>
+                  <div class="item-actions">
+                    <button type="button" onClick={props.openResult}>Open</button>
+                    <button type="button" onClick={() => void props.download?.()}>Download</button>
+                  </div>
+                </Show>
               </article>
             )}
           </For>
@@ -461,6 +749,119 @@ function ItemSection(props: {
       </section>
     </Show>
   )
+}
+
+function ConfirmationCard(props: { item: PersonalItem; controller: KeithController }) {
+  return (
+    <section class="confirmation-card" aria-label="Keith needs your decision">
+      <p class="eyebrow">Keith needs your decision</p>
+      <h3>{props.item.title}</h3>
+      <Show when={props.item.detail}><p>{props.item.detail}</p></Show>
+      <dl>
+        <div><dt>Applies to</dt><dd>Only this step in this conversation</dd></div>
+        <div><dt>If allowed</dt><dd>Keith will carry out the action described above once</dd></div>
+      </dl>
+      <div class="decision-actions">
+        <button type="button" onClick={() => void props.controller.decide(props.item, true)}>Allow once</button>
+        <button type="button" onClick={() => void props.controller.decide(props.item, false)}>Deny</button>
+      </div>
+    </section>
+  )
+}
+
+function OutputCard(props: { item: PersonalItem; controller: KeithController; open: () => void }) {
+  return (
+    <section class="output-card">
+      <p class="eyebrow">Ready for you</p>
+      <h3>{props.item.title}</h3>
+      <Show when={props.item.detail}><p>{props.item.detail}</p></Show>
+      <div class="output-actions">
+        <button type="button" onClick={props.open}>Open</button>
+        <button type="button" onClick={() => void props.controller.exportResult()}>Download</button>
+        <details>
+          <summary>Provenance</summary>
+          <p>Created by Keith from the completed work in this conversation.</p>
+        </details>
+      </div>
+    </section>
+  )
+}
+
+type StructuredBlock = { kind: "paragraph" | "list" | "code"; lines: string[] }
+
+export function structuredBlocks(value: string): StructuredBlock[] {
+  const safe = terminalSafe(value)
+  const blocks: StructuredBlock[] = []
+  let inCode = false
+  let pending: string[] = []
+  const flush = () => {
+    if (!pending.length) return
+    const list = !inCode && pending.every((line) => /^\s*[-*]\s+/.test(line))
+    blocks.push({
+      kind: inCode ? "code" : list ? "list" : "paragraph",
+      lines: list ? pending.map((line) => line.replace(/^\s*[-*]\s+/, "")) : [pending.join("\n")]
+    })
+    pending = []
+  }
+  for (const line of safe.split("\n")) {
+    if (line.trimStart().startsWith("```")) {
+      flush()
+      inCode = !inCode
+    } else if (!inCode && line.trim() === "") {
+      flush()
+    } else {
+      pending.push(line)
+    }
+  }
+  flush()
+  return blocks.length ? blocks : [{ kind: "paragraph", lines: [""] }]
+}
+
+function linkParts(value: string): Array<{ text: string; href?: string }> {
+  return value.split(/(https?:\/\/[^\s]+)/g).filter(Boolean).map((text) => {
+    if (!text.startsWith("http")) return { text }
+    try {
+      const url = new URL(text)
+      return url.protocol === "http:" || url.protocol === "https:" ? { text, href: url.href } : { text }
+    } catch {
+      return { text }
+    }
+  })
+}
+
+function terminalSafe(value: string): string {
+  return [...value]
+    .map((character) =>
+      character < " " && character !== "\n" && character !== "\t" ? "�" : character
+    )
+    .join("")
+}
+
+function terminalLabel(status: "completed" | "failed" | "cancelled" | "exhausted"): string {
+  if (status === "completed") return "Finished"
+  if (status === "cancelled") return "Stopped"
+  if (status === "exhausted") return "Keith reached the available limit"
+  return "Keith could not finish"
+}
+
+function stableMessages(source: Accessor<BrowserMessage[]>): Accessor<BrowserMessage[]> {
+  let previous = new Map<string, BrowserMessage>()
+  return createMemo(() => {
+    const next = new Map<string, BrowserMessage>()
+    const messages = source().map((message) => {
+      const existing = previous.get(message.message_id)
+      const stable = existing && sameMessage(existing, message) ? existing : message
+      next.set(message.message_id, stable)
+      return stable
+    })
+    previous = next
+    return messages
+  })
+}
+
+function sameMessage(left: BrowserMessage, right: BrowserMessage): boolean {
+  return left.message_id === right.message_id && left.final_id === right.final_id &&
+    left.role === right.role && left.text === right.text && left.committed === right.committed
 }
 
 function PageHeading(props: { eyebrow: string; title: string; detail: string }) {

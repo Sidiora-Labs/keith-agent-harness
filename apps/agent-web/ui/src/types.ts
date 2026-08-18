@@ -34,13 +34,18 @@ export interface PersonalPresence {
 }
 
 export interface PersonalItem {
-  reference: unknown
+  reference: PersonalReference
   kind: string
   title: string
   detail?: string
   state_label: string
   occurred_at?: string
 }
+
+export type PersonalReference =
+  | { kind: "action" | "goal" | "plan" | "child" | "tool" | "commitment"; id: string }
+  | { kind: "schedule" | "confirmation" | "wait" | "delivery" | "memory"; id: string }
+  | { kind: "final"; id: { turn_id: string; final_id: string } }
 
 export interface PersonalProjection {
   session_id: string
@@ -58,7 +63,14 @@ export interface BrowserView {
   snapshot?: BrowserSnapshot | null
   personal?: PersonalProjection | null
   resume?: ResumeCursor | null
+  sessions?: SessionSummary[]
+  last_command?: BrowserCommandReceipt | null
   snapshot_required: boolean
+}
+
+export interface BrowserCommandReceipt {
+  state: "accepted" | "updated" | "rejected"
+  message: string
 }
 
 export interface BrowserMessage {
@@ -70,14 +82,18 @@ export interface BrowserMessage {
 }
 
 export interface BrowserSnapshot {
+  session: SessionSummary
   messages: BrowserMessage[]
+  confirmations: Array<{ confirmation_id: string; summary: string }>
   presence: {
     state: string
     updated_at: string
+    safe_error?: string
   }
   terminal?: {
     status: "completed" | "failed" | "cancelled" | "exhausted"
     detail?: string
+    artifacts_persisted: boolean
   }
 }
 

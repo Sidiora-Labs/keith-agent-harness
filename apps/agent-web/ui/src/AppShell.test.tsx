@@ -1,7 +1,8 @@
 import { createSignal } from "solid-js"
 import { render } from "solid-js/web"
 import { afterEach, describe, expect, it } from "vitest"
-import { AppShell, type Destination } from "./AppShell"
+import { AppShell, structuredBlocks, type Destination } from "./AppShell"
+import type { KeithController } from "./connection"
 import type { BrowserView, SessionSummary } from "./types"
 
 const sessions: SessionSummary[] = [
@@ -31,6 +32,27 @@ function mount(view: BrowserView = { snapshot_required: false }) {
   const [selectedSession, setSelectedSession] = createSignal<string | undefined>(
     sessions[0]?.session_id
   )
+  const [draft, setDraft] = createSignal("")
+  const [notice] = createSignal<string>()
+  const controller: KeithController = {
+    draft,
+    setDraft,
+    notice,
+    uncertain: () => false,
+    sending: () => false,
+    connectionState: () => "connected",
+    selectSession: setSelectedSession,
+    send: async () => {},
+    steer: async () => {},
+    stop: async () => {},
+    retry: async () => {},
+    branch: async () => {},
+    resume: async () => {},
+    newConversation: async () => {},
+    decide: async () => {},
+    exportResult: async () => {},
+    recover: () => {}
+  }
   dispose = render(
     () => (
       <AppShell
@@ -41,6 +63,7 @@ function mount(view: BrowserView = { snapshot_required: false }) {
         selectedSession={selectedSession}
         setSelectedSession={setSelectedSession}
         connectionLabel={() => "Not connected"}
+        controller={controller}
       />
     ),
     host
@@ -98,7 +121,7 @@ describe("consumer personal intelligence shell", () => {
         work: [],
         needs_you: [
           {
-            reference: {},
+            reference: { kind: "confirmation", id: "internal-confirmation" },
             kind: "decision",
             title: "Choose the travel dates",
             state_label: "Needs your decision"
@@ -113,5 +136,103 @@ describe("consumer personal intelligence shell", () => {
     expect(host.textContent).toContain("Choose the travel dates")
     expect(host.textContent).toContain("Needs your decision")
     expect(host.textContent).not.toContain("Nothing needs your attention right now")
+    expect(host.innerHTML).not.toContain("internal-confirmation")
+  })
+
+  it("keeps drafts mounted across navigation and exposes every safe conversation action", () => {
+    const host = mount()
+    const textarea = host.querySelector("textarea")
+    if (!(textarea instanceof HTMLTextAreaElement)) throw new Error("composer unavailable")
+    textarea.value = "Keep this thought"
+    textarea.dispatchEvent(new InputEvent("input", { bubbles: true }))
+    const work = [...host.querySelectorAll("nav button")].find(
+      (button) => button.textContent?.trim() === "Work"
+    )
+    click(work ?? null)
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("Keep this thought")
+    for (const action of [
+      "Send",
+      "Guide",
+      "Try last message again",
+      "Start a new path here",
+      "Continue",
+      "New conversation"
+    ]) {
+      expect(host.textContent).toContain(action)
+    }
+  })
+
+  it("renders structured text and control bytes without unsafe HTML", () => {
+    const host = mount({
+      snapshot_required: false,
+      snapshot: {
+        session: sessions[0]!,
+        messages: [
+          {
+            message_id: "internal-message",
+            role: "assistant",
+            text: "A safe link https://example.com\n\n- one\n- two\n\n```js\nconst safe = true\n```\n\u001b<script>bad()</script>",
+            committed: false
+          }
+        ],
+        confirmations: [],
+        presence: { state: "thinking", updated_at: "1970-01-01T00:00:00Z" }
+      }
+    })
+    expect(host.querySelectorAll(".message-content li")).toHaveLength(2)
+    expect(host.querySelector(".message-content code")?.textContent).toContain("const safe = true")
+    expect(host.querySelector(".message-content a")?.getAttribute("href")).toBe(
+      "https://example.com/"
+    )
+    expect(host.querySelector("script")).toBeNull()
+    expect(host.textContent).toContain("�<script>bad()</script>")
+    expect(host.textContent).toContain("Keith is responding")
+    expect(host.innerHTML).not.toContain("internal-message")
+  })
+
+  it("publishes natural decisions and output provenance without exposing references", () => {
+    const host = mount({
+      snapshot_required: false,
+      personal: {
+        session_id: sessions[0]!.session_id,
+        session_title: "Plan the family trip",
+        presence: { tone: "needs_you", label: "Needs you", updated_at: "1970-01-01T00:00:00Z" },
+        work: [],
+        needs_you: [{
+          reference: { kind: "confirmation", id: "secret-decision-reference" },
+          kind: "decision",
+          title: "Book the refundable fare",
+          detail: "This will place the reservation.",
+          state_label: "Needs your decision"
+        }],
+        completed: [],
+        upcoming: [],
+        saved_context: [],
+        outputs: [{
+          reference: { kind: "final", id: { turn_id: "turn", final_id: "final" } },
+          kind: "output",
+          title: "Trip plan",
+          state_label: "Completed"
+        }]
+      }
+    })
+    for (const copy of [
+      "Only this step in this conversation",
+      "Allow once",
+      "Deny",
+      "Download",
+      "Provenance"
+    ]) {
+      expect(host.textContent).toContain(copy)
+    }
+    expect(host.innerHTML).not.toContain("secret-decision-reference")
+  })
+
+  it("groups paragraphs, lists, and fenced code deterministically", () => {
+    expect(structuredBlocks("First\n\n- one\n- two\n\n```\ncode\n```")).toEqual([
+      { kind: "paragraph", lines: ["First"] },
+      { kind: "list", lines: ["one", "two"] },
+      { kind: "code", lines: ["code"] }
+    ])
   })
 })
