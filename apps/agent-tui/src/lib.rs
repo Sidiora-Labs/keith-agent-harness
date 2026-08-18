@@ -4,13 +4,13 @@ mod connection;
 mod render;
 
 pub use connection::*;
-pub use render::render;
+pub use render::{render, settled_transcript_lines};
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use keith_agent_types::{
-    ChildId, ClientId, CommandId, EntityId, GoalId, JobId, SessionId, UtcTimestamp,
+    ChildId, ClientId, CommandId, EntityId, GoalId, JobId, MessageId, SessionId, UtcTimestamp,
 };
 use keith_protocol::{
     AttachSession, BackgroundControl, BackgroundMode, CancelTarget, ChildMessageRequest,
@@ -21,7 +21,7 @@ use keith_protocol::{
 };
 use keith_ui_model::{
     ClientParity, OperatorCommand, OperatorSurface, ProjectionReducer, ReductionOutcome,
-    VirtualizationConfig,
+    VirtualizationConfig, project_personal_intelligence,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -30,6 +30,21 @@ pub use keith_ui_model::OperatorSurface as Surface;
 pub const MAX_COMPOSER_BYTES: usize = 64 * 1_024;
 pub const MAX_LOG_LINES: usize = 512;
 pub const MAX_PENDING_COMMANDS: usize = 128;
+
+const OVERLAY_COMMANDS: [(&str, &str); 12] = [
+    ("Continue this conversation", "/resume"),
+    ("Choose a conversation", "/sessions"),
+    ("Choose a model", "/models"),
+    ("Review decisions", "/approvals"),
+    ("See current work", "/work"),
+    ("Search saved context", "/memory "),
+    ("Create a goal", "/goal "),
+    ("Delegate work", "/child "),
+    ("Create a schedule", "/schedule "),
+    ("Export this conversation", "/export markdown"),
+    ("Stop the current turn", "/stop"),
+    ("Open diagnostics", "/diagnostics"),
+];
 
 pub fn client_parity() -> ClientParity {
     ClientParity {
@@ -69,9 +84,46 @@ pub enum AppAction {
     OpenExternalEditor,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TuiOverlay {
+    Sessions,
+    Commands,
+    Models,
+    Approvals,
+    Work,
+    Memory,
+    Diagnostics,
+}
+
+impl TuiOverlay {
+    pub const ALL: [Self; 7] = [
+        Self::Sessions,
+        Self::Commands,
+        Self::Models,
+        Self::Approvals,
+        Self::Work,
+        Self::Memory,
+        Self::Diagnostics,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Sessions => "Conversations",
+            Self::Commands => "Commands",
+            Self::Models => "Models",
+            Self::Approvals => "Needs your decision",
+            Self::Work => "Work",
+            Self::Memory => "Saved context",
+            Self::Diagnostics => "Diagnostics",
+        }
+    }
+}
+
 pub struct TuiApp {
     pub client_id: ClientId,
-    pub surface: Surface,
+    pub overlay: Option<TuiOverlay>,
+    pub overlay_query: String,
+    pub overlay_selection: usize,
     pub accessibility: Accessibility,
     pub composer: String,
     pub cursor_byte: usize,
@@ -83,6 +135,7 @@ pub struct TuiApp {
     pub quit: bool,
     pub scroll_from_end: usize,
     pub last_prompt: Option<String>,
+    settled_messages: HashMap<MessageId, String>,
     in_flight_commands: usize,
     pending_commands: VecDeque<ClientCommand>,
     logs: VecDeque<String>,
@@ -92,7 +145,9 @@ impl TuiApp {
     pub fn new(accessibility: Accessibility) -> Self {
         Self {
             client_id: ClientId::new(),
-            surface: Surface::Chat,
+            overlay: None,
+            overlay_query: String::new(),
+            overlay_selection: 0,
             accessibility,
             composer: String::new(),
             cursor_byte: 0,
@@ -104,6 +159,7 @@ impl TuiApp {
             quit: false,
             scroll_from_end: 0,
             last_prompt: None,
+            settled_messages: HashMap::new(),
             in_flight_commands: 0,
             pending_commands: VecDeque::new(),
             logs: VecDeque::new(),
@@ -112,6 +168,44 @@ impl TuiApp {
 
     pub fn logs(&self) -> &VecDeque<String> {
         &self.logs
+    }
+
+    pub fn open_overlay(&mut self, overlay: TuiOverlay) {
+        self.overlay = Some(overlay);
+        self.overlay_query.clear();
+        self.overlay_selection = 0;
+        if overlay == TuiOverlay::Sessions {
+            self.list_sessions();
+        }
+    }
+
+    pub fn pending_settled_messages(&self) -> Vec<keith_protocol::MessageProjection> {
+        self.reducer.as_ref().map_or_else(Vec::new, |reducer| {
+            reducer
+                .snapshot()
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.committed
+                        && self
+                            .settled_messages
+                            .get(&message.message_id)
+                            .is_none_or(|text| text != &message.text)
+                })
+                .cloned()
+                .collect()
+        })
+    }
+
+    pub fn mark_message_settled(&mut self, message: &keith_protocol::MessageProjection) {
+        self.settled_messages
+            .insert(message.message_id.clone(), message.text.clone());
+    }
+
+    pub fn is_message_settled(&self, message: &keith_protocol::MessageProjection) -> bool {
+        self.settled_messages
+            .get(&message.message_id)
+            .is_some_and(|text| text == &message.text)
     }
 
     pub fn pending_len(&self) -> usize {
@@ -211,22 +305,22 @@ impl TuiApp {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
+        if self.overlay.is_some() {
+            return self.handle_overlay_key(key);
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return self.handle_control_key(key.code);
         }
         match key.code {
             KeyCode::Tab => {
-                self.next_surface();
+                self.open_overlay(TuiOverlay::Commands);
                 AppAction::Redraw
             }
             KeyCode::BackTab => {
-                self.previous_surface();
+                self.open_overlay(TuiOverlay::Sessions);
                 AppAction::Redraw
             }
-            KeyCode::Esc => {
-                self.surface = Surface::Chat;
-                AppAction::Redraw
-            }
+            KeyCode::Esc => AppAction::Redraw,
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.insert_text("\n");
                 AppAction::Redraw
@@ -284,6 +378,263 @@ impl TuiApp {
         let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
         self.insert_text(&normalized);
         AppAction::Redraw
+    }
+
+    pub fn overlay_rows(&self) -> Vec<String> {
+        let Some(overlay) = self.overlay else {
+            return Vec::new();
+        };
+        let query = self.overlay_query.to_lowercase();
+        let matches = |value: &str| query.is_empty() || value.to_lowercase().contains(&query);
+        match overlay {
+            TuiOverlay::Sessions => self
+                .sessions
+                .iter()
+                .filter_map(|session| {
+                    let title = session.title.as_deref().unwrap_or("New conversation");
+                    matches(title).then(|| title.to_owned())
+                })
+                .collect(),
+            TuiOverlay::Commands => OVERLAY_COMMANDS
+                .iter()
+                .filter(|(label, command)| matches(label) || matches(command))
+                .map(|(label, command)| format!("{label}  {command}"))
+                .collect(),
+            TuiOverlay::Models => keith_provider_catalog::BUILTIN_PROVIDERS
+                .iter()
+                .filter(|provider| {
+                    matches(provider.display_name)
+                        || matches(provider.id)
+                        || matches(provider.default_model)
+                })
+                .map(|provider| format!("{}  {}", provider.display_name, provider.default_model))
+                .collect(),
+            TuiOverlay::Approvals => self.reducer.as_ref().map_or_else(Vec::new, |reducer| {
+                reducer
+                    .snapshot()
+                    .confirmations
+                    .iter()
+                    .filter(|confirmation| matches(&confirmation.summary))
+                    .map(|confirmation| confirmation.summary.clone())
+                    .collect()
+            }),
+            TuiOverlay::Work => self.reducer.as_ref().map_or_else(Vec::new, |reducer| {
+                let personal = project_personal_intelligence(reducer.snapshot());
+                personal
+                    .needs_you
+                    .iter()
+                    .chain(&personal.work)
+                    .chain(&personal.upcoming)
+                    .chain(&personal.completed)
+                    .filter(|item| matches(&item.title) || matches(&item.state_label))
+                    .map(|item| format!("{}  {}", item.state_label, item.title))
+                    .collect()
+            }),
+            TuiOverlay::Memory => self.reducer.as_ref().map_or_else(Vec::new, |reducer| {
+                project_personal_intelligence(reducer.snapshot())
+                    .saved_context
+                    .into_iter()
+                    .filter(|item| matches(&item.title) || matches(&item.state_label))
+                    .map(|item| format!("{}  {}", item.state_label, item.title))
+                    .collect()
+            }),
+            TuiOverlay::Diagnostics => self
+                .diagnostic_rows()
+                .into_iter()
+                .filter(|row| matches(row))
+                .collect(),
+        }
+    }
+
+    fn diagnostic_rows(&self) -> Vec<String> {
+        let Some(reducer) = &self.reducer else {
+            return vec!["No conversation is attached".into()];
+        };
+        let snapshot = reducer.snapshot();
+        vec![
+            format!("Generation {}", snapshot.generation.get()),
+            format!("Sequence {}", snapshot.through_sequence.get()),
+            format!("Projection revision {}", snapshot.revision.get()),
+            format!("Stream {:?}", reducer.stream_state()),
+            format!("Composer width {}", self.composer_display_width()),
+            format!("Queued commands {}", self.pending_len()),
+            format!("In-flight commands {}", self.in_flight_len()),
+        ]
+    }
+
+    fn handle_overlay_key(&mut self, key: KeyEvent) -> AppAction {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c' | 'q'))
+        {
+            self.quit = true;
+            return AppAction::Quit;
+        }
+        if key.modifiers.contains(KeyModifiers::ALT)
+            && matches!(key.code, KeyCode::Char('a' | 'd'))
+            && self.overlay == Some(TuiOverlay::Approvals)
+        {
+            let allow = key.code == KeyCode::Char('a');
+            self.resolve_selected_confirmation(allow);
+            self.overlay = None;
+            return AppAction::Redraw;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.overlay = None;
+                self.overlay_query.clear();
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                let current = self.overlay.unwrap_or(TuiOverlay::Commands);
+                let index = TuiOverlay::ALL
+                    .iter()
+                    .position(|candidate| *candidate == current)
+                    .unwrap_or(0);
+                let step = if key.code == KeyCode::Tab {
+                    1
+                } else {
+                    TuiOverlay::ALL.len() - 1
+                };
+                self.open_overlay(TuiOverlay::ALL[(index + step) % TuiOverlay::ALL.len()]);
+            }
+            KeyCode::Up => self.overlay_selection = self.overlay_selection.saturating_sub(1),
+            KeyCode::Down => {
+                self.overlay_selection = self
+                    .overlay_selection
+                    .saturating_add(1)
+                    .min(self.overlay_rows().len().saturating_sub(1));
+            }
+            KeyCode::Backspace => {
+                self.overlay_query.pop();
+                self.overlay_selection = 0;
+            }
+            KeyCode::Enter => self.activate_overlay_selection(),
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::SUPER) =>
+            {
+                self.overlay_query.push(character);
+                self.overlay_selection = 0;
+            }
+            _ => return AppAction::None,
+        }
+        AppAction::Redraw
+    }
+
+    fn activate_overlay_selection(&mut self) {
+        match self.overlay {
+            Some(TuiOverlay::Sessions) => {
+                let query = self.overlay_query.to_lowercase();
+                let selected = self
+                    .sessions
+                    .iter()
+                    .filter(|session| {
+                        query.is_empty()
+                            || session
+                                .title
+                                .as_deref()
+                                .unwrap_or("New conversation")
+                                .to_lowercase()
+                                .contains(&query)
+                    })
+                    .nth(self.overlay_selection)
+                    .map(|session| session.session_id.clone());
+                if let Some(session_id) = selected {
+                    self.attach(session_id);
+                    self.overlay = None;
+                }
+            }
+            Some(TuiOverlay::Commands) => {
+                let query = self.overlay_query.to_lowercase();
+                let selected = OVERLAY_COMMANDS
+                    .iter()
+                    .filter(|(label, command)| {
+                        query.is_empty()
+                            || label.to_lowercase().contains(&query)
+                            || command.contains(&query)
+                    })
+                    .nth(self.overlay_selection)
+                    .map(|(_, command)| *command);
+                if let Some(command) = selected {
+                    self.apply_palette_command(command);
+                }
+            }
+            Some(TuiOverlay::Models) => {
+                let query = self.overlay_query.to_lowercase();
+                let selected = keith_provider_catalog::BUILTIN_PROVIDERS
+                    .iter()
+                    .filter(|provider| {
+                        query.is_empty()
+                            || provider.display_name.to_lowercase().contains(&query)
+                            || provider.id.contains(&query)
+                            || provider.default_model.contains(&query)
+                    })
+                    .nth(self.overlay_selection)
+                    .map(|provider| (provider.id.to_owned(), provider.default_model.to_owned()));
+                if let Some((provider, model)) = selected {
+                    self.select_model(provider, model);
+                    self.overlay = None;
+                }
+            }
+            Some(
+                TuiOverlay::Approvals
+                | TuiOverlay::Work
+                | TuiOverlay::Memory
+                | TuiOverlay::Diagnostics,
+            )
+            | None => {}
+        }
+    }
+
+    fn apply_palette_command(&mut self, command: &str) {
+        match command {
+            "/sessions" => self.open_overlay(TuiOverlay::Sessions),
+            "/models" => self.open_overlay(TuiOverlay::Models),
+            "/approvals" => self.open_overlay(TuiOverlay::Approvals),
+            "/work" => self.open_overlay(TuiOverlay::Work),
+            "/diagnostics" => self.open_overlay(TuiOverlay::Diagnostics),
+            "/stop" => {
+                if let Some(session_id) = self.attached_session.clone() {
+                    self.enqueue(ClientCommand::Cancel(CancelTarget::Session(session_id)));
+                }
+                self.overlay = None;
+            }
+            "/resume" => {
+                if let Some(session_id) = self.attached_session.clone() {
+                    self.enqueue(ClientCommand::ResumeSession { session_id });
+                }
+                self.overlay = None;
+            }
+            command => {
+                self.replace_composer(command.to_owned());
+                self.overlay = None;
+            }
+        }
+    }
+
+    fn resolve_selected_confirmation(&mut self, allow: bool) {
+        let query = self.overlay_query.to_lowercase();
+        let confirmation = self.reducer.as_ref().and_then(|reducer| {
+            reducer
+                .snapshot()
+                .confirmations
+                .iter()
+                .filter(|confirmation| {
+                    query.is_empty() || confirmation.summary.to_lowercase().contains(&query)
+                })
+                .nth(self.overlay_selection)
+                .map(|confirmation| confirmation.confirmation_id.clone())
+        });
+        if let Some(confirmation_id) = confirmation {
+            self.resolve_confirmation(
+                confirmation_id,
+                if allow {
+                    keith_protocol::ConfirmationDecision::AllowOnce
+                } else {
+                    keith_protocol::ConfirmationDecision::Deny
+                },
+            );
+        }
     }
 
     pub fn replace_composer(&mut self, content: String) {
@@ -402,8 +753,27 @@ impl TuiApp {
                 AppAction::Redraw
             }
             KeyCode::Char('s') => {
-                self.surface = Surface::Sessions;
-                self.list_sessions();
+                self.open_overlay(TuiOverlay::Sessions);
+                AppAction::Redraw
+            }
+            KeyCode::Char('p') => {
+                self.open_overlay(TuiOverlay::Commands);
+                AppAction::Redraw
+            }
+            KeyCode::Char('m') => {
+                self.open_overlay(TuiOverlay::Models);
+                AppAction::Redraw
+            }
+            KeyCode::Char('g') => {
+                self.open_overlay(TuiOverlay::Work);
+                AppAction::Redraw
+            }
+            KeyCode::Char('y') => {
+                self.open_overlay(TuiOverlay::Memory);
+                AppAction::Redraw
+            }
+            KeyCode::Char('d') => {
+                self.open_overlay(TuiOverlay::Approvals);
                 AppAction::Redraw
             }
             KeyCode::Char('u') => {
@@ -475,24 +845,37 @@ impl TuiApp {
             deadline: None,
         };
         match command {
-            "/goal" if !argument.is_empty() => self.enqueue(ClientCommand::CreateGoal(
-                CreateGoal {
+            "/sessions" => self.open_overlay(TuiOverlay::Sessions),
+            "/commands" | "/help" => self.open_overlay(TuiOverlay::Commands),
+            "/models" => self.open_overlay(TuiOverlay::Models),
+            "/approvals" => self.open_overlay(TuiOverlay::Approvals),
+            "/work" => self.open_overlay(TuiOverlay::Work),
+            "/memory" if argument.is_empty() => self.open_overlay(TuiOverlay::Memory),
+            "/diagnostics" => self.open_overlay(TuiOverlay::Diagnostics),
+            "/stop" => self.enqueue(ClientCommand::Cancel(CancelTarget::Session(
+                session_id.clone(),
+            ))),
+            "/resume" => self.enqueue(ClientCommand::ResumeSession {
+                session_id: session_id.clone(),
+            }),
+            "/goal" if !argument.is_empty() => {
+                self.enqueue(ClientCommand::CreateGoal(CreateGoal {
                     session_id: session_id.clone(),
                     objective: argument.into(),
                     limits: limits(),
-                },
-            )),
+                }));
+            }
             "/goals" => self.enqueue(ClientCommand::ListGoals {
                 session_id: session_id.clone(),
             }),
-            "/child" if !argument.is_empty() => self.enqueue(ClientCommand::CreateChild(
-                CreateChild {
+            "/child" if !argument.is_empty() => {
+                self.enqueue(ClientCommand::CreateChild(CreateChild {
                     parent_session_id: session_id.clone(),
                     objective: argument.into(),
                     workspace_mode: ChildWorkspaceMode::SharedWorkspace,
                     limits: limits(),
-                },
-            )),
+                }));
+            }
             "/children" => self.enqueue(ClientCommand::ListChildren {
                 session_id: session_id.clone(),
             }),
@@ -640,9 +1023,6 @@ impl TuiApp {
                     pause_until: None,
                 }));
             }
-            "/help" => self.log(
-                "Commands: /model /goal /goals /child /children /child-message /archive-child /memory /schedule /pause-schedule /resume-schedule /delete-schedule /export /select-branch /cancel-goal /cancel-child /background",
-            ),
             _ if input.starts_with('/') => {
                 self.log("Unknown command. Use /help for available commands");
             }
@@ -675,13 +1055,17 @@ impl TuiApp {
         let Some(message) = reducer.snapshot().messages.last() else {
             return;
         };
+        let Some(parent_entry_id) = message.final_id.clone() else {
+            self.log("A completed Keith reply is required before branching");
+            return;
+        };
         let Some(session_id) = self.attached_session.clone() else {
             return;
         };
         self.enqueue(ClientCommand::BranchSession(
             keith_protocol::BranchRequest {
                 session_id,
-                parent_entry_id: message.message_id.as_entity_id().clone(),
+                parent_entry_id: parent_entry_id.0,
                 label: None,
             },
         ));
@@ -690,6 +1074,14 @@ impl TuiApp {
     fn apply_snapshot(&mut self, snapshot: keith_protocol::SessionSnapshot) {
         let virtualization = VirtualizationConfig::new(2_048, 256, 16)
             .expect("fixed virtualization limits are valid");
+        let replace = self.reducer.as_ref().is_some_and(|reducer| {
+            reducer.snapshot().session.session_id != snapshot.session.session_id
+                || reducer.snapshot().session.root_tree_id != snapshot.session.root_tree_id
+        });
+        if replace {
+            self.reducer = None;
+            self.settled_messages.clear();
+        }
         match &mut self.reducer {
             Some(reducer) => {
                 if let Err(error) = reducer.apply_snapshot(snapshot) {
@@ -716,22 +1108,6 @@ impl TuiApp {
         while self.logs.len() > MAX_LOG_LINES {
             self.logs.pop_front();
         }
-    }
-
-    fn next_surface(&mut self) {
-        let index = Surface::ALL
-            .iter()
-            .position(|surface| *surface == self.surface)
-            .unwrap_or(0);
-        self.surface = Surface::ALL[(index + 1) % Surface::ALL.len()];
-    }
-
-    fn previous_surface(&mut self) {
-        let index = Surface::ALL
-            .iter()
-            .position(|surface| *surface == self.surface)
-            .unwrap_or(0);
-        self.surface = Surface::ALL[(index + Surface::ALL.len() - 1) % Surface::ALL.len()];
     }
 
     fn insert_text(&mut self, text: &str) {
@@ -892,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn every_operator_surface_is_keyboard_reachable_and_renderable_at_all_widths() {
+    fn every_temporary_overlay_is_searchable_and_conversation_survives_all_widths() {
         assert!(client_parity().is_full());
         for mode in [
             ColorMode::TrueColor,
@@ -905,20 +1281,24 @@ mod tests {
                 reduced_motion: true,
             });
             let mut visited = Vec::new();
-            for _ in 0..Surface::ALL.len() {
-                visited.push(app.surface);
+            for overlay in TuiOverlay::ALL {
+                app.open_overlay(overlay);
+                visited.push(app.overlay.unwrap());
                 let wide = rendered(&app, 120, 32);
                 let narrow = rendered(&app, 60, 20);
                 let tiny = rendered(&app, 36, 8);
-                assert!(wide.contains(app.surface.label()));
-                assert!(narrow.contains(app.surface.label()));
-                assert!(tiny.contains(app.surface.label()));
+                assert!(wide.contains(overlay.label()));
+                assert!(narrow.contains(overlay.label()));
+                assert!(tiny.contains("Keith"));
                 for forbidden in ["┌", "┐", "└", "┘", "│", "─"] {
                     assert!(!wide.contains(forbidden));
                 }
-                app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE));
+                app.handle_key(key(KeyCode::Char('q'), KeyModifiers::NONE));
+                assert_eq!(app.overlay_query, "q");
+                app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE));
+                assert!(app.overlay.is_none());
             }
-            assert_eq!(visited, Surface::ALL);
+            assert_eq!(visited, TuiOverlay::ALL);
         }
         let source = include_str!("render.rs").to_ascii_lowercase();
         assert!(!source.contains("purple"));
@@ -930,6 +1310,25 @@ mod tests {
     fn terminal_control_sequences_are_neutralized_before_rendering() {
         let output = render::terminal_safe("safe\u{1b}[2J\u{7}still visible");
         assert_eq!(output, "safe�[2J�still visible");
+    }
+
+    #[test]
+    fn settled_transcript_wraps_unicode_and_preserves_code_indentation() {
+        let message = keith_protocol::MessageProjection {
+            message_id: MessageId::new(),
+            final_id: Some(keith_agent_types::EntryId::new()),
+            role: keith_protocol::MessageRole::Assistant,
+            text: "result\n    let value = \"界界界界界\";\u{1b}[2J".into(),
+            committed: true,
+        };
+        let rendered = settled_transcript_lines(&message, 18, ColorMode::NoColor)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(rendered.first().map(String::as_str), Some("  Keith"));
+        assert!(rendered.iter().any(|line| line.starts_with("      let")));
+        assert!(rendered.iter().any(|line| line.contains('�')));
+        assert!(rendered.len() >= 4);
     }
 
     #[test]
@@ -1020,14 +1419,14 @@ mod tests {
                 if resolution.confirmation_id == confirmation_id
         ));
         app.handle_key(key(KeyCode::Char('s'), KeyModifiers::CONTROL));
-        assert_eq!(app.surface, Surface::Sessions);
+        assert_eq!(app.overlay, Some(TuiOverlay::Sessions));
         assert!(matches!(
             app.next_command(),
             Some(ClientCommand::ListSessions(_))
         ));
-        app.handle_key(key(KeyCode::BackTab, KeyModifiers::NONE));
-        assert_eq!(app.surface, Surface::Queue);
         app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.surface, Surface::Chat);
+        assert!(app.overlay.is_none());
+        app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.overlay, Some(TuiOverlay::Commands));
     }
 }

@@ -134,7 +134,7 @@ verify_cmd = "cargo test -p keith-agent-tui connection"
 
 [task.2.2]
 title  = "Codex-style inline conversation TUI"
-status = "pending"
+status = "in_progress"
 wave   = 3
 do_1   = "Replace permanent subsystem navigation with transcript, live tail, compact composer, and status row"
 do_2   = "Use Ratatui inline viewport and insert settled transcript cells into native terminal scrollback"
@@ -162,7 +162,7 @@ verify_cmd = "cargo test -p keith-agent-tui"
 
 [task.3.1]
 title  = "SolidJS, Rust-WASM, and Apps SDK UI design foundation"
-status = "in_progress"
+status = "done"
 wave   = 2
 do_1   = "Create the production SolidJS/Vite application and reproducible package lock"
 do_2   = "Import @openai/apps-sdk-ui/css and implement a token-only Keith adapter with forbidden-style auditing"

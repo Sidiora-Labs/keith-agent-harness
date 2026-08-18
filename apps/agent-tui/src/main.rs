@@ -10,9 +10,12 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyEventKind};
 use keith_agent_tui::{
     Accessibility, AgentCommandDispatcher, AgentConnectionClient, AppAction, DispatchEvent, TuiApp,
-    TuiArguments, render,
+    TuiArguments, render, settled_transcript_lines,
 };
 use keith_protocol::WireMessage;
+use ratatui::text::Text;
+use ratatui::widgets::{Paragraph, Widget};
+use ratatui::{TerminalOptions, Viewport};
 use signal_hook::consts::{SIGINT, SIGTERM};
 
 enum LoopExit {
@@ -52,9 +55,18 @@ fn run() -> Result<(), String> {
     }
 
     loop {
-        let exit =
-            ratatui::run(|terminal| event_loop(terminal, &mut app, &mut dispatcher, &shutdown))
-                .map_err(|error| error.to_string())?;
+        let terminal_rows = crossterm::terminal::size()
+            .map_err(|error| error.to_string())?
+            .1;
+        let options = TerminalOptions {
+            viewport: Viewport::Inline(terminal_rows.saturating_sub(1).clamp(6, 18)),
+        };
+        let mut terminal =
+            ratatui::try_init_with_options(options).map_err(|error| error.to_string())?;
+        let result = event_loop(&mut terminal, &mut app, &mut dispatcher, &shutdown);
+        let restored = ratatui::try_restore();
+        let exit = result.map_err(|error| error.to_string())?;
+        restored.map_err(|error| error.to_string())?;
         match exit {
             LoopExit::Quit => return Ok(()),
             LoopExit::ExternalEditor => edit_composer(&mut app)?,
@@ -97,6 +109,7 @@ fn event_loop(
                 Err(error) => app.report_command_failure(error),
             }
         }
+        promote_settled_messages(terminal, app)?;
         terminal.draw(|frame| render(frame, app))?;
         if !event::poll(Duration::from_millis(100))? {
             continue;
@@ -118,6 +131,22 @@ fn event_loop(
         }
     }
     Ok(LoopExit::Quit)
+}
+
+fn promote_settled_messages(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut TuiApp,
+) -> io::Result<()> {
+    let width = terminal.size()?.width.saturating_sub(2).max(1);
+    for message in app.pending_settled_messages() {
+        let lines = settled_transcript_lines(&message, width, app.accessibility.color_mode);
+        let height = u16::try_from(lines.len()).unwrap_or(u16::MAX).max(1);
+        terminal.insert_before(height, move |buffer| {
+            Paragraph::new(Text::from(lines)).render(buffer.area, buffer);
+        })?;
+        app.mark_message_settled(&message);
+    }
+    Ok(())
 }
 
 fn edit_composer(app: &mut TuiApp) -> Result<(), String> {

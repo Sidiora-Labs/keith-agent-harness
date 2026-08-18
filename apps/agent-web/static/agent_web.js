@@ -23,20 +23,26 @@ export class BrowserProjection {
         let deferred3_0;
         let deferred3_1;
         try {
-            const ptr0 = passStringToWasm0(encoded, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(encoded, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_apply_wire_message(this.__wbg_ptr, ptr0, len0);
-            var ptr2 = ret[0];
-            var len2 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_apply_wire_message(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr2 = r0;
+            var len2 = r1;
+            if (r3) {
                 ptr2 = 0; len2 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred3_0 = ptr2;
             deferred3_1 = len2;
             return getStringFromWasm0(ptr2, len2);
         } finally {
-            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred3_0, deferred3_1, 1);
         }
     }
     /**
@@ -47,20 +53,26 @@ export class BrowserProjection {
         let deferred3_0;
         let deferred3_1;
         try {
-            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_attach_session(this.__wbg_ptr, ptr0, len0);
-            var ptr2 = ret[0];
-            var len2 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_attach_session(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr2 = r0;
+            var len2 = r1;
+            if (r3) {
                 ptr2 = 0; len2 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred3_0 = ptr2;
             deferred3_1 = len2;
             return getStringFromWasm0(ptr2, len2);
         } finally {
-            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred3_0, deferred3_1, 1);
         }
     }
     /**
@@ -71,20 +83,26 @@ export class BrowserProjection {
         let deferred3_0;
         let deferred3_1;
         try {
-            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_branch(this.__wbg_ptr, ptr0, len0);
-            var ptr2 = ret[0];
-            var len2 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_branch(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr2 = r0;
+            var len2 = r1;
+            if (r3) {
                 ptr2 = 0; len2 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred3_0 = ptr2;
             deferred3_1 = len2;
             return getStringFromWasm0(ptr2, len2);
         } finally {
-            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred3_0, deferred3_1, 1);
         }
     }
     /**
@@ -95,20 +113,26 @@ export class BrowserProjection {
         let deferred3_0;
         let deferred3_1;
         try {
-            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_cancel(this.__wbg_ptr, ptr0, len0);
-            var ptr2 = ret[0];
-            var len2 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_cancel(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr2 = r0;
+            var len2 = r1;
+            if (r3) {
                 ptr2 = 0; len2 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred3_0 = ptr2;
             deferred3_1 = len2;
             return getStringFromWasm0(ptr2, len2);
         } finally {
-            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred3_0, deferred3_1, 1);
         }
     }
     /**
@@ -120,22 +144,28 @@ export class BrowserProjection {
         let deferred4_0;
         let deferred4_1;
         try {
-            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(objective, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr1 = passStringToWasm0(objective, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_create_child(this.__wbg_ptr, ptr0, len0, ptr1, len1);
-            var ptr3 = ret[0];
-            var len3 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_create_child(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr3 = r0;
+            var len3 = r1;
+            if (r3) {
                 ptr3 = 0; len3 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred4_0 = ptr3;
             deferred4_1 = len3;
             return getStringFromWasm0(ptr3, len3);
         } finally {
-            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred4_0, deferred4_1, 1);
         }
     }
     /**
@@ -147,22 +177,28 @@ export class BrowserProjection {
         let deferred4_0;
         let deferred4_1;
         try {
-            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(objective, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr1 = passStringToWasm0(objective, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_create_goal(this.__wbg_ptr, ptr0, len0, ptr1, len1);
-            var ptr3 = ret[0];
-            var len3 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_create_goal(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr3 = r0;
+            var len3 = r1;
+            if (r3) {
                 ptr3 = 0; len3 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred4_0 = ptr3;
             deferred4_1 = len3;
             return getStringFromWasm0(ptr3, len3);
         } finally {
-            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred4_0, deferred4_1, 1);
         }
     }
     /**
@@ -176,24 +212,30 @@ export class BrowserProjection {
         let deferred5_0;
         let deferred5_1;
         try {
-            const ptr0 = passStringToWasm0(profile_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(profile_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            var ptr1 = isLikeNone(session_id) ? 0 : passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var ptr1 = isLikeNone(session_id) ? 0 : passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             var len1 = WASM_VECTOR_LEN;
-            const ptr2 = passStringToWasm0(prompt, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr2 = passStringToWasm0(prompt, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len2 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_create_schedule(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, interval_seconds);
-            var ptr4 = ret[0];
-            var len4 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_create_schedule(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, interval_seconds);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr4 = r0;
+            var len4 = r1;
+            if (r3) {
                 ptr4 = 0; len4 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred5_0 = ptr4;
             deferred5_1 = len4;
             return getStringFromWasm0(ptr4, len4);
         } finally {
-            wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred5_0, deferred5_1, 1);
         }
     }
     /**
@@ -206,24 +248,30 @@ export class BrowserProjection {
         let deferred5_0;
         let deferred5_1;
         try {
-            const ptr0 = passStringToWasm0(profile_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(profile_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(workspace_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr1 = passStringToWasm0(workspace_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len1 = WASM_VECTOR_LEN;
-            var ptr2 = isLikeNone(title) ? 0 : passStringToWasm0(title, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var ptr2 = isLikeNone(title) ? 0 : passStringToWasm0(title, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             var len2 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_create_session(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
-            var ptr4 = ret[0];
-            var len4 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_create_session(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr4 = r0;
+            var len4 = r1;
+            if (r3) {
                 ptr4 = 0; len4 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred5_0 = ptr4;
             deferred5_1 = len4;
             return getStringFromWasm0(ptr4, len4);
         } finally {
-            wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred5_0, deferred5_1, 1);
         }
     }
     /**
@@ -233,18 +281,24 @@ export class BrowserProjection {
         let deferred2_0;
         let deferred2_1;
         try {
-            const ret = wasm.browserprojection_current_view(this.__wbg_ptr);
-            var ptr1 = ret[0];
-            var len1 = ret[1];
-            if (ret[3]) {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.browserprojection_current_view(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr1 = r0;
+            var len1 = r1;
+            if (r3) {
                 ptr1 = 0; len1 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred2_0 = ptr1;
             deferred2_1 = len1;
             return getStringFromWasm0(ptr1, len1);
         } finally {
-            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred2_0, deferred2_1, 1);
         }
     }
     /**
@@ -255,20 +309,26 @@ export class BrowserProjection {
         let deferred3_0;
         let deferred3_1;
         try {
-            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_export_session(this.__wbg_ptr, ptr0, len0);
-            var ptr2 = ret[0];
-            var len2 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_export_session(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr2 = r0;
+            var len2 = r1;
+            if (r3) {
                 ptr2 = 0; len2 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred3_0 = ptr2;
             deferred3_1 = len2;
             return getStringFromWasm0(ptr2, len2);
         } finally {
-            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred3_0, deferred3_1, 1);
         }
     }
     /**
@@ -279,20 +339,26 @@ export class BrowserProjection {
         let deferred3_0;
         let deferred3_1;
         try {
-            var ptr0 = isLikeNone(profile_id) ? 0 : passStringToWasm0(profile_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            var ptr0 = isLikeNone(profile_id) ? 0 : passStringToWasm0(profile_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             var len0 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_list_sessions(this.__wbg_ptr, ptr0, len0);
-            var ptr2 = ret[0];
-            var len2 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_list_sessions(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr2 = r0;
+            var len2 = r1;
+            if (r3) {
                 ptr2 = 0; len2 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred3_0 = ptr2;
             deferred3_1 = len2;
             return getStringFromWasm0(ptr2, len2);
         } finally {
-            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred3_0, deferred3_1, 1);
         }
     }
     constructor() {
@@ -310,22 +376,28 @@ export class BrowserProjection {
         let deferred4_0;
         let deferred4_1;
         try {
-            const ptr0 = passStringToWasm0(profile_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(profile_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr1 = passStringToWasm0(query, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_query_memory(this.__wbg_ptr, ptr0, len0, ptr1, len1);
-            var ptr3 = ret[0];
-            var len3 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_query_memory(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr3 = r0;
+            var len3 = r1;
+            if (r3) {
                 ptr3 = 0; len3 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred4_0 = ptr3;
             deferred4_1 = len3;
             return getStringFromWasm0(ptr3, len3);
         } finally {
-            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred4_0, deferred4_1, 1);
         }
     }
     /**
@@ -338,22 +410,28 @@ export class BrowserProjection {
         let deferred4_0;
         let deferred4_1;
         try {
-            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(confirmation_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr1 = passStringToWasm0(confirmation_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_resolve_confirmation(this.__wbg_ptr, ptr0, len0, ptr1, len1, allow);
-            var ptr3 = ret[0];
-            var len3 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_resolve_confirmation(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, allow);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr3 = r0;
+            var len3 = r1;
+            if (r3) {
                 ptr3 = 0; len3 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred4_0 = ptr3;
             deferred4_1 = len3;
             return getStringFromWasm0(ptr3, len3);
         } finally {
-            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred4_0, deferred4_1, 1);
         }
     }
     /**
@@ -364,20 +442,26 @@ export class BrowserProjection {
         let deferred3_0;
         let deferred3_1;
         try {
-            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_resume(this.__wbg_ptr, ptr0, len0);
-            var ptr2 = ret[0];
-            var len2 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_resume(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr2 = r0;
+            var len2 = r1;
+            if (r3) {
                 ptr2 = 0; len2 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred3_0 = ptr2;
             deferred3_1 = len2;
             return getStringFromWasm0(ptr2, len2);
         } finally {
-            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred3_0, deferred3_1, 1);
         }
     }
     /**
@@ -388,20 +472,26 @@ export class BrowserProjection {
         let deferred3_0;
         let deferred3_1;
         try {
-            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_retry(this.__wbg_ptr, ptr0, len0);
-            var ptr2 = ret[0];
-            var len2 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_retry(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr2 = r0;
+            var len2 = r1;
+            if (r3) {
                 ptr2 = 0; len2 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred3_0 = ptr2;
             deferred3_1 = len2;
             return getStringFromWasm0(ptr2, len2);
         } finally {
-            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred3_0, deferred3_1, 1);
         }
     }
     /**
@@ -414,24 +504,30 @@ export class BrowserProjection {
         let deferred5_0;
         let deferred5_1;
         try {
-            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(provider, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr1 = passStringToWasm0(provider, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len1 = WASM_VECTOR_LEN;
-            const ptr2 = passStringToWasm0(model, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr2 = passStringToWasm0(model, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len2 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_select_model(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
-            var ptr4 = ret[0];
-            var len4 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_select_model(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr4 = r0;
+            var len4 = r1;
+            if (r3) {
                 ptr4 = 0; len4 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred5_0 = ptr4;
             deferred5_1 = len4;
             return getStringFromWasm0(ptr4, len4);
         } finally {
-            wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred5_0, deferred5_1, 1);
         }
     }
     /**
@@ -443,22 +539,28 @@ export class BrowserProjection {
         let deferred4_0;
         let deferred4_1;
         try {
-            const ptr0 = passStringToWasm0(profile_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(profile_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(mode, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr1 = passStringToWasm0(mode, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_set_background(this.__wbg_ptr, ptr0, len0, ptr1, len1);
-            var ptr3 = ret[0];
-            var len3 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_set_background(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr3 = r0;
+            var len3 = r1;
+            if (r3) {
                 ptr3 = 0; len3 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred4_0 = ptr3;
             deferred4_1 = len3;
             return getStringFromWasm0(ptr3, len3);
         } finally {
-            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred4_0, deferred4_1, 1);
         }
     }
     /**
@@ -470,22 +572,28 @@ export class BrowserProjection {
         let deferred4_0;
         let deferred4_1;
         try {
-            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr1 = passStringToWasm0(text, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_steer(this.__wbg_ptr, ptr0, len0, ptr1, len1);
-            var ptr3 = ret[0];
-            var len3 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_steer(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr3 = r0;
+            var len3 = r1;
+            if (r3) {
                 ptr3 = 0; len3 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred4_0 = ptr3;
             deferred4_1 = len3;
             return getStringFromWasm0(ptr3, len3);
         } finally {
-            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred4_0, deferred4_1, 1);
         }
     }
     /**
@@ -497,22 +605,28 @@ export class BrowserProjection {
         let deferred4_0;
         let deferred4_1;
         try {
-            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr1 = passStringToWasm0(text, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.browserprojection_submit_prompt(this.__wbg_ptr, ptr0, len0, ptr1, len1);
-            var ptr3 = ret[0];
-            var len3 = ret[1];
-            if (ret[3]) {
+            wasm.browserprojection_submit_prompt(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr3 = r0;
+            var len3 = r1;
+            if (r3) {
                 ptr3 = 0; len3 = 0;
-                throw takeFromExternrefTable0(ret[2]);
+                throw takeObject(r2);
             }
             deferred4_0 = ptr3;
             deferred4_1 = len3;
             return getStringFromWasm0(ptr3, len3);
         } finally {
-            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred4_0, deferred4_1, 1);
         }
     }
 }
@@ -533,16 +647,10 @@ function __wbg_get_imports() {
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
-            return ret;
+            return addHeapObject(ret);
         },
-        __wbindgen_init_externref_table: function() {
-            const table = wasm.__wbindgen_externrefs;
-            const offset = table.grow(4);
-            table.set(0, undefined);
-            table.set(offset + 0, undefined);
-            table.set(offset + 1, null);
-            table.set(offset + 2, true);
-            table.set(offset + 3, false);
+        __wbindgen_object_drop_ref: function(arg0) {
+            takeObject(arg0);
         },
     };
     return {
@@ -555,15 +663,32 @@ const BrowserProjectionFinalization = (typeof FinalizationRegistry === 'undefine
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_browserprojection_free(ptr, 1));
 
-function addToExternrefTable0(obj) {
-    const idx = wasm.__externref_table_alloc();
-    wasm.__wbindgen_externrefs.set(idx, obj);
+function addHeapObject(obj) {
+    if (heap_next === heap.length) heap.push(heap.length + 1);
+    const idx = heap_next;
+    heap_next = heap[idx];
+
+    heap[idx] = obj;
     return idx;
+}
+
+function dropObject(idx) {
+    if (idx < 1028) return;
+    heap[idx] = heap_next;
+    heap_next = idx;
 }
 
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
+
+let cachedDataViewMemory0 = null;
+function getDataViewMemory0() {
+    if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
+        cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
+    }
+    return cachedDataViewMemory0;
 }
 
 function getStringFromWasm0(ptr, len) {
@@ -578,14 +703,20 @@ function getUint8ArrayMemory0() {
     return cachedUint8ArrayMemory0;
 }
 
+function getObject(idx) { return heap[idx]; }
+
 function handleError(f, args) {
     try {
         return f.apply(this, args);
     } catch (e) {
-        const idx = addToExternrefTable0(e);
-        wasm.__wbindgen_exn_store(idx);
+        wasm.__wbindgen_export(addHeapObject(e));
     }
 }
+
+let heap = new Array(1024).fill(undefined);
+heap.push(undefined, null, true, false);
+
+let heap_next = heap.length;
 
 function isLikeNone(x) {
     return x === undefined || x === null;
@@ -628,10 +759,10 @@ function passStringToWasm0(arg, malloc, realloc) {
     return ptr;
 }
 
-function takeFromExternrefTable0(idx) {
-    const value = wasm.__wbindgen_externrefs.get(idx);
-    wasm.__externref_table_dealloc(idx);
-    return value;
+function takeObject(idx) {
+    const ret = getObject(idx);
+    dropObject(idx);
+    return ret;
 }
 
 let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
@@ -668,8 +799,8 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedDataViewMemory0 = null;
     cachedUint8ArrayMemory0 = null;
-    wasm.__wbindgen_start();
     return wasm;
 }
 

@@ -472,14 +472,13 @@ impl WorkerSupervisor {
                     request_id: response_id,
                     response,
                 }) if response_id == request_id => return Ok(*response),
-                Ok(PrivateMessage::ExecutionResult { .. }) => {
-                    return Err(SupervisorError::MismatchedRuntimeResponse);
-                }
                 Ok(PrivateMessage::ExecutionEvent {
                     request_id: event_request_id,
                     event,
                 }) if event_request_id == request_id => events(*event),
-                Ok(PrivateMessage::ExecutionEvent { .. }) => {
+                Ok(
+                    PrivateMessage::ExecutionResult { .. } | PrivateMessage::ExecutionEvent { .. },
+                ) => {
                     return Err(SupervisorError::MismatchedRuntimeResponse);
                 }
                 Ok(PrivateMessage::Heartbeat { at }) => {

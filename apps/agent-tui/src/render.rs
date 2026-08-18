@@ -1,14 +1,15 @@
+use keith_protocol::{MessageProjection, MessageRole, PresenceState, TurnTerminalStatus};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, List, ListItem, Paragraph, Wrap};
-use unicode_width::UnicodeWidthStr;
+use ratatui::widgets::{Clear, List, ListItem, Paragraph, Wrap};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::{ColorMode, Surface, TuiApp};
+use crate::{ColorMode, TuiApp, TuiOverlay};
 
 #[derive(Clone, Copy)]
-struct Palette {
+pub(crate) struct Palette {
     canvas: Color,
     layer: Color,
     selected: Color,
@@ -21,307 +22,382 @@ struct Palette {
 pub fn render(frame: &mut Frame<'_>, app: &TuiApp) {
     let area = frame.area();
     let palette = palette(app.accessibility.color_mode);
-    frame.render_widget(Block::new().style(Style::new().bg(palette.canvas)), area);
-    if area.width < 44 || area.height < 10 {
-        render_tiny(frame, app, area, palette);
-    } else if area.width < 78 {
-        render_narrow(frame, app, area, palette);
-    } else {
-        render_wide(frame, app, area, palette);
+    frame.render_widget(
+        Paragraph::new("").style(Style::new().bg(palette.canvas)),
+        area,
+    );
+
+    let activity_height = u16::from(authoritative_activity(app).is_some());
+    let header_height = u16::from(area.height >= 8);
+    let composer_height = if area.height < 7 { 2 } else { 4 };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(1),
+            Constraint::Length(activity_height),
+            Constraint::Length(composer_height),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    if header_height > 0 {
+        render_header(frame, app, rows[0], palette);
     }
-}
-
-fn render_wide(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palette) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(22), Constraint::Min(32)])
-        .split(area);
-    render_navigation(frame, app, columns[0], palette);
-    render_content(frame, app, columns[1], palette);
-}
-
-fn render_narrow(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palette) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(5),
-            Constraint::Length(4),
-            Constraint::Length(1),
-        ])
-        .split(area);
-    let title = format!("Keith Agent  {}  Tab: next view", app.surface.label());
-    frame.render_widget(
-        Paragraph::new(title).style(Style::new().bg(palette.layer).fg(palette.text)),
-        rows[0],
-    );
-    render_surface(frame, app, rows[1], palette);
-    render_composer(frame, app, rows[2], palette);
-    render_status(frame, app, rows[3], palette);
-}
-
-fn render_tiny(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palette) {
-    let status = if app.connected {
-        "connected"
-    } else {
-        "offline"
-    };
-    let text = Text::from(vec![
-        Line::from(Span::styled(
-            format!("Keith Agent: {}", app.surface.label()),
-            Style::new().fg(palette.text).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(format!("Status: {status}")),
-        Line::from("Terminal is narrow. Resize for navigation and history."),
-        Line::from("Ctrl-Q quit  Tab view  Enter send"),
-        Line::from(format!("> {}", terminal_safe(&app.composer))),
-    ]);
-    frame.render_widget(
-        Paragraph::new(text)
-            .style(Style::new().bg(palette.canvas).fg(palette.text))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-}
-
-fn render_navigation(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palette) {
-    let items = Surface::ALL.into_iter().map(|surface| {
-        let style = if surface == app.surface {
-            Style::new()
-                .bg(palette.selected)
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::new().bg(palette.layer).fg(palette.muted)
-        };
-        ListItem::new(Line::from(format!("  {}", surface.label()))).style(style)
-    });
-    let navigation = List::new(items).block(
-        Block::new()
-            .title(" Keith Agent ")
-            .style(Style::new().bg(palette.layer).fg(palette.text)),
-    );
-    frame.render_widget(navigation, area);
-}
-
-fn render_content(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palette) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(5),
-            Constraint::Length(5),
-            Constraint::Length(1),
-        ])
-        .split(area);
-    frame.render_widget(
-        Paragraph::new(format!(" {}", app.surface.label())).style(
-            Style::new()
-                .bg(palette.selected)
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
-        ),
-        rows[0],
-    );
-    render_surface(frame, app, rows[1], palette);
-    render_composer(frame, app, rows[2], palette);
-    render_status(frame, app, rows[3], palette);
-}
-
-fn render_surface(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palette) {
-    let lines = match app.surface {
-        Surface::Chat => chat_lines(app, area.height),
-        Surface::Sessions => app
-            .sessions
-            .iter()
-            .map(|session| {
-                let selected = app.attached_session.as_ref() == Some(&session.session_id);
-                format!(
-                    "{} {}  {:?}  {}",
-                    if selected { ">" } else { " " },
-                    terminal_safe(session.title.as_deref().unwrap_or("Untitled session")),
-                    session.state,
-                    session.session_id
-                )
-            })
-            .collect(),
-        surface => projection_lines(app, surface),
-    };
-    let text = if lines.is_empty() {
-        Text::from(Line::from(Span::styled(
-            empty_label(app.surface),
-            Style::new().fg(palette.muted),
-        )))
-    } else {
-        Text::from(lines.into_iter().map(Line::from).collect::<Vec<_>>())
-    };
-    frame.render_widget(
-        Paragraph::new(text)
-            .style(Style::new().bg(palette.canvas).fg(palette.text))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-}
-
-fn chat_lines(app: &TuiApp, height: u16) -> Vec<String> {
-    let Some(reducer) = &app.reducer else {
-        return vec!["Attach a session to load authoritative history.".into()];
-    };
-    let snapshot = reducer.snapshot();
-    let visible = usize::from(height).saturating_sub(1).max(1);
-    let total = snapshot.messages.len();
-    let end = total.saturating_sub(app.scroll_from_end).min(total);
-    let start = end.saturating_sub(visible);
-    snapshot.messages[start..end]
-        .iter()
-        .map(|message| format!("{:?}: {}", message.role, terminal_safe(&message.text)))
-        .collect()
-}
-
-#[allow(clippy::too_many_lines)]
-fn projection_lines(app: &TuiApp, surface: Surface) -> Vec<String> {
-    if surface == Surface::Models {
-        let mut providers = vec![
-            "Use /model <provider> [model]. Omitting model selects the catalog default.".into(),
-        ];
-        providers.extend(
-            keith_provider_catalog::BUILTIN_PROVIDERS
-                .iter()
-                .map(|provider| {
-                    format!(
-                        "{}  {}  default {}",
-                        provider.id,
-                        terminal_safe(provider.display_name),
-                        provider.default_model
-                    )
-                }),
+    render_conversation(frame, app, rows[1], palette);
+    if let Some(activity) = authoritative_activity(app) {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  Keith  ", Style::new().fg(palette.accent)),
+                Span::styled(activity, Style::new().fg(palette.muted)),
+            ]))
+            .style(Style::new().bg(palette.canvas)),
+            rows[2],
         );
-        return providers;
     }
-    if surface == Surface::Logs {
-        return app.logs().iter().map(|line| terminal_safe(line)).collect();
+    render_composer(frame, app, rows[3], palette);
+    render_status(frame, app, rows[4], palette);
+    if let Some(overlay) = app.overlay {
+        render_overlay(frame, app, overlay, area, palette);
     }
-    let Some(reducer) = &app.reducer else {
-        return Vec::new();
+}
+
+fn render_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palette) {
+    let conversation = app
+        .reducer
+        .as_ref()
+        .and_then(|reducer| reducer.snapshot().session.title.as_deref())
+        .unwrap_or("Conversation");
+    let title = if area.width >= 52 {
+        format!(" Keith   {}", terminal_safe(conversation))
+    } else {
+        " Keith".into()
     };
-    let snapshot = reducer.snapshot();
-    match surface {
-        Surface::Goals => snapshot
-            .goals
-            .iter()
-            .map(|goal| format!("{:?}  {}", goal.state, terminal_safe(&goal.objective)))
-            .collect(),
-        Surface::Queue => snapshot
-            .actions
-            .iter()
-            .map(|action| format!("{}  {}", action.state, terminal_safe(&action.source)))
-            .collect(),
-        Surface::Models => unreachable!("models are rendered from the installation catalog"),
-        Surface::Plans => snapshot
-            .plans
-            .iter()
-            .map(|plan| format!("{}  {}", plan.state, terminal_safe(&plan.summary)))
-            .collect(),
-        Surface::Children => snapshot
-            .children
-            .iter()
-            .map(|child| format!("{}  {}", child.state, terminal_safe(&child.objective)))
-            .collect(),
-        Surface::Tools => snapshot
-            .tools
-            .iter()
-            .map(|tool| format!("{}  {}", tool.state, tool.tool_call_id))
-            .collect(),
-        Surface::Kernels => snapshot
-            .kernels
-            .iter()
-            .map(|kernel| format!("{}  {}", kernel.state, kernel.runtime))
-            .collect(),
-        Surface::Schedules => snapshot
-            .schedules
-            .iter()
-            .map(|schedule| {
-                format!(
-                    "{}  next {:?}  paused {}",
-                    schedule.job_id, schedule.next_run, schedule.paused
-                )
-            })
-            .collect(),
-        Surface::Commitments => snapshot
-            .commitments
-            .iter()
-            .map(|item| format!("{}  {}", item.state, terminal_safe(&item.summary)))
-            .collect(),
-        Surface::Waiting => snapshot
-            .waits
-            .iter()
-            .map(|wait| format!("{}  {}", wait.state, wait.wait_id))
-            .collect(),
-        Surface::Confirmations => snapshot
-            .confirmations
-            .iter()
-            .map(|confirmation| {
-                format!(
-                    "{}  {}",
-                    confirmation.confirmation_id,
-                    terminal_safe(&confirmation.summary)
-                )
-            })
-            .collect(),
-        Surface::Memory => snapshot
-            .memory_changes
-            .iter()
-            .map(|change| format!("{:?}  {}", change.change, terminal_safe(&change.source)))
-            .collect(),
-        Surface::Diagnostics => vec![
-            format!("Generation: {}", snapshot.generation.get()),
-            format!("Sequence: {}", snapshot.through_sequence.get()),
-            format!("Projection revision: {}", snapshot.revision.get()),
-            format!("Stream: {:?}", reducer.stream_state()),
-            format!("Composer display width: {}", app.composer_display_width()),
-            format!("Queued commands: {}", app.pending_len()),
-            format!("In-flight commands: {}", app.in_flight_len()),
-        ],
-        Surface::Logs => unreachable!("logs are rendered without a session projection"),
-        Surface::Artifacts => vec!["Artifacts are exposed by tool and export projections.".into()],
-        Surface::Knowledge => {
-            vec!["Knowledge changes use shared memory and command results.".into()]
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            title,
+            Style::new().fg(palette.text).add_modifier(Modifier::BOLD),
+        )]))
+        .style(Style::new().bg(palette.canvas)),
+        area,
+    );
+}
+
+pub(crate) fn render_conversation(
+    frame: &mut Frame<'_>,
+    app: &TuiApp,
+    area: Rect,
+    palette: Palette,
+) {
+    let width = usize::from(area.width.saturating_sub(2)).max(1);
+    let lines = app.reducer.as_ref().map_or_else(
+        || {
+            vec![Line::from(Span::styled(
+                "  Choose a conversation to begin.",
+                Style::new().fg(palette.muted),
+            ))]
+        },
+        |reducer| {
+            let snapshot = reducer.snapshot();
+            let mut messages = snapshot
+                .messages
+                .iter()
+                .filter(|message| !app.is_message_settled(message))
+                .flat_map(|message| transcript_lines(message, width, palette))
+                .collect::<Vec<_>>();
+            if messages.is_empty() {
+                messages.push(Line::from(Span::styled(
+                    "  Tell Keith what you want taken care of.",
+                    Style::new().fg(palette.muted),
+                )));
+            }
+            messages
+        },
+    );
+    let visible = usize::from(area.height);
+    let end = lines
+        .len()
+        .saturating_sub(app.scroll_from_end)
+        .min(lines.len());
+    let start = end.saturating_sub(visible);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines[start..end].to_vec()))
+            .style(Style::new().bg(palette.canvas).fg(palette.text))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+pub fn settled_transcript_lines(
+    message: &MessageProjection,
+    width: u16,
+    color_mode: ColorMode,
+) -> Vec<Line<'static>> {
+    transcript_lines(message, usize::from(width).max(1), palette(color_mode))
+}
+
+fn transcript_lines(
+    message: &MessageProjection,
+    width: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let (label, label_style, body_style) = match message.role {
+        MessageRole::User => (
+            "You",
+            Style::new().fg(palette.text).add_modifier(Modifier::BOLD),
+            Style::new().fg(palette.text),
+        ),
+        MessageRole::Assistant => (
+            "Keith",
+            Style::new().fg(palette.accent).add_modifier(Modifier::BOLD),
+            Style::new().fg(palette.text),
+        ),
+        MessageRole::Tool => (
+            "Activity",
+            Style::new().fg(palette.muted),
+            Style::new().fg(palette.muted),
+        ),
+        MessageRole::System => (
+            "Notice",
+            Style::new().fg(palette.danger).add_modifier(Modifier::BOLD),
+            Style::new().fg(palette.text),
+        ),
+    };
+    let body_width = width.saturating_sub(2).max(1);
+    let mut lines = vec![Line::from(Span::styled(format!("  {label}"), label_style))];
+    lines.extend(
+        wrap_preserving_indentation(&message.text, body_width)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(format!("  {line}"), body_style))),
+    );
+    lines.push(Line::default());
+    lines
+}
+
+fn wrap_preserving_indentation(value: &str, width: usize) -> Vec<String> {
+    let safe = terminal_safe(value);
+    let mut output = Vec::new();
+    for logical in safe.split('\n') {
+        if logical.is_empty() {
+            output.push(String::new());
+            continue;
         }
-        Surface::Channels => vec!["Channel routes and delivery state are daemon-owned.".into()],
-        Surface::Settings => vec!["Settings use shared configuration and protocol state.".into()],
-        Surface::Refinement => vec!["Refinement diffs and confirmations are daemon-owned.".into()],
-        Surface::Chat | Surface::Sessions => Vec::new(),
+        let indentation = logical
+            .chars()
+            .take_while(|character| matches!(character, ' ' | '\t'))
+            .collect::<String>();
+        let continuation = if UnicodeWidthStr::width(indentation.as_str()) < width {
+            indentation
+        } else {
+            String::new()
+        };
+        let mut current = String::new();
+        let mut current_width: usize = 0;
+        for character in logical.chars() {
+            let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+            if current_width > 0 && current_width.saturating_add(character_width) > width {
+                output.push(std::mem::take(&mut current));
+                current.push_str(&continuation);
+                current_width = UnicodeWidthStr::width(current.as_str());
+            }
+            current.push(character);
+            current_width = current_width.saturating_add(character_width);
+        }
+        output.push(current);
     }
+    output
 }
 
 fn render_composer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palette) {
-    let label = if app.attached_session.is_some() {
-        " Message  Enter send  Alt-Enter newline  Ctrl-K steer  Ctrl-E editor "
+    let enabled = app.attached_session.is_some();
+    let prompt = if enabled {
+        terminal_safe(&app.composer)
     } else {
-        " Message  Select a session before sending "
+        "Choose a conversation before sending a message".into()
     };
+    let hint = if area.width >= 64 {
+        "Enter send   Alt-Enter newline   Ctrl-P commands   Ctrl-X stop"
+    } else if area.width >= 36 {
+        "Enter send   Ctrl-P commands"
+    } else {
+        "Enter send"
+    };
+    let text = Text::from(vec![
+        Line::from(vec![
+            Span::styled(" › ", Style::new().fg(palette.accent)),
+            Span::styled(
+                prompt,
+                Style::new().fg(if enabled { palette.text } else { palette.muted }),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("   {hint}"),
+            Style::new().fg(palette.muted),
+        )),
+    ]);
     frame.render_widget(
-        Paragraph::new(terminal_safe(&app.composer))
-            .block(Block::new().title(label))
+        Paragraph::new(text)
             .style(Style::new().bg(palette.layer).fg(palette.text))
             .wrap(Wrap { trim: false }),
         area,
     );
-    if area.width > 2 && area.height > 1 {
+    if enabled && area.width > 3 && area.height > 0 {
         let before = &app.composer[..app.cursor_byte];
         let line = before.lines().count().saturating_sub(1);
         let column = before.lines().next_back().map_or(0, UnicodeWidthStr::width);
         let x = area
             .x
+            .saturating_add(3)
             .saturating_add(u16::try_from(column).unwrap_or(u16::MAX))
             .min(area.right().saturating_sub(1));
         let y = area
             .y
-            .saturating_add(1)
             .saturating_add(u16::try_from(line).unwrap_or(u16::MAX))
             .min(area.bottom().saturating_sub(1));
         frame.set_cursor_position(Position::new(x, y));
     }
+}
+
+fn render_status(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palette) {
+    let (connection, color) = if app.reconnecting {
+        ("Reconnecting", palette.muted)
+    } else if app.connected {
+        ("Connected", palette.accent)
+    } else {
+        ("Offline", palette.danger)
+    };
+    let terminal = app.reducer.as_ref().and_then(|reducer| {
+        reducer
+            .snapshot()
+            .terminal
+            .as_ref()
+            .map(|terminal| match terminal.status {
+                TurnTerminalStatus::Completed => "Completed",
+                TurnTerminalStatus::Failed => "Could not finish",
+                TurnTerminalStatus::Cancelled => "Stopped",
+                TurnTerminalStatus::Exhausted => "Reached its limit",
+            })
+    });
+    let mut status = format!(" {connection}");
+    if let Some(terminal) = terminal {
+        status.push_str("   ");
+        status.push_str(terminal);
+    }
+    if area.width >= 44 {
+        status.push_str("   Ctrl-S conversations   Ctrl-Q quit");
+    }
+    frame.render_widget(
+        Paragraph::new(status).style(Style::new().bg(palette.canvas).fg(color)),
+        area,
+    );
+}
+
+fn authoritative_activity(app: &TuiApp) -> Option<&'static str> {
+    let state = app.reducer.as_ref()?.snapshot().presence.state;
+    match state {
+        PresenceState::Available => None,
+        PresenceState::Thinking => Some("Thinking"),
+        PresenceState::UsingTools => Some("Taking care of it"),
+        PresenceState::WaitingChild => Some("Waiting for delegated work"),
+        PresenceState::WaitingExternal => Some("Waiting for a response"),
+        PresenceState::PausedForUser => Some("Needs you"),
+        PresenceState::Scheduled => Some("Scheduled"),
+        PresenceState::Completed => Some("Done"),
+        PresenceState::Failed => Some("Could not finish"),
+    }
+}
+
+fn render_overlay(
+    frame: &mut Frame<'_>,
+    app: &TuiApp,
+    overlay: TuiOverlay,
+    area: Rect,
+    palette: Palette,
+) {
+    let overlay_area = centered(area, 76, 22);
+    frame.render_widget(Clear, overlay_area);
+    frame.render_widget(
+        Paragraph::new("").style(Style::new().bg(palette.layer)),
+        overlay_area,
+    );
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(overlay_area);
+    frame.render_widget(
+        Paragraph::new(overlay.label()).style(
+            Style::new()
+                .bg(palette.layer)
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        rows[0],
+    );
+    let filter = if app.overlay_query.is_empty() {
+        "Type to filter".into()
+    } else {
+        format!("Filter: {}", terminal_safe(&app.overlay_query))
+    };
+    frame.render_widget(
+        Paragraph::new(filter).style(Style::new().bg(palette.layer).fg(palette.muted)),
+        rows[1],
+    );
+    let items = app.overlay_rows();
+    let list = if items.is_empty() {
+        List::new([ListItem::new(overlay_empty(overlay)).style(Style::new().fg(palette.muted))])
+    } else {
+        List::new(items.into_iter().enumerate().map(|(index, value)| {
+            let style = if index == app.overlay_selection {
+                Style::new()
+                    .bg(palette.selected)
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().bg(palette.layer).fg(palette.text)
+            };
+            ListItem::new(format!(" {}", terminal_safe(&value))).style(style)
+        }))
+    };
+    frame.render_widget(list, rows[2]);
+    let help = if overlay == TuiOverlay::Approvals {
+        "Alt-A allow once   Alt-D deny   Esc close"
+    } else {
+        "Enter choose   Tab next   Esc close"
+    };
+    frame.render_widget(
+        Paragraph::new(help).style(Style::new().bg(palette.layer).fg(palette.muted)),
+        rows[3],
+    );
+}
+
+const fn overlay_empty(overlay: TuiOverlay) -> &'static str {
+    match overlay {
+        TuiOverlay::Sessions => "No conversations match. Clear the filter to see everything.",
+        TuiOverlay::Commands => "No commands match.",
+        TuiOverlay::Models => "No models match.",
+        TuiOverlay::Approvals => "Keith does not need a decision right now.",
+        TuiOverlay::Work => "Nothing is in progress. Ask Keith to take care of something.",
+        TuiOverlay::Memory => "No saved context is available for this conversation.",
+        TuiOverlay::Diagnostics => "Attach a conversation to inspect diagnostics.",
+    }
+}
+
+fn centered(area: Rect, max_width: u16, max_height: u16) -> Rect {
+    let width = area.width.saturating_sub(2).min(max_width).max(1);
+    let height = area.height.saturating_sub(2).min(max_height).max(1);
+    Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    )
 }
 
 pub(crate) fn terminal_safe(value: &str) -> String {
@@ -337,83 +413,24 @@ pub(crate) fn terminal_safe(value: &str) -> String {
         .collect()
 }
 
-fn render_status(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, palette: Palette) {
-    let connection = if app.reconnecting {
-        "reconnecting"
-    } else if app.connected {
-        "connected"
-    } else {
-        "offline"
-    };
-    let presence = app
-        .reducer
-        .as_ref()
-        .map_or("unavailable".into(), |reducer| {
-            format!("{:?}", reducer.snapshot().presence.state)
-        });
-    let activity = if app.in_flight_len() == 0 {
-        String::new()
-    } else {
-        format!("  working {}", app.in_flight_len())
-    };
-    let status = format!(
-        " {connection}  presence {presence}{activity}  Tab view  Ctrl-S sessions  Ctrl-Q quit"
-    );
-    let color = if app.connected {
-        palette.accent
-    } else {
-        palette.danger
-    };
-    frame.render_widget(
-        Paragraph::new(status).style(Style::new().bg(palette.layer).fg(color)),
-        area,
-    );
-}
-
-const fn empty_label(surface: Surface) -> &'static str {
-    match surface {
-        Surface::Chat => "No messages",
-        Surface::Queue => "No queued actions",
-        Surface::Sessions => "No sessions",
-        Surface::Models => "No model selection",
-        Surface::Goals => "No goals",
-        Surface::Plans => "No plans",
-        Surface::Children => "No children",
-        Surface::Tools => "No tool calls",
-        Surface::Kernels => "No kernels",
-        Surface::Artifacts => "No artifacts",
-        Surface::Schedules => "No schedules",
-        Surface::Commitments => "No commitments",
-        Surface::Waiting => "No waits",
-        Surface::Confirmations => "No confirmations",
-        Surface::Memory => "No memory changes",
-        Surface::Knowledge => "No knowledge changes",
-        Surface::Channels => "No channel activity",
-        Surface::Settings => "No settings changes",
-        Surface::Refinement => "No refinements",
-        Surface::Logs => "No logs",
-        Surface::Diagnostics => "No diagnostics",
-    }
-}
-
 const fn palette(mode: ColorMode) -> Palette {
     match mode {
         ColorMode::TrueColor => Palette {
-            canvas: Color::Rgb(18, 21, 24),
-            layer: Color::Rgb(29, 34, 39),
-            selected: Color::Rgb(42, 52, 59),
-            text: Color::Rgb(236, 239, 241),
-            muted: Color::Rgb(166, 176, 184),
-            accent: Color::Rgb(100, 210, 170),
-            danger: Color::Rgb(240, 125, 125),
+            canvas: Color::Reset,
+            layer: Color::Rgb(31, 34, 38),
+            selected: Color::Rgb(48, 53, 59),
+            text: Color::Rgb(235, 237, 240),
+            muted: Color::Rgb(151, 158, 166),
+            accent: Color::Rgb(97, 205, 153),
+            danger: Color::Rgb(232, 112, 112),
         },
         ColorMode::Ansi256 => Palette {
-            canvas: Color::Indexed(234),
+            canvas: Color::Reset,
             layer: Color::Indexed(236),
             selected: Color::Indexed(239),
             text: Color::Indexed(255),
             muted: Color::Indexed(248),
-            accent: Color::Indexed(79),
+            accent: Color::Indexed(78),
             danger: Color::Indexed(210),
         },
         ColorMode::NoColor => Palette {

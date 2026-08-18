@@ -16,7 +16,7 @@
     - Resume from the latest reducer cursor, reconnect safely, and keep cancellation responsive
     - Add real transport tests for idle events, in-flight events, gap recovery, reconnect, and shutdown
     - _Requirements: 2.1-2.4, 4.1-4.5_
-  - [ ] 2.2 Codex-style inline conversation TUI
+  - [-] 2.2 Codex-style inline conversation TUI
     - Replace permanent subsystem navigation with transcript, live tail, compact composer, and status row
     - Use Ratatui inline viewport and insert settled transcript cells into native terminal scrollback
     - Implement temporary overlays for sessions, commands, models, approvals, work, memory, and diagnostics
@@ -29,7 +29,7 @@
     - Audit output for control injection, decorative borders, glow, purple treatments, emoji status, fabricated work, and lost transcript
     - Publish the terminal compatibility matrix as executable test data
     - _Requirements: 3.2-3.6, 4.1-4.5, 9.1-9.3_
-  - [-] 3.1 SolidJS, Rust-WASM, and Apps SDK UI design foundation
+  - [x] 3.1 SolidJS, Rust-WASM, and Apps SDK UI design foundation
     - Create the production SolidJS/Vite application and reproducible package lock
     - Import @openai/apps-sdk-ui/css and implement a token-only Keith adapter with forbidden-style auditing
     - Expose the Rust/WASM reducer, resume cursor, personal projection, and typed command builders to Solid
