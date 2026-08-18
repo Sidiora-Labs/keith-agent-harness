@@ -23,7 +23,7 @@
     - Implement safe wrapping, code indentation, draft-preserving keyboard behavior, and transcript-preserving narrow layouts
     - Render only authoritative presence and terminal state as activity
     - _Requirements: 1.2-1.5, 2.2-2.4, 3.1-3.6, 4.3-4.4_
-  - [ ] 2.3 TUI terminal behavior and restoration gate
+  - [-] 2.3 TUI terminal behavior and restoration gate
     - Add deterministic terminal snapshots for wide, narrow, color, no-color, overlay, streaming, failure, and long-history states
     - Add PTY or VT-backed process journeys for inline scrollback, paste, resize, idle event delivery, external editor, signal, and restoration
     - Audit output for control injection, decorative borders, glow, purple treatments, emoji status, fabricated work, and lost transcript
@@ -36,7 +36,7 @@
     - Teach the authenticated Rust server, desktop shell, and release assembler to serve and package hashed production assets
     - Add typecheck, build, stale-asset, CSP, and secret-safe bundle gates
     - _Requirements: 2.1-2.5, 5.1, 6.1-6.6, 8.5, 9.4-9.5_
-  - [-] 3.2 Consumer Home, Conversation, Work, and Your World shell
+  - [x] 3.2 Consumer Home, Conversation, Work, and Your World shell
     - Build a restrained responsive shell with at most Home, Conversation, Work, Your World, and Settings
     - Build the authoritative personal brief, outcome-oriented work groups, saved context, outputs, and meaningful empty states
     - Keep the conversation and subscription mounted while destinations and mobile sheets change

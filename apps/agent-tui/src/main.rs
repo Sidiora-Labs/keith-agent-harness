@@ -1,13 +1,14 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, stdout};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
+use crossterm::execute;
 use keith_agent_tui::{
     Accessibility, AgentCommandDispatcher, AgentConnectionClient, AppAction, DispatchEvent, TuiApp,
     TuiArguments, render, settled_transcript_lines,
@@ -61,10 +62,9 @@ fn run() -> Result<(), String> {
         let options = TerminalOptions {
             viewport: Viewport::Inline(terminal_rows.saturating_sub(1).clamp(6, 18)),
         };
-        let mut terminal =
-            ratatui::try_init_with_options(options).map_err(|error| error.to_string())?;
+        let mut terminal = init_terminal(options).map_err(|error| error.to_string())?;
         let result = event_loop(&mut terminal, &mut app, &mut dispatcher, &shutdown);
-        let restored = ratatui::try_restore();
+        let restored = restore_terminal();
         let exit = result.map_err(|error| error.to_string())?;
         restored.map_err(|error| error.to_string())?;
         match exit {
@@ -72,6 +72,21 @@ fn run() -> Result<(), String> {
             LoopExit::ExternalEditor => edit_composer(&mut app)?,
         }
     }
+}
+
+fn init_terminal(options: TerminalOptions) -> io::Result<ratatui::DefaultTerminal> {
+    let terminal = ratatui::try_init_with_options(options)?;
+    if let Err(error) = execute!(stdout(), EnableBracketedPaste) {
+        let _ = ratatui::try_restore();
+        return Err(error);
+    }
+    Ok(terminal)
+}
+
+fn restore_terminal() -> io::Result<()> {
+    let paste_result = execute!(stdout(), DisableBracketedPaste);
+    let terminal_result = ratatui::try_restore();
+    paste_result.and(terminal_result)
 }
 
 fn event_loop(

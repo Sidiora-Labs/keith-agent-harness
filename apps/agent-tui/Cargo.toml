@@ -25,6 +25,7 @@ url.workspace = true
 
 [dev-dependencies]
 keith-daemon-core = { path = "../../crates/daemon-core" }
+rustix = { version = "1.1.4", features = ["fs", "process", "pty", "termios"] }
 
 [[bin]]
 name = "agent-tui"

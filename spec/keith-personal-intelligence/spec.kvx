@@ -149,7 +149,7 @@ verify_cmd = "cargo test -p keith-agent-tui"
 
 [task.2.3]
 title  = "TUI terminal behavior and restoration gate"
-status = "pending"
+status = "in_progress"
 wave   = 4
 do_1   = "Add deterministic terminal snapshots for wide, narrow, color, no-color, overlay, streaming, failure, and long-history states"
 do_2   = "Add PTY or VT-backed process journeys for inline scrollback, paste, resize, idle event delivery, external editor, signal, and restoration"
@@ -177,7 +177,7 @@ verify_cmd = "pnpm --dir apps/agent-web/ui run check && pnpm --dir apps/agent-we
 
 [task.3.2]
 title  = "Consumer Home, Conversation, Work, and Your World shell"
-status = "in_progress"
+status = "done"
 wave   = 3
 do_1   = "Build a restrained responsive shell with at most Home, Conversation, Work, Your World, and Settings"
 do_2   = "Build the authoritative personal brief, outcome-oriented work groups, saved context, outputs, and meaningful empty states"
