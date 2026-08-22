@@ -15,7 +15,7 @@
 feature      = "keith-agent"
 title        = "Keith Agent — Rust-native supervised recursion, readable personal memory, multi-channel presence, and durable autonomy"
 status       = "planning"
-spec_version = "1.2.0"
+spec_version = "1.3.0"
 intro        = "Keith Agent combines the Delta-1 supervised recursive runtime with the Gamma-3 assistant and distribution layer in one Rust-native architecture. One daemon supervises one worker per root session tree; every root and durable child uses AgentSession; prompts, schedules, channel messages, child results, steering, and autonomous continuation share one action inbox. Human-readable profiles, memory, knowledge, and skills remain user-owned, while event-driven awareness, attention, commitments, waiting, planning, review, channels, and reversible refinement create continuity without simulated consciousness. Rust owns every platform boundary; Python, shells, browsers, compilers, and other runtimes are optional restricted guest workloads. No task is complete from source presence, a rendered interface, an endpoint response, or a model claim: current packaged binaries and real process paths must satisfy the referenced acceptance criteria."
 
 [design]
@@ -416,9 +416,9 @@ ac_5  = "RENDERING SHALL support truecolor, 256-color, no-color, narrow terminal
 ac_6  = "A terminal matrix SHALL prove streaming, reconnect, crash recovery, confirmation, long history, resize, paste, external editor, terminal restoration, and parity with shared commands."
 
 [req.39]
-title = "Rust/WASM web application and Rust desktop shell"
+title = "Next.js web application and Rust desktop shell"
 story = "As a visual user, I want a rich persistent application, so that I can supervise sessions, memory, channels, and autonomy without losing active work."
-ac_1  = "THE web backend SHALL be Rust and the owned browser application SHALL use Rust/WASM while communicating only through the shared protocol."
+ac_1  = "THE web backend SHALL remain Rust and the owned browser application SHALL use a statically exported Next.js React/TypeScript client while communicating only through the shared protocol; no Rust-generated or WASM browser projection layer SHALL be shipped."
 ac_2  = "THE shell SHALL keep active chat/session subscriptions mounted while navigating sessions, goals, children, tools, memory, knowledge, schedules, commitments, channels, settings, artifacts, and refinement."
 ac_3  = "THE desktop shell SHALL package daemon lifecycle, web assets, notifications, file selection, updates, and browser handoff without implementing alternate agent behavior."
 ac_4  = "BROWSER mutations SHALL require authenticated session, exact origin, CSRF proof, payload/rate limits, and server-side route/profile checks."
@@ -585,6 +585,30 @@ ac_7  = "RELATIONSHIP state and selected memory SHALL compile only into bounded 
 ac_8  = "PERSONALITY, onboarding, relationship projection, and activation failures SHALL fail open and SHALL NOT own provider retry, tool execution, compaction, final creation, terminal status, outbox identity, delivery, or recovery."
 ac_9  = "CORRECTION, deletion, profile isolation, archive revision, user edits, and relationship-log recovery SHALL invalidate affected future context without rewriting completed turns or unrelated profiles."
 ac_10 = "A longitudinal and fault suite SHALL prove non-generic first contact, exact-once onboarding, direct name capture, natural established-name guidance, correction, forgetting, custom-persona preservation, legacy-default upgrade, no weak inference, retry/compaction stability, restart recovery, cross-profile isolation, and unchanged final authority."
+
+[req.55]
+title = "Unified RLM memory authority and explicit context activation"
+story = "As Keith and the user, I want one coherent memory environment outside the prompt, so that exact experience can be created, corrected, forgotten, rapidly retrieved, and recursively investigated without polluting context or fragmenting authority."
+ac_1  = "ONE profile-scoped RLM memory authority SHALL own exact evidence, relationship events, admitted durable memories, knowledge references, corrections, validity, graph routes, indexes, hot anchors, and revision state; relationship events MAY retain their append-only ledger but SHALL project into this authority and SHALL NOT form an agent-invisible memory island."
+ac_2  = "MEMORY SHALL remain distinct from model context; a stored record becomes context only through a bounded typed activation or tool result, and committed session context becomes memory only after source-linked ingestion into the RLM authority."
+ac_3  = "KEITH SHALL receive typed `memory_create`, `memory_search`, `memory_get`, `memory_correct`, `memory_forget`, and `memory_context` tools over the same authority; the host SHALL validate schema, scope, provenance, cited source entries, sensitivity, and consistency but SHALL NOT infer names, preferences, or conversational meaning from free text."
+ac_4  = "CREATE and correction writes asserting user facts SHALL cite an exact committed UserIngress entry and supporting excerpt; corrections SHALL supersede prior evidence, forgetting SHALL delete it from future activation, and agent observations SHALL retain a lower explicit authority than user-confirmed facts."
+ac_5  = "A revision-bound hot cache SHALL keep exact confirmed anchors and recently relevant record references immediately outside the active window, invalidate on correction, deletion, sensitivity, profile, or revision change, and never become authoritative."
+ac_6  = "`memory_context` SHALL return a Codify-style bounded bundle containing exact records, citations, temporal neighbors, graph relations, corrections, contradictions, coverage, gaps, archive revision, source digests, and token price; deeper requests MAY use bounded read-only memory scouts through MemoryWorld."
+ac_7  = "MEMORY scouts and the Python RLM environment SHALL query host-owned exact evidence and indexes through revision-bound capabilities and SHALL NOT gain workspace mutation, general tools, external messaging, delivery, memory-write, provider-retry, or turn-final authority."
+ac_8  = "EVERY memory activation SHALL carry explicit non-user provenance, authority, scope, revision, evidence IDs, source digests, selector identity, and token cost; only UserIngress SHALL compile as provider user and the final user entry SHALL remain verbatim and highest for current task intent beneath immutable platform policy."
+ac_9  = "COMMITTED session ingestion, indexing, graphing, caching, activation, and recursive retrieval SHALL run outside final creation and delivery, use durable cursors where asynchronous, fail open for ordinary turns, and never block or rewrite an accepted final."
+ac_10 = "A regression suite SHALL cover natural name creation, greetings that are not names, cross-session retrieval, unified tool and automatic views, create/get/search/correct/forget, citations, stale cache invalidation, deep context bundles, recursive bounds, index rebuild, corruption, context-role hygiene, provider failure, compaction, restart, and unchanged final/outbox authority."
+
+[req.56]
+title = "Durable prompt acceptance before lazy worker activation"
+story = "As a user sending the first message after cold start or restart, I want one durable acceptance to survive worker startup, so that I never have to submit multiple messages until one happens to work."
+ac_1  = "THE daemon SHALL durably admit a valid prompt command and stable action identity before lazy worker activation or provider execution and SHALL deduplicate repeated delivery of the same command identity."
+ac_2  = "A cold, restarting, unavailable, or startup-failing worker SHALL NOT erase an admitted prompt; the daemon SHALL dispatch it when the owning generation becomes ready or finalize the same accepted action with one honest local failure final."
+ac_3  = "HTTP or socket response loss after acceptance SHALL be recoverable by command ID, snapshot, and event replay without creating a new prompt, blind resend, or ambiguous duplicate effect."
+ac_4  = "CLIENTS SHALL retain the stable command identity and draft until authoritative acceptance is known, distinguish unaccepted validation denial from accepted pending work, and SHALL NOT require repeated manual sends as a readiness probe."
+ac_5  = "WORKER activation, retry, recovery, maintenance, compaction, and delivery failures SHALL remain separate from accepted-action final identity and terminal ownership."
+ac_6  = "A real-process fault suite SHALL cover cold start, slow start, startup timeout, worker exit, daemon restart, response loss before and after acceptance, repeated command delivery, reconnect, exactly one user entry, exactly one final ID, and no manual retry requirement."
 
 # ================================ TASKS ==================================
 
@@ -1083,6 +1107,19 @@ reqs   = ["7.1-7.7", "10.1-10.7", "23.1-23.5", "25.4-25.6", "42.1-42.6", "44.1-4
 requires = ["7.11"]
 touches = ["crates/memory/src/*.rs", "crates/provider-core/src/lib.rs", "crates/local-runtime/src/lib.rs"]
 
+[task.7.13]
+title  = "Unified RLM memory authority, agent tools, hot cache, and context bundles"
+status = "in_progress"
+wave   = 20
+do_1   = "Make the evidence vault and atlas the single agent-facing memory authority while retaining the relationship ledger only as a durable event source projected into that authority"
+do_2   = "Replace host natural-language relationship parsing with agent-authored cited memory mutations and implement create, search, get, correct, forget, and Codify-style memory_context tools over one record identity space"
+do_3   = "Implement revision-bound hot confirmed-anchor caching, unified activation, exact source validation, correction/deletion invalidation, and fail-open asynchronous committed-session ingestion"
+do_4   = "Route deep context through bounded MemoryWorld and read-only memory scouts while preserving explicit non-user activation manifests and current UserIngress authority"
+do_5   = "Run natural-language, greeting, cross-session, CRUD, context-bundle, cache, recursion, corruption, compaction, provider-failure, role-hygiene, restart, finalization, and outbox regressions"
+reqs   = ["7.1-7.7", "10.1-10.7", "13.1-13.6", "17.1-17.6", "21.1-21.6", "25.1-25.6", "26.1-26.6", "42.1-42.6", "44.1-44.5", "52.1-52.8", "53.1-53.10", "54.3-54.10", "55.1-55.10"]
+requires = ["7.12"]
+touches = ["crates/memory/src/*.rs", "crates/provider-core/src/lib.rs", "crates/local-runtime/src/lib.rs", "crates/kernel-protocol/src/lib.rs", "crates/kernel-broker/src/lib.rs", "crates/subagents/src/*.rs"]
+
 [task.8]
 section = "Phase 8 — Scheduler, Commitments, Awareness, Attention, and Presence"
 title   = "The Persistent Life Loop"
@@ -1256,7 +1293,7 @@ requires = ["7.6", "10.3"]
 
 [task.11]
 section = "Phase 11 — TUI, Web, Desktop, and Shared Operator State"
-title   = "First-Class Rust Clients with Protocol Parity and Accessible Truthful Presence"
+title   = "First-Class Clients with Protocol Parity and Accessible Truthful Presence"
 status  = "pending"
 
 [task.11.1]
@@ -1316,6 +1353,19 @@ do_3   = "Remove decorative borders, glow, purple gradients, emoji status, and f
 do_4   = "Run TUI/web command and projection parity, accessibility automation/manual checks, long history, slow client, and zero-activity tests"
 reqs   = ["40.1-40.6"]
 requires = ["11.2", "11.3"]
+
+[task.11.6]
+title  = "Keith-only Next.js web client replacement"
+status = "done"
+wave   = 20
+do_1   = "Remove the Rust/WASM, Solid, and Vite browser surface without changing the Rust daemon, authenticated backend, or shared protocol"
+do_2   = "Build a statically exported Next.js React/TypeScript client that reproduces the Neo matte conversation, composer, navigation, and user-controlled computer workspace design for Keith only"
+do_3   = "Implement authenticated bootstrap, typed command envelopes, resumable WebSocket projection, snapshot recovery, sessions, active work, memory, schedules, settings, confirmations, goals, children, model selection, branch, resume, export, and background controls"
+do_4   = "Preserve exact-origin, CSRF, route/profile, credential, CSP, payload, rate, accessibility, responsive, reduced-motion, and truthful-state boundaries"
+do_5   = "Run TypeScript, protocol reducer, production export, Rust integration, security startup, and real-daemon Chromium send/response checks while proving that no legacy WASM asset is requested"
+reqs   = ["39.1-39.2", "39.4-39.6", "40.1-40.4", "40.6"]
+requires = ["11.5"]
+touches = ["apps/agent-web/Cargo.toml", "apps/agent-web/src/*.rs", "apps/agent-web/static/**", "apps/agent-web/tests/*", "apps/agent-web/ui/**"]
 
 [task.12]
 section = "Phase 12 — Reliability, Security, Data Lifecycle, and Diagnostics"
@@ -1448,6 +1498,19 @@ do_5   = "Run replay, provenance, repeated compaction/restart, boundary fault, u
 reqs   = ["7.1-7.7", "8.1-8.6", "10.1-10.7", "13.1-13.6", "35.1-35.6", "42.1-42.6", "52.1-52.8"]
 requires = ["4.2", "5.1", "9.2", "11.1", "12.2", "13.4"]
 touches = ["crates/session-store/src/lib.rs", "crates/agent-loop/src/lib.rs", "crates/tool-core/src/lib.rs", "crates/local-runtime/src/lib.rs", "crates/protocol/src/lib.rs", "crates/delivery/src/*.rs"]
+
+[task.13.7]
+title  = "Durable prompt acceptance before worker activation"
+status = "pending"
+wave   = 21
+do_1   = "Persist and deduplicate a stable prompt command and action identity in the daemon before lazy worker activation"
+do_2   = "Dispatch admitted prompts after worker readiness and preserve the same obligation through startup timeout, process exit, generation replacement, and daemon restart"
+do_3   = "Finalize an admitted prompt exactly once with the same action when execution cannot start, without requiring a user resend or replaying unknown effects"
+do_4   = "Teach HTTP, socket, web, and terminal clients to retain command identity until authoritative acceptance and recover ambiguous response loss through replay"
+do_5   = "Run cold-start, slow-start, startup-failure, response-loss, duplicate-delivery, reconnect, restart, single-user-entry, single-final, and outbox process tests"
+reqs   = ["3.1-3.6", "4.1-4.5", "6.1-6.6", "8.1-8.6", "10.1-10.7", "35.1-35.6", "42.1-42.6", "52.6-52.8", "56.1-56.6"]
+requires = ["7.13", "13.6"]
+touches = ["crates/action-store/src/lib.rs", "crates/daemon-core/src/*.rs", "crates/worker-runtime/src/lib.rs", "crates/runtime-api/src/lib.rs", "crates/local-runtime/src/lib.rs", "crates/protocol/src/lib.rs", "apps/agent-web/src/*.rs", "apps/agent-web/ui/src/*", "apps/agent-tui/src/*.rs"]
 
 [task.13.5]
 title  = "Performance, recursive load, and multi-hour soak"

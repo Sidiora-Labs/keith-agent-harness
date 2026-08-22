@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -329,16 +329,15 @@ fn command_worker(
     events: &SyncSender<DispatchEvent>,
     shutdown: &AtomicBool,
 ) {
-    let mut pending = BTreeSet::new();
+    let mut pending = BTreeMap::new();
     loop {
         loop {
             match commands.try_recv() {
                 Ok(command) => {
                     let command_id = command.command_id.clone();
+                    pending.insert(command_id.clone(), command.clone());
                     match client.send_command(command) {
-                        Ok(()) => {
-                            pending.insert(command_id);
-                        }
+                        Ok(()) => {}
                         Err(error) => {
                             let _ = events.send(DispatchEvent::CommandFailed(error.to_string()));
                             if !recover_connection(
@@ -384,16 +383,16 @@ fn command_worker(
 fn recover_connection(
     client: &mut AgentConnectionClient,
     startup_timeout: Duration,
-    pending: &mut BTreeSet<keith_agent_types::CommandId>,
+    pending: &mut BTreeMap<keith_agent_types::CommandId, CommandEnvelope>,
     events: &SyncSender<DispatchEvent>,
     shutdown: &AtomicBool,
 ) -> bool {
-    for _ in pending.iter() {
+    for _ in pending.values() {
         let _ = events.send(DispatchEvent::CommandFailed(
-            "Connection changed before the command result; refreshing authoritative state".into(),
+            "Connection changed before the command result; retrying the same command identity"
+                .into(),
         ));
     }
-    pending.clear();
     if events.send(DispatchEvent::Reconnecting).is_err() {
         return false;
     }
@@ -402,7 +401,15 @@ fn recover_connection(
             return false;
         }
         match client.reconnect(None, startup_timeout) {
-            Ok(()) => return events.send(DispatchEvent::Reconnected).is_ok(),
+            Ok(()) => {
+                let replayed = pending
+                    .values()
+                    .cloned()
+                    .all(|command| client.send_command(command).is_ok());
+                if replayed {
+                    return events.send(DispatchEvent::Reconnected).is_ok();
+                }
+            }
             Err(error) => {
                 if events
                     .send(DispatchEvent::ReconnectFailed(error.to_string()))

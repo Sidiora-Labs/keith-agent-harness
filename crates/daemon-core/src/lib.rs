@@ -16,8 +16,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use keith_agent_types::{
-    CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, CommonError, EntityId, ErrorCode, Generation,
-    ProfileId, Revision, RootTreeId, SchemaVersion, Sequence, SessionId, UtcTimestamp,
+    ActionId, CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, CommandId, CommonError, EntityId,
+    ErrorCode, Generation, ProfileId, Revision, RootTreeId, SchemaVersion, Sequence, SessionId,
+    TurnId, UtcTimestamp,
 };
 use keith_connection::{
     AgentTransport, FramedTransport, LocalStream, accept_local, bind_permissioned_local,
@@ -30,8 +31,12 @@ use keith_protocol::{
     WireFormat, WireMessage, negotiate,
 };
 use keith_runtime_api::{
-    RuntimeAgentOutcome, RuntimeEvent, RuntimeEventKind, RuntimeRequest, RuntimeResponse,
-    RuntimeSession,
+    AcceptedPrompt, RuntimeAgentOutcome, RuntimeEvent, RuntimeEventKind, RuntimeRequest,
+    RuntimeResponse, RuntimeSession,
+};
+use keith_state_store::{EmbeddedStore, FileBackupHook, StoreError};
+use keith_state_store_core::{
+    AtomicStateRepository, Collection, RecordMutation, VersionedRecord, WritePrecondition,
 };
 use keith_supervisor::{
     SupervisorError, SupervisorOptions, WorkerEvent, WorkerStatus, WorkerSupervisor,
@@ -41,6 +46,31 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
+const MAX_PROMPT_BYTES: usize = 256 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+enum PromptIngressState {
+    Accepted,
+    Completed {
+        final_id: Option<keith_agent_types::EntryId>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptIngressRecord {
+    accepted: AcceptedPrompt,
+    state: PromptIngressState,
+    attempts: u32,
+    last_error: Option<String>,
+    next_attempt_at: UtcTimestamp,
+}
+
+enum PromptRunResult {
+    Completed(SessionSnapshot),
+    Accepted(ActionId),
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -253,6 +283,7 @@ pub struct DaemonCore {
     last_worker_events: Vec<WorkerEvent>,
     event_hubs: BTreeMap<RootTreeId, EventHub>,
     command_ledger: CommandLedger,
+    prompt_ingress: EmbeddedStore,
     shutting_down: bool,
     startup_recovery: StartupRecoveryReport,
     worker_runtime_enabled: bool,
@@ -281,6 +312,10 @@ pub enum DaemonError {
     Recovery(#[from] RecoveryError),
     #[error("runtime operation failed: {0}")]
     Runtime(String),
+    #[error(transparent)]
+    State(#[from] StoreError),
+    #[error("daemon prompt ingress is corrupt: {0}")]
+    PromptIngress(#[from] serde_json::Error),
 }
 
 impl DaemonCore {
@@ -345,6 +380,8 @@ impl DaemonCore {
         };
         supervisor.adopt_existing()?;
         let command_ledger = CommandLedger::new(options.command_dedup_capacity)?;
+        let prompt_ingress =
+            EmbeddedStore::open(&data_root.join("state.sqlite"), Some(&FileBackupHook))?;
         Ok(Self {
             instance_id: EntityId::new(),
             data_root,
@@ -354,6 +391,7 @@ impl DaemonCore {
             last_worker_events: Vec::new(),
             event_hubs: BTreeMap::new(),
             command_ledger,
+            prompt_ingress,
             shutting_down: false,
             startup_recovery,
             worker_runtime_enabled,
@@ -534,7 +572,36 @@ impl DaemonCore {
             }
             self.last_runtime_maintenance = Some(Instant::now());
         }
+        self.resume_one_prompt();
         Ok(())
+    }
+
+    fn resume_one_prompt(&mut self) {
+        let Ok(now) = UtcTimestamp::now() else {
+            return;
+        };
+        let Ok(records) = self.prompt_ingress.list_records(Collection::PromptIngress) else {
+            return;
+        };
+        let Some(pending) = records.into_iter().find_map(|stored| {
+            serde_json::from_value::<PromptIngressRecord>(stored.payload)
+                .ok()
+                .filter(|record| {
+                    matches!(record.state, PromptIngressState::Accepted)
+                        && record.next_attempt_at <= now
+                })
+        }) else {
+            return;
+        };
+        let mut discard = |_: EventEnvelope| {};
+        match self.dispatch_accepted_prompt(&pending.accepted, &mut discard) {
+            Ok(snapshot) => {
+                let _ = self.complete_prompt(&pending.accepted.acceptance_id, &snapshot);
+            }
+            Err(error) => {
+                let _ = self.defer_prompt(&pending.accepted.acceptance_id, &error.to_string());
+            }
+        }
     }
 
     /// Drains all active and adopted workers.
@@ -769,6 +836,7 @@ impl DaemonCore {
                 let (result, events) = self.execute_command(
                     connected_client_id,
                     command.session_id.as_ref(),
+                    command.command_id.clone(),
                     command.command,
                     events,
                 );
@@ -814,6 +882,7 @@ impl DaemonCore {
         &mut self,
         client_id: &keith_agent_types::ClientId,
         scope_session_id: Option<&SessionId>,
+        command_id: CommandId,
         command: ClientCommand,
         events: &mut dyn FnMut(EventEnvelope),
     ) -> (CommandResult, Vec<keith_protocol::EventEnvelope>) {
@@ -943,9 +1012,17 @@ impl DaemonCore {
                     Err(error) => rejected_daemon(error),
                 }
             }
-            ClientCommand::SubmitPrompt(prompt) => match self.run_prompt(&prompt, events) {
-                Ok(snapshot) => (
+            ClientCommand::SubmitPrompt(prompt) => match self
+                .run_prompt(command_id, &prompt, events)
+            {
+                Ok(PromptRunResult::Completed(snapshot)) => (
                     CommandResult::Data(Box::new(ResponsePayload::Snapshot(Box::new(snapshot)))),
+                    Vec::new(),
+                ),
+                Ok(PromptRunResult::Accepted(action_id)) => (
+                    CommandResult::Accepted {
+                        action_id: Some(action_id),
+                    },
                     Vec::new(),
                 ),
                 Err(error) => rejected_daemon(error),
@@ -1274,18 +1351,56 @@ impl DaemonCore {
 
     fn run_prompt(
         &mut self,
+        command_id: CommandId,
         prompt: &keith_protocol::SubmitPrompt,
         events: &mut dyn FnMut(EventEnvelope),
-    ) -> Result<SessionSnapshot, DaemonError> {
-        let status = self.activate_session(&prompt.session_id)?;
-        let root = self
-            .catalog
-            .root_for_session(&prompt.session_id)
-            .cloned()
-            .ok_or_else(|| DaemonError::UnknownSession(prompt.session_id.clone()))?;
+    ) -> Result<PromptRunResult, DaemonError> {
         if !self.worker_runtime_enabled {
             return Err(runtime_unavailable());
         }
+        if prompt.text.trim().is_empty() || prompt.text.len() > MAX_PROMPT_BYTES {
+            return Err(DaemonError::Runtime(
+                "prompt is empty or exceeds the maximum accepted size".into(),
+            ));
+        }
+        if self.catalog.root_for_session(&prompt.session_id).is_none() {
+            return Err(DaemonError::UnknownSession(prompt.session_id.clone()));
+        }
+        let accepted = self.accept_prompt(command_id, prompt)?;
+        if let Some(root) = self.catalog.root_for_session(&prompt.session_id).cloned()
+            && let Some(hub) = self.event_hubs.get_mut(&root)
+            && let Ok(envelope) = hub.publish(DaemonEvent::CommandAccepted {
+                command_id: accepted.accepted.acceptance_id.clone(),
+            })
+        {
+            events(envelope);
+        }
+        if matches!(accepted.state, PromptIngressState::Completed { .. }) {
+            return Ok(PromptRunResult::Accepted(accepted.accepted.action_id));
+        }
+        match self.dispatch_accepted_prompt(&accepted.accepted, events) {
+            Ok(snapshot) => {
+                let _ = self.complete_prompt(&accepted.accepted.acceptance_id, &snapshot);
+                Ok(PromptRunResult::Completed(snapshot))
+            }
+            Err(error) => {
+                let _ = self.defer_prompt(&accepted.accepted.acceptance_id, &error.to_string());
+                Ok(PromptRunResult::Accepted(accepted.accepted.action_id))
+            }
+        }
+    }
+
+    fn dispatch_accepted_prompt(
+        &mut self,
+        accepted: &AcceptedPrompt,
+        events: &mut dyn FnMut(EventEnvelope),
+    ) -> Result<SessionSnapshot, DaemonError> {
+        let status = self.activate_session(&accepted.prompt.session_id)?;
+        let root = self
+            .catalog
+            .root_for_session(&accepted.prompt.session_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::UnknownSession(accepted.prompt.session_id.clone()))?;
         let mut event_error = None;
         let response = {
             let supervisor = &mut self.supervisor;
@@ -1293,8 +1408,8 @@ impl DaemonCore {
             supervisor.execute_streaming(
                 &root,
                 status.generation,
-                RuntimeRequest::RunPrompt {
-                    prompt: prompt.clone(),
+                RuntimeRequest::RunAcceptedPrompt {
+                    accepted: accepted.clone(),
                     generation: status.generation,
                 },
                 &mut |event| {
@@ -1310,12 +1425,14 @@ impl DaemonCore {
                 },
             )?
         };
-        if let Some(error) = event_error {
-            return Err(error.into());
-        }
         let snapshot = match response {
             RuntimeResponse::Snapshot(snapshot) => *snapshot,
-            RuntimeResponse::Failed(error) => return Err(DaemonError::Runtime(error)),
+            RuntimeResponse::Failed(error) => match self
+                .publish_runtime_snapshot(&accepted.prompt.session_id, status.generation)
+            {
+                Ok(snapshot) if snapshot.terminal.is_some() => snapshot,
+                _ => return Err(DaemonError::Runtime(error)),
+            },
             response => {
                 return Err(DaemonError::Runtime(format!(
                     "worker returned {} for prompt",
@@ -1328,19 +1445,132 @@ impl DaemonCore {
             manifest.state = SessionState::Ready;
             manifest.updated_at = snapshot.presence.updated_at;
             let updated = manifest.clone();
-            self.persist_root_manifest(&updated)?;
+            let _ = self.persist_root_manifest(&updated);
         }
         if let Some(hub) = self.event_hubs.get_mut(&root) {
             let terminal = snapshot.terminal.clone();
-            let envelope = hub.publish(DaemonEvent::Snapshot(Box::new(snapshot)))?;
-            events(envelope);
-            if let Some(terminal) = terminal {
-                let envelope = hub.publish(DaemonEvent::TurnTerminal(terminal))?;
+            if event_error.is_none()
+                && let Ok(envelope) = hub.publish(DaemonEvent::Snapshot(Box::new(snapshot.clone())))
+            {
                 events(envelope);
+                if let Some(terminal) = terminal
+                    && let Ok(envelope) = hub.publish(DaemonEvent::TurnTerminal(terminal))
+                {
+                    events(envelope);
+                }
+                return Ok(hub.snapshot().clone());
             }
-            return Ok(hub.snapshot().clone());
         }
         Ok(snapshot)
+    }
+
+    fn accept_prompt(
+        &self,
+        command_id: CommandId,
+        prompt: &keith_protocol::SubmitPrompt,
+    ) -> Result<PromptIngressRecord, DaemonError> {
+        let id = command_id.as_entity_id().clone();
+        if let Some(stored) = self
+            .prompt_ingress
+            .get_record(Collection::PromptIngress, &id)?
+        {
+            let existing = serde_json::from_value::<PromptIngressRecord>(stored.payload)?;
+            if existing.accepted.acceptance_id != command_id || existing.accepted.prompt != *prompt
+            {
+                return Err(DaemonError::Runtime(
+                    "prompt command ID conflicts with a prior accepted prompt".into(),
+                ));
+            }
+            return Ok(existing);
+        }
+        let accepted_at =
+            UtcTimestamp::now().map_err(|error| DaemonError::Runtime(error.to_string()))?;
+        let value = PromptIngressRecord {
+            accepted: AcceptedPrompt {
+                acceptance_id: command_id,
+                action_id: ActionId::new(),
+                turn_id: TurnId::new(),
+                prompt: prompt.clone(),
+                accepted_at,
+            },
+            state: PromptIngressState::Accepted,
+            attempts: 0,
+            last_error: None,
+            next_attempt_at: accepted_at,
+        };
+        self.prompt_ingress.transact(&[RecordMutation::Put {
+            collection: Collection::PromptIngress,
+            record: VersionedRecord {
+                version: CURRENT_SCHEMA_VERSION,
+                id,
+                revision: Revision::ZERO,
+                updated_at: accepted_at,
+                payload: serde_json::to_value(&value)?,
+            },
+            precondition: WritePrecondition::Missing,
+        }])?;
+        Ok(value)
+    }
+
+    fn complete_prompt(
+        &self,
+        acceptance_id: &CommandId,
+        snapshot: &SessionSnapshot,
+    ) -> Result<(), DaemonError> {
+        self.update_prompt(acceptance_id, |record, now| {
+            record.state = PromptIngressState::Completed {
+                final_id: snapshot
+                    .terminal
+                    .as_ref()
+                    .map(|terminal| terminal.final_id.clone()),
+            };
+            record.last_error = None;
+            record.next_attempt_at = now;
+        })
+    }
+
+    fn defer_prompt(&self, acceptance_id: &CommandId, error: &str) -> Result<(), DaemonError> {
+        self.update_prompt(acceptance_id, |record, now| {
+            record.attempts = record.attempts.saturating_add(1);
+            record.last_error = Some(error.chars().take(1_024).collect());
+            let delay_ms = i64::from(record.attempts.min(60)).saturating_mul(1_000);
+            record.next_attempt_at =
+                UtcTimestamp::from_unix_millis(now.unix_millis().saturating_add(delay_ms));
+        })
+    }
+
+    fn update_prompt(
+        &self,
+        acceptance_id: &CommandId,
+        update: impl FnOnce(&mut PromptIngressRecord, UtcTimestamp),
+    ) -> Result<(), DaemonError> {
+        let id = acceptance_id.as_entity_id();
+        let stored = self
+            .prompt_ingress
+            .get_record(Collection::PromptIngress, id)?
+            .ok_or_else(|| DaemonError::Runtime("accepted prompt record is missing".into()))?;
+        let mut value = serde_json::from_value::<PromptIngressRecord>(stored.payload.clone())?;
+        if matches!(value.state, PromptIngressState::Completed { .. }) {
+            return Ok(());
+        }
+        let now = UtcTimestamp::now().map_err(|error| DaemonError::Runtime(error.to_string()))?;
+        update(&mut value, now);
+        let revision = stored
+            .revision
+            .checked_next()
+            .ok_or_else(|| DaemonError::Runtime("prompt ingress revision overflow".into()))?;
+        self.prompt_ingress.transact(&[RecordMutation::Put {
+            collection: Collection::PromptIngress,
+            record: VersionedRecord {
+                version: CURRENT_SCHEMA_VERSION,
+                id: id.clone(),
+                revision,
+                updated_at: now,
+                payload: serde_json::to_value(value)?,
+            },
+            precondition: WritePrecondition::Exact(stored.revision),
+        }])?;
+        Ok(())
     }
 
     fn persist_root_manifest(&self, manifest: &RootManifest) -> Result<(), DaemonError> {

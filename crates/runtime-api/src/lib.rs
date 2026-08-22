@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use keith_agent_types::{
-    ArtifactId, ClientId, EntryId, Generation, MessageId, ProfileId, RootTreeId, SessionId,
-    ToolCallId, TurnId, UtcTimestamp,
+    ActionId, ArtifactId, ClientId, CommandId, EntryId, Generation, MessageId, ProfileId,
+    RootTreeId, SessionId, ToolCallId, TurnId, UtcTimestamp,
 };
 use keith_protocol::{
     ClientCommand, CommandResult, CreateSession, ModelSelection, ProfileSummary, SessionSnapshot,
@@ -19,6 +19,16 @@ pub struct RuntimeSession {
     pub title: Option<String>,
     pub archived: bool,
     pub created_at: UtcTimestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedPrompt {
+    pub acceptance_id: CommandId,
+    pub action_id: ActionId,
+    pub turn_id: TurnId,
+    pub prompt: SubmitPrompt,
+    pub accepted_at: UtcTimestamp,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -39,6 +49,10 @@ pub enum RuntimeRequest {
     SelectModel(ModelSelection),
     RunPrompt {
         prompt: SubmitPrompt,
+        generation: Generation,
+    },
+    RunAcceptedPrompt {
+        accepted: AcceptedPrompt,
         generation: Generation,
     },
     Snapshot {
@@ -179,6 +193,12 @@ impl RuntimeRequest {
             Self::RunPrompt { prompt, generation } => runtime
                 .run_prompt_streaming(prompt, *generation, events)
                 .map(|snapshot| RuntimeResponse::Snapshot(Box::new(snapshot))),
+            Self::RunAcceptedPrompt {
+                accepted,
+                generation,
+            } => runtime
+                .run_accepted_prompt_streaming(accepted, *generation, events)
+                .map(|snapshot| RuntimeResponse::Snapshot(Box::new(snapshot))),
             Self::Snapshot {
                 session_id,
                 generation,
@@ -232,6 +252,14 @@ pub trait CommandRuntime: Send + Sync {
     ) -> Result<SessionSnapshot, String> {
         let _ = events;
         self.run_prompt(prompt, generation)
+    }
+    fn run_accepted_prompt_streaming(
+        &self,
+        accepted: &AcceptedPrompt,
+        generation: Generation,
+        events: &mut dyn RuntimeEventSink,
+    ) -> Result<SessionSnapshot, String> {
+        self.run_prompt_streaming(&accepted.prompt, generation, events)
     }
     fn cancel_active(&self, session_id: &SessionId) -> Result<bool, String>;
     fn snapshot(

@@ -491,13 +491,13 @@ Keith Agent combines the Delta-1 supervised recursive runtime with the Gamma-3 a
 5. RENDERING SHALL support truecolor, 256-color, no-color, narrow terminals, Unicode width, SSH, multiplexers, and reduced motion without decorative border strokes, glow, purple gradients, or emoji status.
 6. A terminal matrix SHALL prove streaming, reconnect, crash recovery, confirmation, long history, resize, paste, external editor, terminal restoration, and parity with shared commands.
 
-## Requirement 39: Rust/WASM web application and Rust desktop shell
+## Requirement 39: Next.js web application and Rust desktop shell
 
 **User Story:** As a visual user, I want a rich persistent application, so that I can supervise sessions, memory, channels, and autonomy without losing active work.
 
 ### Acceptance Criteria
 
-1. THE web backend SHALL be Rust and the owned browser application SHALL use Rust/WASM while communicating only through the shared protocol.
+1. THE web backend SHALL remain Rust and the owned browser application SHALL use a statically exported Next.js React/TypeScript client while communicating only through the shared protocol; no Rust-generated or WASM browser projection layer SHALL be shipped.
 2. THE shell SHALL keep active chat/session subscriptions mounted while navigating sessions, goals, children, tools, memory, knowledge, schedules, commitments, channels, settings, artifacts, and refinement.
 3. THE desktop shell SHALL package daemon lifecycle, web assets, notifications, file selection, updates, and browser handoff without implementing alternate agent behavior.
 4. BROWSER mutations SHALL require authenticated session, exact origin, CSRF proof, payload/rate limits, and server-side route/profile checks.
@@ -707,4 +707,34 @@ Keith Agent combines the Delta-1 supervised recursive runtime with the Gamma-3 a
 8. PERSONALITY, onboarding, relationship projection, and activation failures SHALL fail open and SHALL NOT own provider retry, tool execution, compaction, final creation, terminal status, outbox identity, delivery, or recovery.
 9. CORRECTION, deletion, profile isolation, archive revision, user edits, and relationship-log recovery SHALL invalidate affected future context without rewriting completed turns or unrelated profiles.
 10. A longitudinal and fault suite SHALL prove non-generic first contact, exact-once onboarding, direct name capture, natural established-name guidance, correction, forgetting, custom-persona preservation, legacy-default upgrade, no weak inference, retry/compaction stability, restart recovery, cross-profile isolation, and unchanged final authority.
+
+## Requirement 55: Unified RLM memory authority and explicit context activation
+
+**User Story:** As Keith and the user, I want one coherent memory environment outside the prompt, so that exact experience can be created, corrected, forgotten, rapidly retrieved, and recursively investigated without polluting context or fragmenting authority.
+
+### Acceptance Criteria
+
+1. ONE profile-scoped RLM memory authority SHALL own exact evidence, relationship events, admitted durable memories, knowledge references, corrections, validity, graph routes, indexes, hot anchors, and revision state; relationship events MAY retain their append-only ledger but SHALL project into this authority and SHALL NOT form an agent-invisible memory island.
+2. MEMORY SHALL remain distinct from model context; a stored record becomes context only through a bounded typed activation or tool result, and committed session context becomes memory only after source-linked ingestion into the RLM authority.
+3. KEITH SHALL receive typed `memory_create`, `memory_search`, `memory_get`, `memory_correct`, `memory_forget`, and `memory_context` tools over the same authority; the host SHALL validate schema, scope, provenance, cited source entries, sensitivity, and consistency but SHALL NOT infer names, preferences, or conversational meaning from free text.
+4. CREATE and correction writes asserting user facts SHALL cite an exact committed UserIngress entry and supporting excerpt; corrections SHALL supersede prior evidence, forgetting SHALL delete it from future activation, and agent observations SHALL retain a lower explicit authority than user-confirmed facts.
+5. A revision-bound hot cache SHALL keep exact confirmed anchors and recently relevant record references immediately outside the active window, invalidate on correction, deletion, sensitivity, profile, or revision change, and never become authoritative.
+6. `memory_context` SHALL return a Codify-style bounded bundle containing exact records, citations, temporal neighbors, graph relations, corrections, contradictions, coverage, gaps, archive revision, source digests, and token price; deeper requests MAY use bounded read-only memory scouts through MemoryWorld.
+7. MEMORY scouts and the Python RLM environment SHALL query host-owned exact evidence and indexes through revision-bound capabilities and SHALL NOT gain workspace mutation, general tools, external messaging, delivery, memory-write, provider-retry, or turn-final authority.
+8. EVERY memory activation SHALL carry explicit non-user provenance, authority, scope, revision, evidence IDs, source digests, selector identity, and token cost; only UserIngress SHALL compile as provider user and the final user entry SHALL remain verbatim and highest for current task intent beneath immutable platform policy.
+9. COMMITTED session ingestion, indexing, graphing, caching, activation, and recursive retrieval SHALL run outside final creation and delivery, use durable cursors where asynchronous, fail open for ordinary turns, and never block or rewrite an accepted final.
+10. A regression suite SHALL cover natural name creation, greetings that are not names, cross-session retrieval, unified tool and automatic views, create/get/search/correct/forget, citations, stale cache invalidation, deep context bundles, recursive bounds, index rebuild, corruption, context-role hygiene, provider failure, compaction, restart, and unchanged final/outbox authority.
+
+## Requirement 56: Durable prompt acceptance before lazy worker activation
+
+**User Story:** As a user sending the first message after cold start or restart, I want one durable acceptance to survive worker startup, so that I never have to submit multiple messages until one happens to work.
+
+### Acceptance Criteria
+
+1. THE daemon SHALL durably admit a valid prompt command and stable action identity before lazy worker activation or provider execution and SHALL deduplicate repeated delivery of the same command identity.
+2. A cold, restarting, unavailable, or startup-failing worker SHALL NOT erase an admitted prompt; the daemon SHALL dispatch it when the owning generation becomes ready or finalize the same accepted action with one honest local failure final.
+3. HTTP or socket response loss after acceptance SHALL be recoverable by command ID, snapshot, and event replay without creating a new prompt, blind resend, or ambiguous duplicate effect.
+4. CLIENTS SHALL retain the stable command identity and draft until authoritative acceptance is known, distinguish unaccepted validation denial from accepted pending work, and SHALL NOT require repeated manual sends as a readiness probe.
+5. WORKER activation, retry, recovery, maintenance, compaction, and delivery failures SHALL remain separate from accepted-action final identity and terminal ownership.
+6. A real-process fault suite SHALL cover cold start, slow start, startup timeout, worker exit, daemon restart, response loss before and after acceptance, repeated command delivery, reconnect, exactly one user entry, exactly one final ID, and no manual retry requirement.
 

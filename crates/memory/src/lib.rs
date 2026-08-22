@@ -4,6 +4,7 @@ mod activation;
 mod observatory;
 mod recall;
 mod relationship;
+mod unified;
 
 pub use activation::{
     ACTIVATION_SELECTOR_VERSION, ActivationError, ActivationPolicy, ActivationRequest,
@@ -23,6 +24,10 @@ pub use recall::{
 pub use relationship::{
     PreferredName, RelationshipError, RelationshipService, RelationshipStage,
     RelationshipTurnContext,
+};
+pub use unified::{
+    AgentMemoryKind, MEMORY_CONTEXT_SELECTOR_VERSION, MemoryContextBundle, MemoryContradiction,
+    MemoryCorrectRequest, MemoryCreateRequest, MemoryForgetRequest, MemoryWriteSource,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -157,15 +162,26 @@ pub enum MemoryError {
     LockPoisoned,
     #[error("workspace rollback failed after: {cause}; rollback: {rollback}")]
     Rollback { cause: String, rollback: String },
+    #[error("memory request is invalid or exceeds a hard bound")]
+    InvalidRequest,
+    #[error("memory write does not cite exact committed evidence")]
+    InvalidEvidenceQuote,
+    #[error("memory authority changed while assembling context")]
+    Changed,
+    #[error("memory identity serialization failed: {0}")]
+    Identity(String),
 }
 
 pub struct MemoryService {
+    profile_id: ProfileId,
     workspace: PersonalWorkspace,
     policy: MemoryPolicy,
     ledger: Mutex<MemoryLedger>,
     observatory: MemoryObservatory,
     recall: RecallService,
     relationship: Option<RelationshipService>,
+    pending_ingestion: Mutex<unified::PendingIngestionQueue>,
+    hot_cache: Mutex<unified::HotMemoryCache>,
 }
 
 impl MemoryService {
@@ -207,12 +223,15 @@ impl MemoryService {
             let _ = relationship.sync_evidence(&observatory, now);
         }
         Ok(Self {
+            profile_id: profile_id.clone(),
             workspace,
             policy,
             ledger: Mutex::new(ledger),
             observatory,
             recall,
             relationship,
+            pending_ingestion: Mutex::new(unified::PendingIngestionQueue::default()),
+            hot_cache: Mutex::new(unified::HotMemoryCache::default()),
         })
     }
 

@@ -70,6 +70,7 @@ pub enum ContextProvenance {
     DurableMemory,
     RetrievedMemory,
     RelationshipContext,
+    MemoryWriteAuthority,
     RetrievedKnowledge,
     CompactionSummary,
     UserIngress,

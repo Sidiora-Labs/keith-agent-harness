@@ -1192,6 +1192,8 @@ mod tests {
             .apply(
                 vec![ObservatoryMutation::Delete {
                     evidence_id: delete_id,
+                    source_entries: Vec::new(),
+                    source_digests: Vec::new(),
                 }],
                 UtcTimestamp::from_unix_millis(10),
             )

@@ -1,10 +1,15 @@
 import { defineConfig } from "vitest/config"
-import solid from "vite-plugin-solid"
 
 export default defineConfig({
-  plugins: [solid()],
   test: {
     environment: "jsdom",
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx"]
+    setupFiles: ["./tests/setup.ts"],
+    include: ["**/*.test.ts", "**/*.test.tsx"],
+    exclude: ["node_modules", ".next", "out"]
+  },
+  resolve: {
+    alias: {
+      "@": new URL(".", import.meta.url).pathname
+    }
   }
 })

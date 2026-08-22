@@ -184,7 +184,7 @@ impl RelationshipService {
         session_id: &SessionId,
         entry_id: &EntryId,
         source_digest: &str,
-        user_text: &str,
+        _user_text: &str,
         now: UtcTimestamp,
     ) -> Result<RelationshipTurnContext, RelationshipError> {
         if source_digest.is_empty() {
@@ -192,9 +192,6 @@ impl RelationshipService {
         }
         let mut state = self.lock()?;
         let mut first_meeting = false;
-        let mut newly_confirmed_name = false;
-        let mut newly_forgotten_name = false;
-
         if state.projection.stage() == RelationshipStage::Unintroduced {
             self.append_locked(
                 &mut state,
@@ -214,65 +211,89 @@ impl RelationshipService {
             first_meeting = true;
         }
 
-        if !first_meeting {
-            if state.projection.preferred_name.is_some() && requests_name_forgetting(user_text) {
-                let evidence_id = state
-                    .projection
-                    .preferred_name
-                    .as_ref()
-                    .ok_or(RelationshipError::Invalid)?
-                    .evidence_id
-                    .clone();
-                self.append_locked(
-                    &mut state,
-                    RelationshipMutation::PreferredNameForgotten {
-                        source_session: session_id.clone(),
-                        source_entry: entry_id.clone(),
-                        source_digest: source_digest.to_owned(),
-                        evidence_id,
-                    },
-                    now,
-                )?;
-                newly_forgotten_name = true;
-            } else {
-                let allow_direct_answer =
-                    state.projection.stage() == RelationshipStage::AwaitingName;
-                if let Some(name) = preferred_name_from(user_text, allow_direct_answer) {
-                    let unchanged = state
-                        .projection
-                        .preferred_name
-                        .as_ref()
-                        .is_some_and(|current| current.value.eq_ignore_ascii_case(&name));
-                    if !unchanged {
-                        let supersedes = state
-                            .projection
-                            .preferred_name
-                            .as_ref()
-                            .map(|current| current.evidence_id.clone());
-                        self.append_locked(
-                            &mut state,
-                            RelationshipMutation::PreferredNameConfirmed {
-                                name,
-                                source_session: session_id.clone(),
-                                source_entry: entry_id.clone(),
-                                source_digest: source_digest.to_owned(),
-                                evidence_id: EntityId::new(),
-                                supersedes,
-                            },
-                            now,
-                        )?;
-                        newly_confirmed_name = true;
-                    }
-                }
-            }
-        }
+        relationship_context(&state, first_meeting, false, false)
+    }
 
-        relationship_context(
-            &state,
-            first_meeting,
-            newly_confirmed_name,
-            newly_forgotten_name,
-        )
+    /// Appends an agent-authored preferred-name transition against exact user evidence.
+    ///
+    /// This method validates a typed value; it never extracts a name from natural language.
+    pub fn confirm_preferred_name(
+        &self,
+        session_id: &SessionId,
+        entry_id: &EntryId,
+        source_digest: &str,
+        name: &str,
+        now: UtcTimestamp,
+    ) -> Result<RelationshipTurnContext, RelationshipError> {
+        if source_digest.is_empty() {
+            return Err(RelationshipError::Invalid);
+        }
+        let name = name.trim();
+        if validated_name(name).as_deref() != Some(name) {
+            return Err(RelationshipError::Invalid);
+        }
+        let mut state = self.lock()?;
+        if state
+            .projection
+            .preferred_name
+            .as_ref()
+            .is_some_and(|current| current.value == name)
+        {
+            return relationship_context(&state, false, false, false);
+        }
+        let supersedes = state
+            .projection
+            .preferred_name
+            .as_ref()
+            .map(|current| current.evidence_id.clone());
+        self.append_locked(
+            &mut state,
+            RelationshipMutation::PreferredNameConfirmed {
+                name: name.to_owned(),
+                source_session: session_id.clone(),
+                source_entry: entry_id.clone(),
+                source_digest: source_digest.to_owned(),
+                evidence_id: EntityId::new(),
+                supersedes,
+            },
+            now,
+        )?;
+        relationship_context(&state, false, true, false)
+    }
+
+    /// Appends an agent-authored forgetting transition against exact user evidence.
+    pub fn forget_preferred_name(
+        &self,
+        session_id: &SessionId,
+        entry_id: &EntryId,
+        source_digest: &str,
+        now: UtcTimestamp,
+    ) -> Result<RelationshipTurnContext, RelationshipError> {
+        if source_digest.is_empty() {
+            return Err(RelationshipError::Invalid);
+        }
+        let mut state = self.lock()?;
+        let Some(current) = state.projection.preferred_name.as_ref() else {
+            return relationship_context(&state, false, false, false);
+        };
+        let evidence_id = current.evidence_id.clone();
+        self.append_locked(
+            &mut state,
+            RelationshipMutation::PreferredNameForgotten {
+                source_session: session_id.clone(),
+                source_entry: entry_id.clone(),
+                source_digest: source_digest.to_owned(),
+                evidence_id,
+            },
+            now,
+        )?;
+        relationship_context(&state, false, false, true)
+    }
+
+    /// Returns the current durable relationship projection without interpreting input.
+    pub fn context(&self) -> Result<RelationshipTurnContext, RelationshipError> {
+        let state = self.lock()?;
+        relationship_context(&state, false, false, false)
     }
 
     /// Replays confirmed names, corrections, and forgetting into the evidence vault.
@@ -348,7 +369,12 @@ impl RelationshipService {
                         .apply(vec![mutation], now)
                         .map_err(|error| RelationshipError::Evidence(error.to_string()))?;
                 }
-                RelationshipMutation::PreferredNameForgotten { evidence_id, .. } => {
+                RelationshipMutation::PreferredNameForgotten {
+                    source_entry,
+                    source_digest,
+                    evidence_id,
+                    ..
+                } => {
                     let snapshot = observatory
                         .evidence_snapshot()
                         .map_err(|error| RelationshipError::Evidence(error.to_string()))?;
@@ -368,6 +394,8 @@ impl RelationshipService {
                         .apply(
                             vec![ObservatoryMutation::Delete {
                                 evidence_id: evidence_id.clone(),
+                                source_entries: vec![source_entry.clone()],
+                                source_digests: vec![source_digest.clone()],
                             }],
                             now,
                         )
@@ -443,46 +471,8 @@ fn relationship_context(
     })
 }
 
-fn preferred_name_from(text: &str, allow_direct_answer: bool) -> Option<String> {
-    let trimmed = text.trim();
-    let lowered = trimmed.to_lowercase();
-    for prefix in [
-        "please call me ",
-        "you can call me ",
-        "my name is ",
-        "call me ",
-    ] {
-        if lowered.starts_with(prefix) {
-            return validated_name(&trimmed[prefix.len()..], false);
-        }
-    }
-    if allow_direct_answer {
-        for prefix in ["i'm ", "i am "] {
-            if lowered.starts_with(prefix) {
-                return validated_name(&trimmed[prefix.len()..], false);
-            }
-        }
-        return validated_name(trimmed, true);
-    }
-    None
-}
-
-fn validated_name(candidate: &str, direct_answer: bool) -> Option<String> {
-    let candidate = candidate
-        .split(['\n', ',', ';', ':', '!', '?'])
-        .next()?
-        .trim()
-        .trim_matches(['"', '\'', '`']);
-    let lowered = candidate.to_lowercase();
-    let candidate = [" from now on", " instead", " please"]
-        .iter()
-        .find_map(|suffix| {
-            lowered
-                .strip_suffix(suffix)
-                .map(|without| candidate.get(..without.len()).unwrap_or(candidate).trim())
-        })
-        .unwrap_or(candidate)
-        .trim_end_matches('.');
+fn validated_name(candidate: &str) -> Option<String> {
+    let candidate = candidate.trim();
     if candidate.is_empty()
         || candidate.len() > MAX_PREFERRED_NAME_BYTES
         || candidate.split_whitespace().count() > 4
@@ -494,62 +484,7 @@ fn validated_name(candidate: &str, direct_answer: bool) -> Option<String> {
     {
         return None;
     }
-    if direct_answer
-        && matches!(
-            candidate.to_lowercase().as_str(),
-            "hello"
-                | "hi"
-                | "hey"
-                | "sure"
-                | "okay"
-                | "ok"
-                | "fine"
-                | "good"
-                | "ready"
-                | "continue"
-                | "proceed"
-                | "start"
-                | "stop"
-                | "help"
-                | "yes"
-                | "no"
-                | "nope"
-                | "yep"
-                | "thanks"
-                | "thank you"
-                | "skip"
-                | "later"
-                | "whatever"
-                | "fix it"
-                | "build it"
-                | "deploy it"
-                | "restart it"
-                | "not sure"
-                | "i don't know"
-                | "rather not say"
-                | "none of your business"
-        )
-    {
-        return None;
-    }
     Some(candidate.to_owned())
-}
-
-fn requests_name_forgetting(text: &str) -> bool {
-    let normalized = text
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    [
-        "forget my name",
-        "delete my name",
-        "do not remember my name",
-        "don't remember my name",
-        "stop using my name",
-    ]
-    .iter()
-    .any(|phrase| normalized.contains(phrase))
 }
 
 fn name_evidence(
@@ -699,7 +634,7 @@ fn apply_event(
             supersedes,
         } => {
             if projection.introduction.is_none()
-                || validated_name(name, false).as_deref() != Some(name.as_str())
+                || validated_name(name).as_deref() != Some(name.as_str())
                 || source_digest.is_empty()
                 || supersedes
                     != &projection
@@ -812,7 +747,7 @@ mod tests {
         let name_session = SessionId::new();
         let name_entry = EntryId::new();
         let named = service
-            .prepare_turn(
+            .confirm_preferred_name(
                 &name_session,
                 &name_entry,
                 "name-digest",
@@ -849,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn weak_guesses_are_rejected_while_correction_and_forgetting_update_evidence() {
+    fn preparation_never_infers_while_explicit_correction_and_forgetting_update_evidence() {
         let root = tempdir().unwrap();
         let profile_id = ProfileId::new();
         let service = RelationshipService::open(root.path(), &profile_id).unwrap();
@@ -884,33 +819,38 @@ mod tests {
             .unwrap();
         assert_eq!(command.stage, RelationshipStage::AwaitingName);
         assert!(command.preferred_name.is_none());
+        let neo_session = SessionId::new();
+        let neo_entry = EntryId::new();
         let neo = service
-            .prepare_turn(
-                &SessionId::new(),
-                &EntryId::new(),
+            .confirm_preferred_name(
+                &neo_session,
+                &neo_entry,
                 "neo",
-                "My name is Neo",
+                "Neo",
                 UtcTimestamp::from_unix_millis(3),
             )
             .unwrap();
         let neo_id = neo.preferred_name.unwrap().evidence_id;
+        let trinity_session = SessionId::new();
+        let trinity_entry = EntryId::new();
         let trinity = service
-            .prepare_turn(
-                &SessionId::new(),
-                &EntryId::new(),
+            .confirm_preferred_name(
+                &trinity_session,
+                &trinity_entry,
                 "trinity",
-                "Call me Trinity instead",
+                "Trinity",
                 UtcTimestamp::from_unix_millis(4),
             )
             .unwrap();
         assert_eq!(trinity.preferred_name.as_ref().unwrap().value, "Trinity");
         let trinity_id = trinity.preferred_name.unwrap().evidence_id;
+        let forget_session = SessionId::new();
+        let forget_entry = EntryId::new();
         let forgotten = service
-            .prepare_turn(
-                &SessionId::new(),
-                &EntryId::new(),
+            .forget_preferred_name(
+                &forget_session,
+                &forget_entry,
                 "forget",
-                "Please forget my name",
                 UtcTimestamp::from_unix_millis(5),
             )
             .unwrap();

@@ -12,7 +12,7 @@ name = "agent-web"
 path = "src/main.rs"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [lints]
 workspace = true
@@ -21,7 +21,6 @@ workspace = true
 keith-agent-types = { path = "../../crates/agent-types" }
 keith-provider-catalog = { path = "../../crates/provider-catalog" }
 keith-protocol = { path = "../../crates/protocol" }
-keith-ui-model = { path = "../../crates/ui-model" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -37,13 +36,7 @@ ring.workspace = true
 tokio.workspace = true
 url.workspace = true
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { workspace = true, features = ["wasm_js"] }
-ulid.workspace = true
-wasm-bindgen.workspace = true
-
 [dev-dependencies]
 tempfile.workspace = true
 tungstenite.workspace = true
 ureq.workspace = true
-wasm-bindgen.workspace = true

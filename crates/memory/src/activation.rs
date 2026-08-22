@@ -561,6 +561,8 @@ mod tests {
                     ObservatoryMutation::Observe(deleted),
                     ObservatoryMutation::Delete {
                         evidence_id: deleted_id.clone(),
+                        source_entries: Vec::new(),
+                        source_digests: Vec::new(),
                     },
                 ],
                 UtcTimestamp::from_unix_millis(10),

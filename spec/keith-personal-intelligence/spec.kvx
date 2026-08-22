@@ -191,7 +191,7 @@ verify_cmd = "pnpm --dir apps/agent-web/ui run check && pnpm --dir apps/agent-we
 
 [task.3.3]
 title  = "Incremental conversation, natural approvals, and safe recovery"
-status = "in_progress"
+status = "done"
 wave   = 4
 do_1   = "Render keyed, virtualized, scroll-stable conversation entries and safely structured content"
 do_2   = "Implement draft-safe send, newline, steer, stop, retry, branch, resume, session switch, and new conversation actions"

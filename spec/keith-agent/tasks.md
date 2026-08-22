@@ -294,6 +294,13 @@
     - Compile bounded RelationshipContext separately from RetrievedMemory, freeze it across the same provider step, and omit it from summarization, history, compaction, and controller turns
     - Run exact-once, retry, compaction, crash/restart, correction, deletion, weak-inference, cross-profile, context-provenance, fail-open, and final-authority regressions
     - _Requirements: 7.1-7.7, 10.1-10.7, 23.1-23.5, 25.4-25.6, 42.1-42.6, 44.1-44.5, 52.1-52.8, 53.1-53.10, 54.3-54.10_
+  - [-] 7.13 Unified RLM memory authority, agent tools, hot cache, and context bundles
+    - Make the evidence vault and atlas the single agent-facing memory authority while retaining the relationship ledger only as a durable event source projected into that authority
+    - Replace host natural-language relationship parsing with agent-authored cited memory mutations and implement create, search, get, correct, forget, and Codify-style memory_context tools over one record identity space
+    - Implement revision-bound hot confirmed-anchor caching, unified activation, exact source validation, correction/deletion invalidation, and fail-open asynchronous committed-session ingestion
+    - Route deep context through bounded MemoryWorld and read-only memory scouts while preserving explicit non-user activation manifests and current UserIngress authority
+    - Run natural-language, greeting, cross-session, CRUD, context-bundle, cache, recursion, corruption, compaction, provider-failure, role-hygiene, restart, finalization, and outbox regressions
+    - _Requirements: 7.1-7.7, 10.1-10.7, 13.1-13.6, 17.1-17.6, 21.1-21.6, 25.1-25.6, 26.1-26.6, 42.1-42.6, 44.1-44.5, 52.1-52.8, 53.1-53.10, 54.3-54.10, 55.1-55.10_
 
 ## Phase 8 — Scheduler, Commitments, Awareness, Attention, and Presence
 
@@ -400,7 +407,7 @@
 
 ## Phase 11 — TUI, Web, Desktop, and Shared Operator State
 
-- [ ] 11. First-Class Rust Clients with Protocol Parity and Accessible Truthful Presence
+- [ ] 11. First-Class Clients with Protocol Parity and Accessible Truthful Presence
   - [x] 11.1 Shared UI projection model and reducers
     - Implement SessionSnapshot, session/action/goal/plan/child/kernel/wait/commitment/schedule/delivery/memory/usage/confirmation projections
     - Implement generation-aware snapshot and event reducers
@@ -434,6 +441,13 @@
     - Remove decorative borders, glow, purple gradients, emoji status, and fabricated activity
     - Run TUI/web command and projection parity, accessibility automation/manual checks, long history, slow client, and zero-activity tests
     - _Requirements: 40.1-40.6_
+  - [x] 11.6 Keith-only Next.js web client replacement
+    - Remove the Rust/WASM, Solid, and Vite browser surface without changing the Rust daemon, authenticated backend, or shared protocol
+    - Build a statically exported Next.js React/TypeScript client that reproduces the Neo matte conversation, composer, navigation, and user-controlled computer workspace design for Keith only
+    - Implement authenticated bootstrap, typed command envelopes, resumable WebSocket projection, snapshot recovery, sessions, active work, memory, schedules, settings, confirmations, goals, children, model selection, branch, resume, export, and background controls
+    - Preserve exact-origin, CSRF, route/profile, credential, CSP, payload, rate, accessibility, responsive, reduced-motion, and truthful-state boundaries
+    - Run TypeScript, protocol reducer, production export, Rust integration, security startup, and real-daemon Chromium send/response checks while proving that no legacy WASM asset is requested
+    - _Requirements: 39.1-39.2, 39.4-39.6, 40.1-40.4, 40.6_
 
 ## Phase 12 — Reliability, Security, Data Lifecycle, and Diagnostics
 
@@ -518,6 +532,13 @@
     - Persist final, artifacts, terminal status, authoritative snapshot, and delivery outbox independently from stream delivery and acknowledgement
     - Run replay, provenance, repeated compaction/restart, boundary fault, unknown-effect, provider-down, artifact, and reconnect qualification
     - _Requirements: 7.1-7.7, 8.1-8.6, 10.1-10.7, 13.1-13.6, 35.1-35.6, 42.1-42.6, 52.1-52.8_
+  - [ ] 13.7 Durable prompt acceptance before worker activation
+    - Persist and deduplicate a stable prompt command and action identity in the daemon before lazy worker activation
+    - Dispatch admitted prompts after worker readiness and preserve the same obligation through startup timeout, process exit, generation replacement, and daemon restart
+    - Finalize an admitted prompt exactly once with the same action when execution cannot start, without requiring a user resend or replaying unknown effects
+    - Teach HTTP, socket, web, and terminal clients to retain command identity until authoritative acceptance and recover ambiguous response loss through replay
+    - Run cold-start, slow-start, startup-failure, response-loss, duplicate-delivery, reconnect, restart, single-user-entry, single-final, and outbox process tests
+    - _Requirements: 3.1-3.6, 4.1-4.5, 6.1-6.6, 8.1-8.6, 10.1-10.7, 35.1-35.6, 42.1-42.6, 52.6-52.8, 56.1-56.6_
 
 ## Phase 14 — Keith Agent Production Acceptance
 
@@ -588,8 +609,8 @@
     { "id": 17, "tasks": ["7.10", "9.3", "9.4", "11.1"] },
     { "id": 18, "tasks": ["7.11", "10.3", "11.2", "11.3"] },
     { "id": 19, "tasks": ["7.12", "10.4", "11.4"] },
-    { "id": 20, "tasks": ["11.5", "12.1", "12.4"] },
-    { "id": 21, "tasks": ["12.2", "12.3", "13.1"] },
+    { "id": 20, "tasks": ["7.13", "11.5", "11.6", "12.1", "12.4"] },
+    { "id": 21, "tasks": ["12.2", "12.3", "13.1", "13.7"] },
     { "id": 22, "tasks": ["12.5", "13.2"] },
     { "id": 23, "tasks": ["13.3", "13.4", "13.5", "13.6"] },
     { "id": 24, "tasks": ["14.1", "14.2", "14.3"] },

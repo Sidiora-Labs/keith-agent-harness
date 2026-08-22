@@ -43,7 +43,7 @@
     - Remove raw subsystem panels, counts, identifiers, operator vocabulary, and placeholder forms from the default experience
     - Implement light, dark, high-contrast, reduced-motion, forced-colors, and text-zoom behavior from Apps SDK tokens
     - _Requirements: 1.1-1.5, 5.1-5.6, 6.1-6.6, 8.1-8.4_
-  - [-] 3.3 Incremental conversation, natural approvals, and safe recovery
+  - [x] 3.3 Incremental conversation, natural approvals, and safe recovery
     - Render keyed, virtualized, scroll-stable conversation entries and safely structured content
     - Implement draft-safe send, newline, steer, stop, retry, branch, resume, session switch, and new conversation actions
     - Implement natural-language approvals, inline activity, artifacts, incomplete output, terminal results, and new-activity affordance

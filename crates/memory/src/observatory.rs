@@ -191,6 +191,8 @@ pub enum ObservatoryMutation {
     },
     Delete {
         evidence_id: EntityId,
+        source_entries: Vec<EntryId>,
+        source_digests: Vec<String>,
     },
     ChangeSensitivity {
         evidence_id: EntityId,
@@ -367,6 +369,10 @@ enum VaultMutation {
     },
     Deleted {
         evidence_id: EntityId,
+        #[serde(default)]
+        source_entries: Vec<EntryId>,
+        #[serde(default)]
+        source_digests: Vec<String>,
     },
     SensitivityChanged {
         evidence_id: EntityId,
@@ -1077,7 +1083,23 @@ fn prepare_events(
                     source_entries,
                 }
             }
-            ObservatoryMutation::Delete { evidence_id } => VaultMutation::Deleted { evidence_id },
+            ObservatoryMutation::Delete {
+                evidence_id,
+                source_entries,
+                source_digests,
+            } => {
+                if source_entries.len() != source_digests.len()
+                    || source_entries.len() > limits.max_source_entries
+                    || source_digests.iter().any(String::is_empty)
+                {
+                    return Err(ObservatoryError::InvalidEvidence);
+                }
+                VaultMutation::Deleted {
+                    evidence_id,
+                    source_entries,
+                    source_digests,
+                }
+            }
             ObservatoryMutation::ChangeSensitivity {
                 evidence_id,
                 sensitivity,
@@ -1269,7 +1291,7 @@ fn apply_event(
             record.validity = EvidenceValidity::Disputed;
             record.dispute_reason = Some(reason.clone());
         }
-        VaultMutation::Deleted { evidence_id } => {
+        VaultMutation::Deleted { evidence_id, .. } => {
             let record = evidence
                 .get_mut(evidence_id)
                 .ok_or(ObservatoryError::MissingEvidence)?;
@@ -1856,6 +1878,8 @@ fn sync_validity(
         (EvidenceValidity::Active | EvidenceValidity::Disputed, EvidenceValidity::Deleted) => {
             mutations.push(ObservatoryMutation::Delete {
                 evidence_id: current.id.clone(),
+                source_entries: desired.source_entries.clone(),
+                source_digests: desired.source_digests.clone(),
             });
         }
         _ => {}
@@ -2317,6 +2341,8 @@ mod tests {
             .apply(
                 vec![ObservatoryMutation::Delete {
                     evidence_id: replacement.id,
+                    source_entries: Vec::new(),
+                    source_digests: Vec::new(),
                 }],
                 UtcTimestamp::from_unix_millis(3),
             )

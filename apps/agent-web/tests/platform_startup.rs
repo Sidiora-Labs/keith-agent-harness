@@ -12,19 +12,8 @@ use keith_credentials::MasterKey;
 #[allow(clippy::too_many_lines)]
 async fn platform_web_startup_serves_browser_and_guarded_compatibility_boundaries() {
     let directory = tempfile::tempdir().unwrap();
-    let assets = directory.path().join("assets");
-    std::fs::create_dir(&assets).unwrap();
-    std::fs::write(assets.join("agent_web.js"), b"export default function(){}").unwrap();
-    std::fs::write(assets.join("agent_web_bg.wasm"), b"\0asm\x01\0\0\0").unwrap();
-    std::fs::create_dir_all(assets.join("ui/.vite")).unwrap();
-    std::fs::create_dir_all(assets.join("ui/assets")).unwrap();
-    std::fs::write(assets.join("ui/assets/keith.js"), b"production application").unwrap();
-    std::fs::write(assets.join("ui/assets/keith.css"), b"production tokens").unwrap();
-    std::fs::write(
-        assets.join("ui/.vite/manifest.json"),
-        br#"{"src/index.tsx":{"file":"assets/keith.js","isEntry":true,"css":["assets/keith.css"]}}"#,
-    )
-    .unwrap();
+    let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
+    assert!(assets.join("ui/index.html").is_file());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = WebServer::new(WebServerConfig {
@@ -57,7 +46,9 @@ async fn platform_web_startup_serves_browser_and_guarded_compatibility_boundarie
     )
     .await;
     assert!(response.starts_with("HTTP/1.1 200 OK"));
-    assert!(response.contains("Welcome to Keith"));
+    assert!(response.contains("Opening Keith"));
+    assert!(response.contains("/assets/ui/_next/static/"));
+    assert!(!response.contains("agent_web_bg.wasm"));
 
     let unauthenticated = request(
         address,

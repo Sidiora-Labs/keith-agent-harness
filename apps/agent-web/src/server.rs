@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::convert::Infallible;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
@@ -9,10 +10,11 @@ use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Form, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, stream};
 use keith_agent_types::{
     CURRENT_PROTOCOL_VERSION, ClientId, CommandId, ProfileId, Sequence, SessionId, UtcTimestamp,
 };
@@ -39,8 +41,6 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::security::{BrowserSecurity, SecurityError};
-use crate::{WebAssets, login_page, shell_page};
-
 mod openai_compat;
 mod platform_compat;
 
@@ -49,16 +49,7 @@ pub use platform_compat::PlatformCompatibilityConfig;
 
 const MAX_BROWSER_BODY_BYTES: usize = 128 * 1024;
 const EVENT_QUEUE_CAPACITY: usize = 256;
-const UI_MANIFEST: &str = "ui/.vite/manifest.json";
-
-#[derive(Deserialize)]
-struct ViteManifestEntry {
-    file: String,
-    #[serde(rename = "isEntry")]
-    is_entry: Option<bool>,
-    #[serde(default)]
-    css: Vec<String>,
-}
+const UI_INDEX: &str = "ui/index.html";
 
 pub struct WebServerConfig {
     pub bind: SocketAddr,
@@ -213,10 +204,10 @@ impl WebServer {
         Router::new()
             .route("/", get(app))
             .route("/login", get(login))
+            .route("/favicon.ico", get(favicon))
             .route("/auth/session", post(create_session))
+            .route("/api/bootstrap", get(bootstrap))
             .route("/assets/ui/{*path}", get(ui_asset))
-            .route("/assets/agent_web.js", get(wasm_javascript))
-            .route("/assets/agent_web_bg.wasm", get(wasm_binary))
             .route("/api/profiles/{profile}/commands", post(command))
             .route(
                 "/api/profiles/{profile}/credentials",
@@ -269,6 +260,10 @@ impl WebServer {
         axum::serve(listener, self.router()).await?;
         Ok(())
     }
+}
+
+async fn favicon() -> Response {
+    StatusCode::NO_CONTENT.into_response()
 }
 
 impl ServerArguments {
@@ -444,10 +439,7 @@ impl ServerArguments {
 }
 
 async fn login(State(state): State<AppState>) -> Response {
-    match load_web_assets(&state.asset_root) {
-        Ok(assets) => html_response(login_page(&assets.styles[0])),
-        Err(error) => safe_error(StatusCode::SERVICE_UNAVAILABLE, &error),
-    }
+    next_app_page(&state.asset_root)
 }
 
 #[derive(Deserialize)]
@@ -480,13 +472,21 @@ struct AppSelection {
     session: Option<String>,
 }
 
-async fn app(
+async fn app(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if state.security.authenticate(&headers).is_err() {
+        return Redirect::to("/login").into_response();
+    }
+    next_app_page(&state.asset_root)
+}
+
+async fn bootstrap(
     State(state): State<AppState>,
     Query(selection): Query<AppSelection>,
     headers: HeaderMap,
 ) -> Response {
-    let Ok(authenticated) = state.security.authenticate(&headers) else {
-        return Redirect::to("/login").into_response();
+    let authenticated = match state.security.authenticate(&headers) {
+        Ok(authenticated) => authenticated,
+        Err(error) => return security_response(error),
     };
     let csrf = match state.security.csrf(authenticated) {
         Ok(csrf) => csrf,
@@ -497,10 +497,21 @@ async fn app(
     match catalog {
         Ok(Ok((profiles, mut sessions))) => {
             prioritize_session(&mut sessions, selection.session.as_deref());
-            match load_web_assets(&state.asset_root) {
-                Ok(assets) => html_response(shell_page(&csrf, &profiles, &sessions, &assets)),
-                Err(error) => safe_error(StatusCode::SERVICE_UNAVAILABLE, &error),
-            }
+            let mut response = Json(serde_json::json!({
+                "protocol": CURRENT_PROTOCOL_VERSION,
+                "csrf": csrf,
+                "profiles": profiles,
+                "sessions": sessions,
+            }))
+            .into_response();
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response.headers_mut().insert(
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            );
+            response
         }
         Ok(Err(error)) => safe_error(StatusCode::SERVICE_UNAVAILABLE, &error.to_string()),
         Err(_) => safe_error(
@@ -529,27 +540,18 @@ async fn ui_asset(State(state): State<AppState>, Path(path): Path<String>) -> Re
     };
     let media_type = match path.extension().and_then(|value| value.to_str()) {
         Some("js") => "text/javascript; charset=utf-8",
+        Some("mjs") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
+        Some("json") | Some("map") => "application/json; charset=utf-8",
+        Some("html") => "text/html; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
         Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
     };
     file_asset(&state.asset_root.join("ui"), &path, media_type)
-}
-
-async fn wasm_javascript(State(state): State<AppState>) -> Response {
-    file_asset(
-        &state.asset_root,
-        FsPath::new("agent_web.js"),
-        "text/javascript; charset=utf-8",
-    )
-}
-
-async fn wasm_binary(State(state): State<AppState>) -> Response {
-    file_asset(
-        &state.asset_root,
-        FsPath::new("agent_web_bg.wasm"),
-        "application/wasm",
-    )
 }
 
 async fn command(
@@ -575,6 +577,9 @@ async fn command(
         Ok(envelope) => envelope,
         Err(_) => return safe_error(StatusCode::BAD_REQUEST, "invalid command envelope"),
     };
+    if accepts_event_stream(&headers) {
+        return stream_browser_command(state.bridge.clone(), profile, envelope);
+    }
     let bridge = state.bridge.clone();
     let result =
         tokio::task::spawn_blocking(move || bridge.execute_scoped(&profile, envelope)).await;
@@ -587,6 +592,77 @@ async fn command(
             "agent connection unavailable",
         ),
     }
+}
+
+fn accepts_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|media_type| media_type.trim().starts_with("text/event-stream"))
+        })
+}
+
+fn stream_browser_command(
+    bridge: DaemonBridge,
+    profile: ProfileId,
+    envelope: CommandEnvelope,
+) -> Response {
+    let (sender, receiver) = mpsc::channel::<String>(EVENT_QUEUE_CAPACITY);
+    tokio::task::spawn_blocking(move || {
+        let stream_sender = sender.clone();
+        let result = bridge.execute_scoped_streaming(&profile, envelope, &mut |message| {
+            if let Ok(encoded) = serde_json::to_string(&message) {
+                let _ = stream_sender.blocking_send(encoded);
+            }
+        });
+        match result {
+            Ok(result) => {
+                if let Ok(encoded) = serde_json::to_string(&WireMessage::CommandResult(result)) {
+                    let _ = sender.blocking_send(encoded);
+                }
+            }
+            Err(error) => {
+                let safe_message = if matches!(error, BridgeError::Scope) {
+                    "command scope denied"
+                } else {
+                    "Keith's native event stream became unavailable"
+                };
+                let encoded = serde_json::json!({
+                    "message": "stream_error",
+                    "payload": { "safe_message": safe_message }
+                })
+                .to_string();
+                let _ = sender.blocking_send(encoded);
+            }
+        }
+    });
+    let events = stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|payload| {
+            (
+                Ok::<Event, Infallible>(Event::default().data(payload)),
+                receiver,
+            )
+        })
+    });
+    let mut response = Sse::new(events)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-transform"),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 #[derive(Deserialize)]
@@ -816,6 +892,17 @@ impl DaemonBridge {
         client.execute(envelope)
     }
 
+    fn execute_scoped_streaming(
+        &self,
+        profile: &ProfileId,
+        envelope: CommandEnvelope,
+        events: &mut dyn FnMut(WireMessage),
+    ) -> Result<CommandResultEnvelope, BridgeError> {
+        let mut client = self.connect()?;
+        validate_command_scope(&mut client, profile, &envelope)?;
+        client.execute_streaming(envelope, events)
+    }
+
     fn subscribe(
         &self,
         profile: &ProfileId,
@@ -858,16 +945,20 @@ impl DaemonBridge {
         );
         let command_id = envelope.command_id.clone();
         client.transport.send(&WireMessage::Command(envelope))?;
+        let mut buffered_events = Vec::new();
         loop {
             match client.transport.receive() {
                 Ok(
                     message @ (WireMessage::Event(_)
                     | WireMessage::Snapshot(_)
                     | WireMessage::Terminal(_)),
-                ) => send_bounded(output, &message)?,
+                ) => buffered_events.push(message),
                 Ok(WireMessage::CommandResult(result)) if result.command_id == command_id => {
                     let message = WireMessage::CommandResult(result);
                     send_bounded(output, &message)?;
+                    for event in buffered_events {
+                        send_bounded(output, &event)?;
+                    }
                     break;
                 }
                 Ok(WireMessage::CommandResult(_)) => return Err(BridgeError::Response),
@@ -1174,13 +1265,31 @@ fn hex_digit(value: u8) -> Result<u8, String> {
     }
 }
 
-fn html_response(html: String) -> Response {
-    let mut response = Html(html).into_response();
+fn next_app_page(root: &FsPath) -> Response {
+    let path = root.join(UI_INDEX);
+    let mut html = match std::fs::read_to_string(path) {
+        Ok(html) => html,
+        Err(_) => {
+            return safe_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Keith's Next.js interface is unavailable",
+            );
+        }
+    };
+    let nonce = keith_agent_types::EntityId::new().to_string();
+    html = html.replace("<script", &format!("<script nonce=\"{nonce}\""));
+    let mut response = html.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    let policy = format!(
+        "default-src 'self'; script-src 'self' 'nonce-{nonce}'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' https://cdn.openai.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    );
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' ws: wss:; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
-        ),
+        HeaderValue::from_str(&policy)
+            .unwrap_or_else(|_| HeaderValue::from_static("default-src 'none'")),
     );
     response
         .headers_mut()
@@ -1190,36 +1299,6 @@ fn html_response(html: String) -> Response {
         HeaderValue::from_static("nosniff"),
     );
     response
-}
-
-fn load_web_assets(root: &FsPath) -> Result<WebAssets, String> {
-    let encoded = std::fs::read(root.join(UI_MANIFEST))
-        .map_err(|_| "Keith's production interface is unavailable".to_owned())?;
-    let manifest = serde_json::from_slice::<BTreeMap<String, ViteManifestEntry>>(&encoded)
-        .map_err(|_| "Keith's production interface manifest is invalid".to_owned())?;
-    let entry = manifest
-        .get("src/index.tsx")
-        .filter(|entry| entry.is_entry == Some(true))
-        .ok_or_else(|| "Keith's production interface entry is unavailable".to_owned())?;
-    let script = validated_ui_url(root, &entry.file)?;
-    let styles = entry
-        .css
-        .iter()
-        .map(|path| validated_ui_url(root, path))
-        .collect::<Result<Vec<_>, _>>()?;
-    if styles.is_empty() {
-        return Err("Keith's production interface stylesheet is unavailable".into());
-    }
-    Ok(WebAssets { script, styles })
-}
-
-fn validated_ui_url(root: &FsPath, path: &str) -> Result<String, String> {
-    let relative = safe_ui_asset_path(path)
-        .ok_or_else(|| "Keith's production interface contains an unsafe asset path".to_owned())?;
-    if !root.join("ui").join(&relative).is_file() {
-        return Err("Keith's production interface asset is unavailable".into());
-    }
-    Ok(format!("/assets/ui/{}", relative.to_string_lossy()))
 }
 
 fn safe_ui_asset_path(path: &str) -> Option<PathBuf> {
@@ -1429,22 +1508,39 @@ mod tests {
     }
 
     #[test]
-    fn hashed_production_assets_are_loaded_without_path_escape() {
+    fn next_production_assets_are_loaded_without_path_escape() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("ui/.vite")).unwrap();
-        std::fs::create_dir_all(root.path().join("ui/assets")).unwrap();
-        std::fs::write(root.path().join("ui/assets/keith-a.js"), "module").unwrap();
-        std::fs::write(root.path().join("ui/assets/keith-a.css"), "tokens").unwrap();
+        std::fs::create_dir_all(root.path().join("ui")).unwrap();
         std::fs::write(
-            root.path().join(UI_MANIFEST),
-            r#"{"src/index.tsx":{"file":"assets/keith-a.js","isEntry":true,"css":["assets/keith-a.css"]}}"#,
+            root.path().join(UI_INDEX),
+            r#"<!doctype html><html><body><script src="/assets/ui/app.js"></script></body></html>"#,
         )
         .unwrap();
-        let assets = load_web_assets(root.path()).unwrap();
-        assert_eq!(assets.script, "/assets/ui/assets/keith-a.js");
-        assert_eq!(assets.styles, ["/assets/ui/assets/keith-a.css"]);
-        assert!(safe_ui_asset_path("assets/keith-a.js").is_some());
+        let response = next_app_page(root.path());
+        assert_eq!(response.status(), StatusCode::OK);
+        let policy = response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(policy.contains("nonce-"));
+        assert!(!policy.contains("wasm-unsafe-eval"));
+        assert!(safe_ui_asset_path("_next/static/keith-a.js").is_some());
         assert!(safe_ui_asset_path("../agent_web.js").is_none());
         assert!(safe_ui_asset_path("/etc/passwd").is_none());
+    }
+
+    #[test]
+    fn browser_command_streaming_requires_an_explicit_sse_accept_type() {
+        let mut headers = HeaderMap::new();
+        assert!(!accepts_event_stream(&headers));
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
+        assert!(accepts_event_stream(&headers));
+        headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        assert!(!accepts_event_stream(&headers));
     }
 }
