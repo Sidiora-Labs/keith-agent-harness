@@ -585,6 +585,44 @@
     - Reconcile every phase status only after all referenced criteria pass through current release artifacts and real process paths
     - _Requirements: 50.6-50.7_
 
+## Phase 15 — Competitive Parity Remediation
+
+- [ ] 15. Durable Approval Gate, Panic-Free Production Paths, Native Host Isolation, Turn Control Split, and Verification Parity
+  - [ ] 15.1 Durable suspending approval gate
+    - Replace the blocking bool ConfirmationGate with an async decision keyed by ToolCallId that suspends the call instead of occupying an executor thread
+    - Persist the pending approval through SessionWriter before the operator is prompted, and reload outstanding approvals on daemon and worker restart
+    - Redact secret-bearing arguments in every rendered prompt and record decider and timestamp in the session ledger
+    - Bound every wait with a timeout and abort guard so a lost client cannot strand a turn, and prove denial and timeout both leave a paired tool result
+    - Ship a real production implementor wired through daemon-core, TUI, and web, and prove approval survives restart end to end
+    - _Requirements: 57.1, 57.2, 57.3_
+  - [ ] 15.2 Panic-free production paths
+    - Eliminate every unwrap and expect outside cfg(test) in production crates, converting each to a typed error or a documented invariant
+    - Deny clippy::unwrap_used and clippy::expect_used at workspace level with cfg(test) exemption
+    - Prove the workspace still builds and tests clean under the new lint level
+    - _Requirements: 57.4_
+  - [ ] 15.3 Native host isolation backends
+    - Implement native Landlock filesystem confinement on Linux without shelling out to bubblewrap
+    - Implement Seatbelt confinement on macOS with an explicit profile
+    - Refuse untrusted execution when no backend is available instead of reducing isolation, and surface the refusal as a typed error
+    - Prove containment with escape tests covering traversal, symlink swap, and network egress
+    - _Requirements: 57.5, 14.2_
+  - [ ] 15.4 Turn control split and boundary steering
+    - Split cancellation into interrupt, steer, and redirect with distinct semantics and distinct events
+    - Make redirect cancel only the in-flight model request while preserving completed tool results
+    - Drain steering at tool boundaries as well as turn boundaries without losing committed work
+    - Prove every control leaves the session ledger paired and replayable
+    - _Requirements: 57.6_
+  - [ ] 15.5 Verification parity for durable-boundary crates
+    - Raise test line count to at least production line count for agent-loop, session-store, tool-core, sandbox, supervisor, daemon-core, and credentials
+    - Add property tests for session replay, approval resume, and compaction pairing
+    - Extend CI beyond a single job to a per-OS and per-feature matrix with a machine-enforced coverage ratchet
+    - _Requirements: 57.7_
+  - [ ] 15.6 Channel adapter expansion beyond Discord
+    - Decide and record which platforms Keith competes on rather than implementing breadth for its own sake
+    - Extract the shared adapter contract from the Discord implementation into channel-core
+    - Implement each selected platform against the contract with signature verification and rate-limit handling
+    - _Requirements: 57.1_
+
 ## Task Dependency Graph
 
 ```json
@@ -615,7 +653,11 @@
     { "id": 23, "tasks": ["13.3", "13.4", "13.5", "13.6"] },
     { "id": 24, "tasks": ["14.1", "14.2", "14.3"] },
     { "id": 25, "tasks": ["14.4", "14.5"] },
-    { "id": 26, "tasks": ["14.6"] }
+    { "id": 26, "tasks": ["14.6"] },
+    { "id": 27, "tasks": ["15.1", "15.2"] },
+    { "id": 28, "tasks": ["15.3", "15.4"] },
+    { "id": 29, "tasks": ["15.5"] },
+    { "id": 30, "tasks": ["15.6"] }
   ]
 }
 ```
