@@ -1,0 +1,455 @@
+# spec.kvx — Keith Self-Evolution
+# SINGLE SOURCE for requirements, design, and implementation tasks.
+# Render generated requirements/design/tasks views from this file; do not let
+# generated Markdown outrank this source.
+#
+# Format: KVX. One key = value per line; string values double-quoted; lists
+# are bracketed quoted strings; # starts a comment.
+# Product and technical baselines: ../blueprint.md and ../shematics.md.
+# Schema:
+#   [req.<n>]   title, story, ac_1..ac_n
+#   [design]    overview, include
+#   [task.<id>] title, status, wave, reqs, requires, do_1..do_n
+
+[meta]
+feature      = "keith-self-evolution"
+title        = "Keith Self-Evolution — verified source self-modification, live worker hotswap, and one-click reversal"
+status       = "planning"
+spec_version = "1.0.0"
+intro        = "Keith Self-Evolution lets Keith change his own Rust harness and prove the change before it becomes real. The editable surface is source code and nothing else, because source is the only surface where self-testing is falsifiable: it compiles or it does not, the suite passes or it does not, the security gate holds or it does not. Persona, memory content, prompt weights, and routing knobs are explicitly out of scope. The agent loop, personal memory, and the guard that enforces the protected surface are permanently immutable. The feature is disabled by default, requires explicit installation-level opt-in and a working toolchain, and every change it ever makes is reversible in one action. Verification runs as real cargo builds and real canary worker processes on real supervisor generations; a model claim that a change is safe carries no weight at any stage."
+
+[design]
+overview = "Evidence from tool experience, telemetry, and crash reconciliation produces a falsifiable EvolutionHypothesis with a named metric and a revert threshold declared before any code is written. A read-only reviewer with no shell emits a bounded patch into a ShadowTree that the live checkout never depends on. A sandboxed build runs formatting, strict linting, the real workspace test suite, dependency policy, the security gate, and the platform gate to produce a BuildVerdict from real exit statuses. A passing build produces a signed candidate WorkerImage exercised by a real canary worker on a new supervisor generation against the evaluation corpus and deterministic trace replay. Promotion installs the image and rolls every active root tree through the existing drain-and-replace path so worker binaries swap live while the daemon never restarts; daemon-resident changes are staged for a supervised restart with automatic restoration on endpoint failure. A pinned previous-known-good image plus recorded source bytes make every promotion reversible in one action without rebuilding, and a RevertWatchdog reverts automatically when declared SLOs regress inside a bounded observation window. An append-only signed EvolutionLedger is the user-facing record and the undo surface."
+include  = "design.body.md"
+
+# ============================== REQUIREMENTS ==============================
+
+# --- ENABLEMENT AND AUTHORITY BOUNDARY ---
+
+[req.1]
+title = "Disabled by default with explicit opt-in and honest availability"
+story = "As the owner, I want self-evolution to stay off until I deliberately turn it on, so that no installation modifies its own code without my knowledge."
+ac_1  = "SELF-EVOLUTION SHALL be disabled in every default profile, default configuration layer, and packaged build, and SHALL NOT collect evolution evidence, create hypotheses, stage shadow trees, or run builds while disabled."
+ac_2  = "ENABLEMENT SHALL be an explicit installation-level action that names the editable surface, the protected surface, the autonomy class behavior, and the reversal guarantee before it takes effect, and SHALL record the enabling identity and timestamp in the evolution ledger."
+ac_3  = "ENABLEMENT SHALL fail visibly when a usable Rust toolchain, build sandbox, or writable image directory is unavailable, and the feature SHALL report itself unavailable rather than accepting proposals it cannot verify."
+ac_4  = "DISABLING SHALL immediately abort in-flight hypotheses, proposals, builds, and canaries, discard staged artifacts, stop evidence collection, and leave already-promoted changes in place and individually reversible."
+ac_5  = "NO client, channel message, guest kernel, plugin, MCP server, skill, or model output SHALL be able to enable self-evolution, widen its surface, or change its autonomy class."
+ac_6  = "A test SHALL prove a default installation never writes a shadow tree or invokes a compiler, that enablement without a toolchain fails closed, and that disabling mid-build leaves no partial artifact and no orphaned process."
+
+[req.2]
+title = "Immutable protected surface and self-referential guard integrity"
+story = "As the owner, I want the parts that make recovery possible to be unchangeable, so that a bad self-modification can never remove my ability to undo it."
+ac_1  = "THE protected surface SHALL permanently include the agent loop crate, the personal memory crate, the self-evolution guard and policy evaluator, the evolution ledger, and the release verification path."
+ac_2  = "THE protected surface SHALL be a compiled constant in the daemon and SHALL NOT be sourced from configuration, workspace files, model output, or any file the evolution pipeline can write."
+ac_3  = "THE guard SHALL reject a proposal touching the protected surface at admission, SHALL re-check the shadow tree before any build, and SHALL re-check the produced artifact's source manifest before any promotion or worker roll."
+ac_4  = "PATH resolution SHALL reject absolute paths, traversal, symlink escape, device paths, and rename-into-protected-scope, and SHALL evaluate the post-resolution path rather than the requested path."
+ac_5  = "CREDENTIALS, session history, backups, built-in resources, signing keys, and runtime metadata SHALL remain unwritable by the evolution pipeline regardless of change class."
+ac_6  = "AN adversarial suite SHALL prove that patches, build scripts, test code, generated code, macro expansion, and build-time file writes cannot modify, shadow, relocate, or disable any protected item."
+
+[req.3]
+title = "Change classification and risk-appropriate consent"
+story = "As the owner, I want autonomy proportional to blast radius, so that harmless work proceeds and irreversible work always reaches me."
+ac_1  = "EVERY proposal SHALL be classified from its resolved changed paths and produced artifacts before verification, and an unclassifiable proposal SHALL be rejected."
+ac_2  = "CLASS A SHALL cover changes that provably cannot alter shipped daemon or worker binaries, including tests, benchmarks, evaluation corpus data, and documentation, and MAY promote autonomously."
+ac_3  = "CLASS B SHALL cover all other permitted source changes and MAY promote autonomously only after a complete verification gate and a satisfied canary, under the automatic revert watchdog."
+ac_4  = "CLASS C SHALL cover public protocol types, persisted schema and migrations, and any change requiring a daemon replacement, and SHALL require explicit human approval regardless of gate results because an applied migration cannot be undone by an automatic revert."
+ac_5  = "CLASS D SHALL cover the protected surface and SHALL be refused, not queued, escalated, or made approvable from any client."
+ac_6  = "CLASSIFICATION SHALL be recomputed against the actual built artifact, and a class escalation discovered after verification SHALL suspend promotion and require the higher class's consent."
+ac_7  = "A test SHALL prove each class boundary, class escalation between proposal and artifact, refusal of class D, and that a class C approval cannot be produced by any non-human source."
+
+# --- HYPOTHESIS, PROPOSAL, AND VERIFICATION ---
+
+[req.4]
+title = "Evidence-driven falsifiable hypotheses"
+story = "As the owner, I want every self-modification to answer a measurable question, so that improvement is demonstrated rather than asserted."
+ac_1  = "AN EvolutionHypothesis SHALL record originating evidence references, the target crate or subsystem, a named measurable metric, the current measured baseline, a target threshold, a measurement slice, a revert threshold, and an expiry."
+ac_2  = "EVIDENCE SHALL come from recorded tool experience, telemetry counters, failure categories, crash reconciliation results, or explicit user reports, and SHALL NOT be produced by the proposing model."
+ac_3  = "A hypothesis without a metric, baseline, revert threshold, or resolvable measurement slice SHALL be rejected at admission and SHALL NOT reach a reviewer."
+ac_4  = "DUPLICATE and recently failed hypotheses SHALL be suppressed for a configured interval so the same change is not re-attempted in a loop."
+ac_5  = "HYPOTHESIS states SHALL include proposed, admitted, proposing, verifying, evaluating, awaiting-approval, promoting, promoted, observing, reverted, rejected, expired, and failed, with validated transitions that survive restart."
+ac_6  = "A test SHALL prove admission rejection, duplicate suppression, expiry, restart continuity, and that observed evidence content cannot alter the guard, classification, or consent requirements."
+
+[req.5]
+title = "Shadow source tree and bounded read-only proposal"
+story = "As the operator, I want Keith to never write into the tree he is running from, so that a broken proposal cannot damage the live installation."
+ac_1  = "PROPOSALS SHALL be staged into a ShadowTree that is an isolated copy of the source at a recorded base revision, and the live checkout SHALL NOT be read from, written to, or depended on during proposal or verification."
+ac_2  = "THE reviewer SHALL receive a read-only bundle of selected source, the hypothesis, and relevant failure evidence, and SHALL have no shell, no unrestricted write tool, no network authority, and no credential access."
+ac_3  = "PROPOSALS SHALL enforce limits on changed files, per-file bytes, total bytes, and new dependency additions, and SHALL record the exact prior bytes of every changed and deleted path."
+ac_4  = "NEW third-party dependency additions SHALL be denied by default and SHALL require the same consent as class C when configured to be permitted at all."
+ac_5  = "SHADOW trees SHALL be reclaimed on completion, abort, disable, and restart, and SHALL NOT accumulate, leak processes, or retain credentials."
+ac_6  = "A test SHALL prove live-tree isolation, reviewer authority limits, limit enforcement, dependency denial, prompt-injection resistance in reviewed source and evidence, and shadow reclamation after crash."
+
+[req.6]
+title = "Sandboxed build and complete verification gate"
+story = "As the owner, I want verification to be a real build with real tests, so that no change is promoted on a model's word."
+ac_1  = "BUILDS SHALL run in a separate sandboxed process with an explicit working directory, minimal environment, no credential access, and configured time, CPU, memory, output, process-tree, filesystem, and network limits."
+ac_2  = "THE verification gate SHALL run formatting checks, strict linting, the real workspace test suite, the dependency policy check, the security gate, and the platform gate, and SHALL derive its BuildVerdict solely from real process exit statuses and parsed real output."
+ac_3  = "ANY gate failure, timeout, resource exhaustion, or sandbox violation SHALL terminate the transaction, and a failing verdict SHALL NOT be overridable by configuration, retry, model output, or user request short of disabling the gate at the source level."
+ac_4  = "TEST code introduced by a proposal SHALL be subject to the same sandbox, the same secret-leak scanning, and the same network denial as any other guest workload."
+ac_5  = "A passing build SHALL produce a candidate WorkerImage recorded with its build identifier, source manifest digest, toolchain identity, gate results, and a signature verifiable by the existing release verification path."
+ac_6  = "A test SHALL prove sandbox containment, gate failure propagation, unsigned and tampered artifact rejection, build timeout cleanup, and that a proposal cannot weaken, skip, or fake any gate step."
+
+[req.7]
+title = "Canary worker evaluation on real generations"
+story = "As the owner, I want a candidate binary exercised as a real process before it touches my sessions, so that promotion follows evidence rather than a green build."
+ac_1  = "A candidate image SHALL be exercised by a real worker process started by the supervisor on a new generation against a canary root tree, using the same lease, registration, control, and drain machinery as ordinary workers."
+ac_2  = "THE canary SHALL run the evaluation corpus and deterministic trace replay and SHALL report the hypothesis metric, comparison against the recorded baseline, latency, cost, and failure behavior."
+ac_3  = "THE canary SHALL NOT reach live user session trees, real channel endpoints, real delivery outbox destinations, real credentials, or destructive tools."
+ac_4  = "A canary crash, startup timeout, lease failure, protocol mismatch, or unmet hypothesis threshold SHALL end the transaction without promotion."
+ac_5  = "CANARY resources SHALL be reclaimed on success, failure, abort, disable, and daemon restart, and SHALL NOT hold leases or generations for the live catalog."
+ac_6  = "A process suite SHALL prove real canary startup, metric measurement, isolation from live state, crash handling, and reclamation after daemon restart."
+
+# --- PROMOTION, HOTSWAP, AND REVERSAL ---
+
+[req.8]
+title = "Worker image promotion and live generation roll"
+story = "As a user with running work, I want improved code to take effect without losing sessions, so that self-improvement never costs me my in-flight work."
+ac_1  = "THE supervisor SHALL resolve its worker executable through a versioned WorkerImage registry holding a current pointer, a pinned previous-known-good pointer, and verified image metadata, rather than a fixed path captured at construction."
+ac_2  = "PROMOTION SHALL verify the artifact signature and re-check the protected surface and change class against the artifact manifest immediately before installing the image."
+ac_3  = "PROMOTION SHALL install the image and then roll each active root tree through the existing drain-and-replace path so every tree lands on a new generation running the new binary, while the daemon process SHALL NOT restart."
+ac_4  = "A tree that fails to start or become healthy on the new image SHALL be returned to the pinned image, and a configured failure count across trees SHALL abort the roll and restore the previous image for every tree."
+ac_5  = "IN-FLIGHT actions, goals, children, waits, commitments, schedules, and deliveries SHALL survive the roll according to the existing drain and recovery contracts, and no committed session history SHALL be lost or duplicated."
+ac_6  = "VERIFIED source changes SHALL be copied back into the live tree only after the roll succeeds, as one transaction that records exact prior bytes for reversal."
+ac_7  = "A process suite SHALL prove a live roll with active sessions, partial roll failure and restoration, daemon survival, generation correctness, and crash at every promotion boundary."
+
+[req.9]
+title = "Staged daemon replacement and supervised restart"
+story = "As the operator, I want daemon-level improvements to be possible without pretending they are live-swappable, so that upgrades are honest and recoverable."
+ac_1  = "A change affecting daemon-resident code SHALL NOT roll live and SHALL be staged as a verified, signed, pinned daemon image awaiting a supervised restart."
+ac_2  = "STAGED daemon replacement SHALL require class C consent and SHALL disclose that a restart is needed, what it affects, and how to revert."
+ac_3  = "ON restart, the daemon SHALL run migration, catalog rebuild, and endpoint opening under the new image, and SHALL automatically restore and restart the previous image when startup, migration, or endpoint opening fails."
+ac_4  = "A restore triggered by failed daemon startup SHALL be recorded, surfaced to the user on next attach, and SHALL leave the staged image inspectable rather than silently discarded."
+ac_5  = "A process suite SHALL prove staged replacement, successful restart, failed startup restoration, failed migration restoration, and repeated restart stability."
+
+[req.10]
+title = "One-click reversal and baseline restore"
+story = "As the owner, I want to undo anything Keith changed about himself in a single action, so that trusting the feature never requires understanding it."
+ac_1  = "EVERY promoted change SHALL expose exactly one reversal action from every full client that restores the pinned image, rolls affected workers back, and restores the recorded prior source bytes as a single transaction requiring no further confirmation."
+ac_2  = "REVERSAL SHALL depend only on recorded prior bytes and the pinned artifact and SHALL NOT require rebuilding, re-running the gate, a working toolchain, network access, or the reverted change still being buildable."
+ac_3  = "A baseline restore action SHALL revert every self-evolution change back to the last human-approved baseline in one action and SHALL report exactly what it reverted."
+ac_4  = "REVERSAL SHALL be available while self-evolution is disabled, while a build or canary is running, and after daemon restart, and SHALL be ordered correctly when several promotions touched the same paths."
+ac_5  = "A partially failed reversal SHALL restore byte-exact prior state or leave the installation on the pinned known-good image with an explicit unresolved state, and SHALL NOT leave a mixed image and source tree."
+ac_6  = "REVERSAL SHALL itself be recorded in the ledger and SHALL NOT delete, rewrite, or hide the reverted change's history."
+ac_7  = "A fault-injection suite SHALL prove one-action reversal, stacked and out-of-order reversal, baseline restore, reversal of an unbuildable change, reversal while disabled, and crash at every reversal boundary."
+
+[req.11]
+title = "Automatic revert watchdog and pinned known-good images"
+story = "As a user, I want a regression to undo itself, so that autonomous promotion is bounded in time rather than permanent."
+ac_1  = "EVERY promotion SHALL start a bounded observation window measuring the hypothesis metric plus declared health signals including crash rate, turn failure rate, latency, cost, and resource use."
+ac_2  = "A breach of any declared revert threshold, or a worker crash loop attributable to the new image, SHALL revert to the pinned image automatically without user action and notify according to profile notification policy."
+ac_3  = "A promotion whose observation window completes without breach SHALL become the new known-good baseline, and the previous pinned image SHALL be retained for a configured retention period."
+ac_4  = "THE watchdog SHALL survive daemon and worker restart, SHALL resume the remaining window, and SHALL revert on inconclusive measurement rather than assuming success."
+ac_5  = "AT most one observation window SHALL be active at a time, and a new promotion SHALL NOT begin while a window is open."
+ac_6  = "A test SHALL prove automatic revert on metric breach, on crash loop, on inconclusive measurement, window resumption after restart, and baseline advancement on success."
+
+# --- LEDGER, BUDGETS, AND QUALIFICATION ---
+
+[req.12]
+title = "Append-only signed evolution ledger and user surfaces"
+story = "As the owner, I want a readable record of everything Keith changed about himself, so that self-modification is auditable rather than mysterious."
+ac_1  = "EVERY hypothesis, admission decision, proposal, gate result, canary result, consent decision, promotion, observation outcome, revert, and disable action SHALL become an append-only signed ledger record with stable identity and UTC timestamp."
+ac_2  = "RECORDS SHALL retain the hypothesis and its evidence references, the readable source diff, the artifact identity and digest, real gate output summaries, measured before and after values, and the acting identity for human decisions."
+ac_3  = "RECORDS SHALL NEVER be rewritten or deleted by the evolution pipeline, and ledger corruption SHALL quarantine self-evolution and require explicit repair rather than silently rebuilding."
+ac_4  = "THE terminal and web clients SHALL present the ledger in ordinary language with the readable diff, the evidence, the measured result, the current state, and the single reversal action, without exposing raw internal identifiers as primary labels."
+ac_5  = "SECRETS, prompt text, personal memory, channel content, and private reasoning SHALL NOT enter ledger records, and gate output SHALL be bounded and redacted."
+ac_6  = "THE ledger SHALL be exportable and deletable through the existing data-control surfaces, with deletion scope stated exactly and derived projections cleaned up."
+ac_7  = "A test SHALL prove append-only behavior, signature verification, corruption quarantine, redaction under failure paths, client presentation, and export and deletion consistency."
+
+[req.13]
+title = "Evolution budgets, anti-goals, and concurrency bounds"
+story = "As the operator, I want self-improvement to stay a small background tenant, so that it cannot crowd out my actual work or the machine."
+ac_1  = "SELF-EVOLUTION SHALL enforce independent ceilings on concurrent hypotheses, shadow trees, sandboxed builds, canary workers, promotions per interval, and retained images, and SHALL account tokens, model cost, wall time, CPU, memory, and disk against a declared budget."
+ac_2  = "EVOLUTION work SHALL run at background priority through the ordinary action inbox and SHALL be suppressed, deferred, or aborted before interactive work, scheduled work, or channel delivery is delayed."
+ac_3  = "AN evolution action SHALL NOT create another evolution action, hypothesis, or child dedicated to evolution, and recursive self-improvement chains SHALL be refused at admission."
+ac_4  = "SELF-EVOLUTION SHALL NOT replicate the installation, install or start additional daemons, modify installation or update channels, alter its own budgets or ceilings, or widen any permission, sandbox, credential, or network grant."
+ac_5  = "BUDGET exhaustion SHALL abort cleanly, reclaim shadow trees, builds, and canaries, record the reason, and SHALL NOT leave partial artifacts, orphaned processes, or a mixed image and source state."
+ac_6  = "A load and containment suite SHALL prove ceiling enforcement, interactive-work priority, recursion refusal, replication and permission-widening refusal, and clean abort under exhaustion."
+
+[req.14]
+title = "Evaluation corpus and deterministic trace replay"
+story = "As the owner, I want a fixed measurable baseline, so that a claimed improvement can be compared rather than believed."
+ac_1  = "THE project SHALL maintain a versioned evaluation corpus covering direct, planned, delegated, reviewed, tool-using, recovery, and failure journeys with recorded expected outcomes and cost and latency baselines."
+ac_2  = "TRACE replay SHALL deterministically re-run recorded provider streams, tool results, and clock and randomness sources against a candidate image so results differ only because of the code change."
+ac_3  = "CORPUS content SHALL contain no credentials, personal memory, or private user content, and SHALL be reviewable and versioned in source."
+ac_4  = "REPLAY SHALL detect and report non-determinism rather than averaging it away, and a non-deterministic measurement SHALL be treated as inconclusive."
+ac_5  = "THE corpus and replay harness SHALL be usable outside self-evolution for ordinary regression testing and performance comparison."
+ac_6  = "A test SHALL prove deterministic replay, non-determinism detection, corpus versioning, baseline comparison, and absence of private content."
+
+[req.15]
+title = "Adversarial self-evolution security and crash gate"
+story = "As the owner, I want a hostile proposal to be unable to cross any boundary, so that adding self-modification does not add ambient authority."
+ac_1  = "THE threat suite SHALL cover protected-surface evasion through traversal, symlinks, renames, build scripts, procedural macros, generated code, workspace manifest edits, and toolchain overrides."
+ac_2  = "THE suite SHALL cover build-sandbox escape, network egress from builds and tests, credential exfiltration through tests, artifacts, ledger records, gate output, and diagnostics, and unsigned or tampered artifact promotion."
+ac_3  = "THE suite SHALL cover prompt injection through reviewed source, comments, evidence, corpus data, and failure text, and SHALL prove observed content cannot change classification, consent, guard state, or promotion."
+ac_4  = "A fault-injection suite SHALL kill the daemon, the build, the canary, and the roll at every durable boundary and prove the live tree, the installed image, the pinned image, and the ledger remain consistent and reversible afterwards."
+ac_5  = "NO release SHALL enable self-evolution while any protected-surface, sandbox-escape, credential, unsigned-promotion, or unreversible-state issue remains open."
+ac_6  = "THE gate SHALL execute against current packaged binaries, a real toolchain, real sandboxes, and real worker processes rather than disconnected mock services."
+
+# ================================ TASKS ==================================
+
+[task.1.1]
+title  = "Protected surface, change classification, and guard integrity"
+status = "done"
+wave   = 1
+do_1   = "Create the keith-self-evolution domain crate with a compiled ProtectedSurface constant covering the agent loop, memory, guard, ledger, and release verification"
+do_2   = "Implement path resolution that evaluates post-resolution paths and rejects absolute, traversal, symlink-escape, device, and rename-into-protected targets"
+do_3   = "Implement ChangeClass A through D classification from resolved paths and artifact manifests, with recomputation and escalation detection"
+do_4   = "Implement the consent policy mapping class to autonomous, watchdog-bounded, human-approved, and refused"
+do_5   = "Test each class boundary, escalation after verification, class D refusal, and that no configuration or model output can widen the surface"
+reqs   = ["2.1-2.6", "3.1-3.7"]
+symbols = ["ProtectedSurface", "ChangeClass", "EvolutionGuard", "ConsentPolicy"]
+touches = ["crates/self-evolution/Cargo.toml", "crates/self-evolution/src/lib.rs", "crates/self-evolution/src/guard.rs"]
+verify_cmd = "cargo test -p keith-self-evolution guard"
+
+[task.1.2]
+title  = "Append-only signed evolution ledger"
+status = "done"
+wave   = 1
+do_1   = "Implement EvolutionLedger records for hypothesis, admission, proposal, gate, canary, consent, promotion, observation, revert, enable, and disable events"
+do_2   = "Sign and verify records through the existing release verification path and enforce append-only semantics with corruption quarantine"
+do_3   = "Bound and redact gate output and exclude secrets, prompts, memory, and private reasoning from every record"
+do_4   = "Test append-only behavior, signature verification, corruption quarantine, redaction under failure paths, and restart continuity"
+reqs   = ["12.1-12.3", "12.5"]
+symbols = ["EvolutionLedger", "EvolutionRecord"]
+touches = ["crates/release/src/lib.rs", "crates/self-evolution/Cargo.toml", "crates/self-evolution/src/lib.rs", "crates/self-evolution/src/ledger.rs", "crates/state-store-core/src/lib.rs", "crates/state-store/src/lib.rs"]
+verify_cmd = "cargo test -p keith-self-evolution ledger"
+
+[task.1.3]
+title  = "Enablement policy, availability probing, and disable semantics"
+status = "done"
+wave   = 1
+do_1   = "Add a default-off installation-level enablement layer with disclosure, acting identity, and ledger recording"
+do_2   = "Probe toolchain, sandbox, and image-directory availability and report the feature unavailable when verification is impossible"
+do_3   = "Implement immediate disable that aborts in-flight work, discards staged artifacts, stops evidence collection, and preserves reversibility"
+do_4   = "Reject enablement and surface widening from clients, channels, kernels, plugins, MCP, skills, and model output"
+do_5   = "Test default-off behavior with no compiler invocation, fail-closed enablement, and disable during build and canary"
+reqs   = ["1.1-1.6"]
+requires = ["1.1", "1.2"]
+symbols = ["SelfEvolutionEnablement", "EvolutionAvailability"]
+touches = ["crates/self-evolution/Cargo.toml", "crates/self-evolution/src/lib.rs", "crates/self-evolution/src/enablement.rs", "crates/self-evolution/src/ledger.rs", "crates/configuration/src/lib.rs", "crates/profile/src/lib.rs", "crates/sandbox/Cargo.toml", "crates/sandbox/src/lib.rs"]
+verify_cmd = "cargo test -p keith-self-evolution enablement"
+
+[task.2.1]
+title  = "Evidence intake and falsifiable hypothesis lifecycle"
+status = "done"
+wave   = 2
+do_1   = "Implement EvolutionHypothesis with evidence references, target, metric, baseline, target threshold, measurement slice, revert threshold, and expiry"
+do_2   = "Source evidence only from tool experience, telemetry, failure categories, crash reconciliation, and explicit user reports"
+do_3   = "Reject hypotheses lacking a metric, baseline, revert threshold, or resolvable slice, and suppress duplicates and recent failures"
+do_4   = "Implement the durable state machine with validated transitions and restart continuity"
+do_5   = "Test admission rejection, duplicate suppression, expiry, restart continuity, and evidence-content injection resistance"
+reqs   = ["4.1-4.6"]
+requires = ["1.1", "1.3"]
+symbols = ["EvolutionHypothesis", "HypothesisState", "EvidenceSource"]
+touches = ["crates/self-evolution/Cargo.toml", "crates/self-evolution/src/lib.rs", "crates/self-evolution/src/hypothesis.rs", "crates/self-evolution/src/ledger.rs", "crates/evolution/src/lib.rs", "crates/telemetry/Cargo.toml", "crates/telemetry/src/lib.rs"]
+verify_cmd = "cargo test -p keith-self-evolution hypothesis"
+
+[task.2.2]
+title  = "Shadow source tree and read-only bounded proposal"
+status = "done"
+wave   = 2
+do_1   = "Implement ShadowTree staging at a recorded base revision with full isolation from the live checkout"
+do_2   = "Build the read-only reviewer bundle with no shell, write, network, or credential authority"
+do_3   = "Enforce changed-file, byte, and dependency-addition limits and record exact prior bytes for every changed and deleted path"
+do_4   = "Implement reclamation on completion, abort, disable, and restart"
+do_5   = "Test live-tree isolation, reviewer authority limits, limit enforcement, dependency denial, injection resistance, and reclamation after crash"
+reqs   = ["5.1-5.6"]
+requires = ["2.1"]
+symbols = ["ShadowTree", "EvolutionProposal", "ProposalLimits"]
+touches = ["crates/self-evolution/Cargo.toml", "crates/self-evolution/src/lib.rs", "crates/self-evolution/src/enablement.rs", "crates/self-evolution/src/guard.rs", "crates/self-evolution/src/shadow.rs", "crates/self-evolution/src/proposal.rs", "crates/evolution/src/refinement.rs"]
+verify_cmd = "cargo test -p keith-self-evolution shadow"
+
+[task.2.3]
+title  = "Evaluation corpus and deterministic trace replay harness"
+status = "implemented"
+wave   = 2
+do_1   = "Build a versioned evaluation corpus covering direct, planned, delegated, reviewed, tool-using, recovery, and failure journeys with recorded baselines"
+do_2   = "Implement deterministic replay of recorded provider streams, tool results, clock, and randomness"
+do_3   = "Detect and report non-determinism as inconclusive rather than averaging it"
+do_4   = "Keep the corpus free of credentials, personal memory, and private content and make the harness usable for ordinary regression testing"
+do_5   = "Test deterministic replay, non-determinism detection, corpus versioning, baseline comparison, and private-content absence"
+reqs   = ["14.1-14.6"]
+requires = ["1.1"]
+symbols = ["EvaluationCorpus", "TraceReplay", "ReplayVerdict"]
+touches = ["crates/test-support/Cargo.toml", "crates/test-support/src/lib.rs", "crates/self-evolution/Cargo.toml", "crates/self-evolution/src/lib.rs", "crates/self-evolution/src/corpus.rs", "crates/self-evolution/corpus/*"]
+verify_cmd = "cargo test -p keith-self-evolution corpus"
+
+[task.3.1]
+title  = "Sandboxed build and complete verification gate"
+status = "implemented"
+wave   = 3
+do_1   = "Run builds in a separate sandboxed process with minimal environment, no credentials, and time, CPU, memory, output, process-tree, filesystem, and network limits"
+do_2   = "Execute formatting, strict linting, the real workspace test suite, dependency policy, security gate, and platform gate and derive BuildVerdict only from real exit statuses"
+do_3   = "Make gate failure non-overridable and subject proposal-introduced test code to the same sandbox and secret scanning"
+do_4   = "Produce a signed candidate WorkerImage recording build identifier, source manifest digest, toolchain identity, and gate results"
+do_5   = "Test sandbox containment, gate failure propagation, unsigned and tampered artifact rejection, build timeout cleanup, and gate-weakening refusal"
+reqs   = ["6.1-6.6"]
+requires = ["2.2"]
+symbols = ["BuildSandbox", "VerificationGate", "BuildVerdict", "WorkerImage"]
+touches = ["crates/self-evolution/Cargo.toml", "crates/self-evolution/src/lib.rs", "crates/self-evolution/src/guard.rs", "crates/self-evolution/src/build.rs", "crates/sandbox/src/lib.rs", "crates/tool-runner/src/lib.rs"]
+verify_cmd = "cargo test -p keith-self-evolution build"
+
+[task.3.2]
+title  = "Versioned worker image registry and supervisor image resolution"
+status = "implemented"
+wave   = 3
+do_1   = "Replace the supervisor's fixed executable with a WorkerImage registry holding current and pinned previous-known-good pointers plus verified metadata"
+do_2   = "Resolve the image at spawn time so each generation records the exact image it runs"
+do_3   = "Verify signature, protected surface, and change class against the artifact manifest immediately before installing an image"
+do_4   = "Implement retention of previous images and reclamation of superseded ones"
+do_5   = "Test image resolution per generation, pre-install verification, tampered image rejection, and retention behavior"
+reqs   = ["8.1-8.2", "11.3"]
+requires = ["3.1"]
+symbols = ["WorkerImageRegistry", "InstalledImage"]
+touches = ["crates/self-evolution/src/build.rs", "crates/supervisor/Cargo.toml", "crates/supervisor/src/image.rs", "crates/supervisor/src/lib.rs", "crates/supervisor/tests/process.rs", "crates/worker-runtime/src/lib.rs", "crates/daemon-core/src/lib.rs", "apps/agentd/src/main.rs"]
+verify_cmd = "cargo test -p keith-supervisor image"
+
+[task.4.1]
+title  = "Canary worker evaluation on real supervisor generations"
+status = "implemented"
+wave   = 4
+do_1   = "Start a real canary worker on a new generation against a canary root tree using existing lease, registration, control, and drain machinery"
+do_2   = "Run the evaluation corpus and trace replay and report the hypothesis metric, baseline comparison, latency, cost, and failure behavior"
+do_3   = "Isolate the canary from live session trees, channels, delivery destinations, credentials, and destructive tools"
+do_4   = "End the transaction without promotion on crash, startup timeout, lease failure, protocol mismatch, or unmet threshold"
+do_5   = "Reclaim canary resources on every outcome including daemon restart, and prove isolation and reclamation with real processes"
+reqs   = ["7.1-7.6"]
+requires = ["3.2", "2.3"]
+symbols = ["CanaryEvaluation", "CanaryVerdict"]
+touches = ["apps/agent-worker/Cargo.toml", "apps/agent-worker/src/main.rs", "apps/agent-worker/tests/canary_process.rs", "crates/daemon-core/Cargo.toml", "crates/daemon-core/src/lib.rs", "crates/local-runtime/Cargo.toml", "crates/local-runtime/src/lib.rs", "crates/runtime-api/src/lib.rs", "crates/self-evolution/Cargo.toml", "crates/self-evolution/src/canary.rs", "crates/self-evolution/src/lib.rs", "crates/supervisor/src/lib.rs", "crates/worker-runtime/src/lib.rs"]
+verify_cmd = "cargo test -p keith-self-evolution canary"
+
+[task.4.2]
+title  = "Live worker roll promotion and source write-back"
+status = "implemented"
+wave   = 4
+do_1   = "Install the verified image and roll every active root tree through drain-and-replace onto a new generation without restarting the daemon"
+do_2   = "Return an unhealthy tree to the pinned image and abort the roll with full restoration past a configured failure count"
+do_3   = "Preserve in-flight actions, goals, children, waits, commitments, schedules, and deliveries across the roll with no history loss or duplication"
+do_4   = "Copy verified source changes back into the live tree only after a successful roll, as one transaction recording exact prior bytes"
+do_5   = "Prove a live roll with active sessions, partial roll failure restoration, daemon survival, generation correctness, and crash at every promotion boundary"
+reqs   = ["8.3-8.7"]
+requires = ["4.1"]
+symbols = ["PromotionTransaction", "WorkerRoll"]
+touches = ["crates/self-evolution/Cargo.toml", "crates/self-evolution/src/lib.rs", "crates/self-evolution/src/build.rs", "crates/self-evolution/src/canary.rs", "crates/self-evolution/src/promotion.rs", "crates/self-evolution/tests/promotion_process.rs", "crates/self-evolution/tests/support/promotion_worker_process.rs", "crates/supervisor/src/image.rs", "crates/supervisor/src/lib.rs", "crates/daemon-core/src/lib.rs"]
+verify_cmd = "cargo test -p keith-self-evolution promotion"
+
+[task.4.3]
+title  = "Staged daemon replacement and supervised restart recovery"
+status = "implemented"
+wave   = 4
+do_1   = "Stage daemon-affecting changes as verified signed pinned images awaiting a supervised restart instead of rolling live"
+do_2   = "Require class C consent with disclosure of the restart requirement, affected scope, and reversal path"
+do_3   = "Run migration, catalog rebuild, and endpoint opening under the new image with automatic restoration of the previous image on failure"
+do_4   = "Record and surface a triggered restoration on next attach and keep the staged image inspectable"
+do_5   = "Prove staged replacement, successful restart, failed startup and migration restoration, and repeated restart stability with real processes"
+reqs   = ["9.1-9.5"]
+requires = ["4.2"]
+symbols = ["StagedDaemonImage"]
+touches = ["crates/self-evolution/Cargo.toml", "crates/self-evolution/src/build.rs", "crates/self-evolution/src/lib.rs", "crates/self-evolution/src/staging.rs", "crates/supervisor/src/image.rs", "crates/daemon-core/src/lib.rs", "crates/daemon-core/src/recovery.rs", "apps/agentd/Cargo.toml", "apps/agentd/src/main.rs", "apps/agentd/tests/daemon_process.rs"]
+verify_cmd = "cargo test -p keith-self-evolution staging"
+
+[task.5.1]
+title  = "One-click reversal and baseline restore"
+status = "implemented"
+wave   = 5
+do_1   = "Implement a single reversal action per promotion that restores the pinned image, rolls workers back, and restores recorded prior source bytes in one transaction"
+do_2   = "Make reversal depend only on recorded bytes and pinned artifacts, with no rebuild, gate, toolchain, or network requirement"
+do_3   = "Implement baseline restore that reverts every self-evolution change to the last human-approved baseline in one action and reports exactly what it reverted"
+do_4   = "Support reversal while disabled, during a build or canary, after restart, and for stacked promotions touching the same paths"
+do_5   = "Guarantee byte-exact restoration or an explicit unresolved state on the pinned known-good image, never a mixed image and source tree"
+do_6   = "Record reversal in the ledger without deleting or rewriting the reverted change's history"
+do_7   = "Prove one-action reversal, stacked and out-of-order reversal, baseline restore, reversal of an unbuildable change, reversal while disabled, and crash at every reversal boundary"
+reqs   = ["10.1-10.7", "12.6"]
+requires = ["4.2"]
+symbols = ["ReversalTransaction", "BaselineRestore"]
+touches = ["crates/self-evolution/src/lib.rs", "crates/self-evolution/src/enablement.rs", "crates/self-evolution/src/ledger.rs", "crates/self-evolution/src/promotion.rs", "crates/self-evolution/src/reversal.rs", "crates/self-evolution/tests/promotion_process.rs", "crates/supervisor/src/image.rs", "crates/supervisor/src/lib.rs", "crates/daemon-core/src/lib.rs"]
+verify_cmd = "cargo test -p keith-self-evolution reversal"
+
+[task.5.2]
+title  = "Automatic revert watchdog and known-good advancement"
+status = "implemented"
+wave   = 5
+do_1   = "Start a bounded observation window per promotion measuring the hypothesis metric plus crash rate, turn failure rate, latency, cost, and resource use"
+do_2   = "Revert automatically on threshold breach or attributable worker crash loop and notify per profile policy"
+do_3   = "Advance the known-good baseline on a clean window and retain the previous image for the configured period"
+do_4   = "Survive daemon and worker restart, resume the remaining window, and revert on inconclusive measurement"
+do_5   = "Enforce a single active observation window and block new promotions while one is open"
+do_6   = "Test automatic revert on breach, crash loop, and inconclusive measurement, window resumption after restart, and baseline advancement"
+reqs   = ["11.1-11.6"]
+requires = ["5.1"]
+symbols = ["RevertWatchdog", "ObservationWindow"]
+touches = ["crates/daemon-core/Cargo.toml", "crates/daemon-core/src/lib.rs", "crates/self-evolution/src/lib.rs", "crates/self-evolution/src/promotion.rs", "crates/self-evolution/src/watchdog.rs", "crates/self-evolution/tests/promotion_process.rs", "crates/supervisor/src/image.rs", "crates/telemetry/src/lib.rs"]
+verify_cmd = "cargo test -p keith-self-evolution watchdog"
+
+[task.5.3]
+title  = "Evolution budgets, anti-goals, and concurrency bounds"
+status = "implemented"
+wave   = 5
+do_1   = "Enforce ceilings on concurrent hypotheses, shadow trees, builds, canaries, promotions per interval, and retained images with full resource accounting"
+do_2   = "Run evolution work at background priority through the ordinary action inbox and suppress it before interactive, scheduled, or delivery work"
+do_3   = "Refuse recursive evolution actions, hypotheses, and dedicated children at admission"
+do_4   = "Refuse replication, additional daemons, installation or update channel changes, budget self-edits, and any permission, sandbox, credential, or network widening"
+do_5   = "Abort cleanly on budget exhaustion with full reclamation and no partial artifacts, orphaned processes, or mixed state"
+do_6   = "Prove ceiling enforcement, interactive priority, recursion refusal, replication and widening refusal, and clean abort under load"
+reqs   = ["13.1-13.6"]
+requires = ["4.2"]
+symbols = ["EvolutionBudget", "EvolutionCeilings"]
+touches = ["crates/action-store/src/lib.rs", "crates/evolution/src/refinement.rs", "crates/local-runtime/src/lib.rs", "crates/resource-governor/src/model.rs", "crates/resource-governor/src/service.rs", "crates/self-evolution/Cargo.toml", "crates/self-evolution/src/budget.rs", "crates/self-evolution/src/guard.rs", "crates/self-evolution/src/lib.rs"]
+verify_cmd = "cargo test -p keith-self-evolution budget"
+
+[task.6.1]
+title  = "Protocol commands and client evolution surfaces"
+status = "implemented"
+wave   = 6
+do_1   = "Add versioned protocol commands, snapshots, and events for enablement, hypothesis and transaction state, consent decisions, ledger browsing, reversal, and baseline restore"
+do_2   = "Build the terminal surface presenting the ledger, readable diff, evidence, measured result, and a single reversal action"
+do_3   = "Build the web surface with the same content in ordinary language, keeping raw identifiers out of primary labels"
+do_4   = "Require authenticated, exact-origin, CSRF-proofed mutations for consent, reversal, enablement, and baseline restore"
+do_5   = "Prove parity of enable, disable, approve, revert, and restore across both clients against real commands"
+reqs   = ["1.2", "1.5", "3.4", "10.1", "10.3", "12.4"]
+requires = ["5.1", "5.2"]
+symbols = ["EvolutionCommand", "EvolutionProjection"]
+touches = ["apps/agent-tui/src/connection.rs", "apps/agent-tui/src/lib.rs", "apps/agent-tui/src/render.rs", "apps/agent-web/src/server.rs", "apps/agent-web/ui/app/globals.css", "apps/agent-web/ui/components/KeithApp.tsx", "apps/agent-web/ui/lib/keith.test.ts", "apps/agent-web/ui/lib/keith.ts", "apps/agentd/src/main.rs", "crates/agent-types/src/lib.rs", "crates/daemon-core/Cargo.toml", "crates/daemon-core/src/events.rs", "crates/daemon-core/src/lib.rs", "crates/local-runtime/src/lib.rs", "crates/protocol/src/lib.rs", "crates/self-evolution/src/enablement.rs", "crates/self-evolution/src/ledger.rs", "crates/ui-model/src/lib.rs"]
+verify_cmd = "cargo test -p keith-protocol -p keith-ui-model -p keith-agent-tui -p keith-agent-web"
+
+[task.6.2]
+title  = "Evolution export, deletion, and data-control integration"
+status = "implemented"
+wave   = 6
+do_1   = "Add ledger, image, shadow, and corpus scopes to export and deletion with exact scope statements"
+do_2   = "Clean derived projections and previews on deletion and report remaining data on partial failure"
+do_3   = "Keep exports documented, versioned, and readable without a running installation"
+do_4   = "Test export, deletion, remnant scanning, and profile isolation for every evolution scope"
+reqs   = ["12.6"]
+requires = ["1.2", "5.1"]
+touches = ["crates/data-control/Cargo.toml", "crates/data-control/src/lib.rs", "crates/self-evolution/src/corpus.rs", "crates/self-evolution/src/ledger.rs", "crates/self-evolution/src/shadow.rs", "crates/state-store-core/src/lib.rs", "crates/state-store/src/lib.rs", "crates/supervisor/src/image.rs", "crates/supervisor/src/lib.rs"]
+verify_cmd = "cargo test -p keith-data-control"
+
+[task.7.1]
+title  = "Adversarial self-evolution security and fault-injection gate"
+status = "in_progress"
+wave   = 7
+do_1   = "Prove protected-surface evasion is impossible through traversal, symlinks, renames, build scripts, procedural macros, generated code, manifest edits, and toolchain overrides"
+do_2   = "Prove build sandbox containment, network egress denial, credential exfiltration denial across tests, artifacts, ledger, gate output, and diagnostics, and unsigned or tampered promotion refusal"
+do_3   = "Prove prompt injection through source, comments, evidence, corpus data, and failure text cannot change classification, consent, guard state, or promotion"
+do_4   = "Kill the daemon, build, canary, and roll at every durable boundary and prove the live tree, installed image, pinned image, and ledger stay consistent and reversible"
+do_5   = "Run the gate against packaged binaries, a real toolchain, real sandboxes, and real worker processes and block release while any listed issue is open"
+reqs   = ["15.1-15.6", "2.6", "6.6"]
+requires = ["6.1", "5.3", "4.3"]
+touches = ["crates/self-evolution/tests/*", "apps/xtask/src/security.rs", "apps/xtask/src/main.rs"]
+verify_cmd = "cargo test -p keith-self-evolution --locked && cargo run -p keith-xtask --locked -- security-gate"
+
+[task.7.2]
+title  = "Self-evolution release qualification and completion gate"
+status = "pending"
+wave   = 8
+do_1   = "Run formatting, strict Clippy, dependency policy, the full self-evolution suite, the security gate, and the platform gate"
+do_2   = "Run one end-to-end journey from real evidence through hypothesis, proposal, sandboxed build, canary, promotion, observation, and one-click reversal on real processes"
+do_3   = "Verify default-off packaging, honest unavailability without a toolchain, and that no packaged default invokes a compiler"
+do_4   = "Trace every task to its symbols, touched files, Codify snapshots, commits, and pushed branch"
+do_5   = "Mark the feature complete only when every requirement is evidenced and no unreversible state, unsigned promotion, or fabricated verification result remains"
+reqs   = ["1.1-1.6", "2.1-2.6", "3.1-3.7", "4.1-4.6", "5.1-5.6", "6.1-6.6", "7.1-7.6", "8.1-8.7", "9.1-9.5", "10.1-10.7", "11.1-11.6", "12.1-12.7", "13.1-13.6", "14.1-14.6", "15.1-15.6"]
+requires = ["7.1", "6.2"]
+touches = ["crates/self-evolution/*", "crates/supervisor/src/lib.rs", "crates/daemon-core/src/lib.rs", "apps/xtask/src/main.rs", "docs/release-qualification.md"]
+verify_cmd = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p keith-self-evolution -p keith-supervisor -p keith-daemon-core && cargo run -p xtask -- security-gate && cargo run -p xtask -- platform-gate"

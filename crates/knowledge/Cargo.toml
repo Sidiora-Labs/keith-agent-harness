@@ -1,0 +1,20 @@
+[package]
+name = "keith-knowledge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+keith-agent-types = { path = "../agent-types" }
+keith-retrieval = { path = "../retrieval" }
+keith-workspace = { path = "../workspace" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
