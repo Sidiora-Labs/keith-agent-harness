@@ -1070,6 +1070,65 @@ mod tests {
     }
 
     #[test]
+    fn external_service_collections_round_trip_restart_and_exact_deletion() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("integrations.sqlite");
+        let collections = [
+            Collection::ChannelAccounts,
+            Collection::AcpSessions,
+            Collection::PluginRegistry,
+            Collection::ConnectedApps,
+            Collection::ComputerSessions,
+            Collection::ControlLeases,
+            Collection::Demonstrations,
+            Collection::TaskRecipes,
+            Collection::HarnessRepairs,
+            Collection::IntegrationOperations,
+            Collection::IntegrationAudit,
+        ];
+        let ids = collections
+            .iter()
+            .enumerate()
+            .map(|(index, collection)| {
+                let id = EntityId::new();
+                let value = index.saturating_add(1);
+                (id, *collection, value)
+            })
+            .collect::<Vec<_>>();
+        {
+            let store = EmbeddedStore::open(&path, Some(&FileBackupHook)).unwrap();
+            for (id, collection, value) in &ids {
+                store
+                    .transact(&[RecordMutation::Put {
+                        collection: *collection,
+                        record: record(id.clone(), 0, *value),
+                        precondition: WritePrecondition::Missing,
+                    }])
+                    .unwrap();
+            }
+        }
+        let reopened = EmbeddedStore::open(&path, Some(&FileBackupHook)).unwrap();
+        for (id, collection, value) in &ids {
+            assert_eq!(
+                reopened
+                    .get_record(*collection, id)
+                    .unwrap()
+                    .unwrap()
+                    .payload,
+                json!({"value": value})
+            );
+            reopened
+                .transact(&[RecordMutation::Delete {
+                    collection: *collection,
+                    id: id.clone(),
+                    precondition: WritePrecondition::Exact(Revision::ZERO),
+                }])
+                .unwrap();
+            assert!(reopened.get_record(*collection, id).unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn concurrent_readers_and_writers_preserve_every_record() {
         let store = Arc::new(EmbeddedStore::open_in_memory().unwrap());
         let mut threads = Vec::new();

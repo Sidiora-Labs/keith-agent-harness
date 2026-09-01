@@ -8,17 +8,18 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use keith_agent_tui::{Accessibility, ColorMode, TuiApp, TuiOverlay, render};
 use keith_agent_types::{
     CURRENT_PROTOCOL_VERSION, EntityId, EntryId, Generation, MessageId, ProfileId, Revision,
-    RootTreeId, Sequence, SessionId, TurnId, UtcTimestamp,
+    RootTreeId, Sequence, SessionId, TurnId, UtcTimestamp, WorkspaceId,
 };
 use keith_connection::{AgentTransport, FramedTransport};
 use keith_protocol::{
     ClientCommand, CommandResult, CommandResultEnvelope, DaemonEvent, EventEnvelope,
-    MessageProjection, MessageRole, PresenceProjection, PresenceState, ResponsePayload,
-    SessionSnapshot, SessionState, SessionSummary, TurnTerminalProjection, TurnTerminalStatus,
-    WireFormat, WireMessage, negotiate,
+    MessageProjection, MessageRole, PresenceProjection, PresenceState, ProfileSummary,
+    ResponsePayload, SessionSnapshot, SessionState, SessionSummary, TurnTerminalProjection,
+    TurnTerminalStatus, WireFormat, WireMessage, negotiate,
 };
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -28,6 +29,7 @@ use rustix::io::dup;
 use rustix::process::{Pid, Signal, kill_process};
 use rustix::pty::{OpenptFlags, grantpt, ioctl_tiocgptpeer, openpt, unlockpt};
 use rustix::termios::{Winsize, tcgetattr, tcsetwinsize};
+use unicode_width::UnicodeWidthChar;
 
 const COMPATIBILITY_MATRIX: &str = include_str!("terminal_compatibility.csv");
 
@@ -100,6 +102,81 @@ fn published_terminal_matrix_is_executable_and_deterministic() {
 }
 
 #[test]
+fn submitted_prompt_stays_before_streaming_replies_and_exposes_live_work() {
+    let case = MatrixCase {
+        name: "prompt-order",
+        width: 100,
+        height: 24,
+        color: ColorMode::NoColor,
+        term: "xterm",
+        overlay: None,
+        scenario: "empty",
+        expected: "",
+    };
+    let mut app = matrix_app(case);
+    let baseline = app.reducer.as_ref().unwrap().snapshot();
+    let root = baseline.session.root_tree_id.clone();
+    let generation = baseline.generation;
+    let session_id = baseline.session.session_id.clone();
+
+    app.replace_composer("the submitted prompt".into());
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let command = std::iter::from_fn(|| app.next_command())
+        .find(|command| matches!(command, ClientCommand::SubmitPrompt(_)))
+        .expect("prompt command");
+    let envelope = app.command_envelope(command);
+    app.command_dispatched(&envelope.command_id);
+
+    for (sequence, text) in [(1, "first streamed reply"), (2, "second streamed reply")] {
+        app.apply_wire_message(WireMessage::Event(EventEnvelope {
+            protocol: CURRENT_PROTOCOL_VERSION,
+            root_tree_id: root.clone(),
+            generation,
+            first_sequence: Sequence::new(sequence),
+            sequence: Sequence::new(sequence),
+            occurred_at: UtcTimestamp::UNIX_EPOCH,
+            event: DaemonEvent::MessageCommitted(MessageProjection {
+                message_id: MessageId::new(),
+                final_id: None,
+                role: MessageRole::Assistant,
+                text: text.into(),
+                committed: false,
+            }),
+        }));
+    }
+    app.apply_wire_message(WireMessage::Event(EventEnvelope {
+        protocol: CURRENT_PROTOCOL_VERSION,
+        root_tree_id: root.clone(),
+        generation,
+        first_sequence: Sequence::new(3),
+        sequence: Sequence::new(3),
+        occurred_at: UtcTimestamp::UNIX_EPOCH,
+        event: DaemonEvent::PresenceChanged(PresenceProjection {
+            session_id: session_id.clone(),
+            goal_id: None,
+            state: PresenceState::Thinking,
+            updated_at: UtcTimestamp::UNIX_EPOCH,
+            next_wake: None,
+            safe_error: None,
+        }),
+    }));
+
+    let screen = snapshot(&app, 100, 24).text;
+    let prompt_at = screen.find("› the submitted prompt").unwrap();
+    let first_reply_at = screen.find("• first streamed reply").unwrap();
+    let second_reply_at = screen.find("• second streamed reply").unwrap();
+    assert!(prompt_at < first_reply_at && first_reply_at < second_reply_at);
+    assert!(!screen.contains("sending"));
+    assert!(screen.contains("Thinking (0s · Esc to interrupt)"));
+    assert_eq!(screen.matches("Keith").count(), 1, "{screen}");
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(std::iter::from_fn(|| app.next_command()).any(|command| {
+        matches!(command, ClientCommand::Cancel(keith_protocol::CancelTarget::Session(id)) if id == session_id)
+    }));
+}
+
+#[test]
 fn long_history_remains_reachable_and_control_bytes_never_execute() {
     let mut app = matrix_app(MatrixCase {
         name: "long-history",
@@ -129,8 +206,129 @@ fn long_history_remains_reachable_and_control_bytes_never_execute() {
 }
 
 #[test]
+fn new_session_clears_the_authoritative_transcript_before_the_daemon_replies() {
+    let mut app = matrix_app(MatrixCase {
+        name: "new-session-clear",
+        width: 96,
+        height: 24,
+        color: ColorMode::NoColor,
+        term: "xterm-256color",
+        overlay: None,
+        scenario: "long-history",
+        expected: "history item 119",
+    });
+    let profile_id = app
+        .reducer
+        .as_ref()
+        .expect("matrix conversation")
+        .snapshot()
+        .session
+        .profile_id
+        .clone();
+    app.profiles.push(ProfileSummary {
+        id: profile_id,
+        workspace_id: WorkspaceId::new(),
+        display_name: "Keith".into(),
+        enabled: true,
+    });
+    assert!(snapshot(&app, 96, 24).text.contains("history item 119"));
+
+    app.start_new_session();
+
+    let cleared = snapshot(&app, 96, 24).text;
+    assert!(cleared.contains("Starting a new conversation"));
+    assert!(!cleared.contains("history item 119"));
+    assert!(app.attached_session.is_none());
+    assert!(app.reducer.is_none());
+}
+
+#[test]
+fn created_session_attaches_before_stream_events_are_acknowledged() {
+    let mut app = matrix_app(MatrixCase {
+        name: "new-session-attach",
+        width: 96,
+        height: 24,
+        color: ColorMode::NoColor,
+        term: "xterm-256color",
+        overlay: None,
+        scenario: "empty",
+        expected: "",
+    });
+    let profile_id = app
+        .reducer
+        .as_ref()
+        .expect("matrix conversation")
+        .snapshot()
+        .session
+        .profile_id
+        .clone();
+    app.profiles.push(ProfileSummary {
+        id: profile_id.clone(),
+        workspace_id: WorkspaceId::new(),
+        display_name: "Keith".into(),
+        enabled: true,
+    });
+
+    app.start_new_session();
+    let create = std::iter::from_fn(|| app.next_command())
+        .find(|command| matches!(command, ClientCommand::CreateSession(_)))
+        .expect("create session command");
+    let create = app.command_envelope(create);
+
+    let mut created = snapshot_state("created");
+    created.session.profile_id = profile_id;
+    let session_id = created.session.session_id.clone();
+    let root_tree_id = created.session.root_tree_id.clone();
+    let generation = created.generation;
+    app.apply_wire_message(WireMessage::CommandResult(CommandResultEnvelope {
+        protocol: CURRENT_PROTOCOL_VERSION,
+        command_id: create.command_id,
+        completed_at: UtcTimestamp::UNIX_EPOCH,
+        result: CommandResult::Data(Box::new(ResponsePayload::Snapshot(Box::new(created)))),
+    }));
+
+    assert_eq!(app.attached_session.as_ref(), Some(&session_id));
+    let queued = std::iter::from_fn(|| app.next_command()).collect::<Vec<_>>();
+    assert!(queued.iter().any(|command| {
+        matches!(
+            command,
+            ClientCommand::AttachSession(attach)
+                if attach.session_id == session_id
+                    && attach.resume.as_ref().is_some_and(|resume| {
+                        resume.root_tree_id == root_tree_id
+                            && resume.generation == generation
+                            && resume.last_sequence == Sequence::ZERO
+                    })
+        )
+    }));
+
+    app.apply_wire_message(WireMessage::Event(EventEnvelope {
+        protocol: CURRENT_PROTOCOL_VERSION,
+        root_tree_id: root_tree_id.clone(),
+        generation,
+        first_sequence: Sequence::new(1),
+        sequence: Sequence::new(1),
+        occurred_at: UtcTimestamp::UNIX_EPOCH,
+        event: DaemonEvent::MessageCommitted(MessageProjection {
+            message_id: MessageId::new(),
+            final_id: Some(EntryId::new()),
+            role: MessageRole::Assistant,
+            text: "attached stream event".into(),
+            committed: true,
+        }),
+    }));
+    assert!(matches!(
+        app.next_command(),
+        Some(ClientCommand::AcknowledgeEvents(acknowledgement))
+            if acknowledgement.root_tree_id == root_tree_id
+                && acknowledgement.generation == generation
+                && acknowledgement.through_sequence == Sequence::new(1)
+    ));
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
-fn real_pty_journey_preserves_scrollback_paste_resize_idle_events_editor_and_signal_restore() {
+fn real_pty_journey_isolates_prior_output_paste_resize_editor_and_signal_restore() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("agent.sock");
     let profile = ProfileId::new();
@@ -164,6 +362,12 @@ fn real_pty_journey_preserves_scrollback_paste_resize_idle_events_editor_and_sig
     )
     .unwrap();
     let original_mode = format!("{:?}", tcgetattr(&slave).unwrap());
+    let mut prior_screen = File::from(dup(&slave).unwrap());
+    prior_screen
+        .write_all(b"COMPILING_OUTPUT_MUST_NOT_REMAIN_BEHIND_TUI\n")
+        .unwrap();
+    prior_screen.flush().unwrap();
+    drop(prior_screen);
     let stdin = dup(&slave).unwrap();
     let stdout = dup(&slave).unwrap();
     let stderr = dup(&slave).unwrap();
@@ -198,9 +402,18 @@ fn real_pty_journey_preserves_scrollback_paste_resize_idle_events_editor_and_sig
         Duration::from_secs(5),
     );
     let initial = String::from_utf8_lossy(&output);
-    assert!(searchable_terminal_output(&output).contains("scrollbacksurvivestheliveviewport"));
+    let screen = replay_terminal(&output, 28, 96);
+    assert!(
+        screen.contains("transcript survives the live viewport"),
+        "rendered terminal screen omitted the attached transcript:\n{screen}"
+    );
+    let prior_output = initial
+        .find("COMPILING_OUTPUT_MUST_NOT_REMAIN_BEHIND_TUI")
+        .unwrap();
+    let alternate_screen = initial.find("\u{1b}[?1049h").unwrap();
+    assert!(prior_output < alternate_screen);
     assert!(initial.contains("\u{1b}[?2004h"));
-    assert!(!initial.contains("\u{1b}[?1049h"));
+    assert!(initial.contains("\u{1b}[2J"));
 
     master
         .write_all(b"\x1b[200~pasted safely\nsecond line\x1b[201~")
@@ -218,6 +431,16 @@ fn real_pty_journey_preserves_scrollback_paste_resize_idle_events_editor_and_sig
         child.try_wait().unwrap().is_none(),
         "external editor ended the TUI"
     );
+
+    master.write_all(&[0x03]).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    drain(&mut master, &mut output);
+    master.write_all(b"visible immediately\r").unwrap();
+    wait_for_output(&mut master, &mut output, "Working", Duration::from_secs(3));
+    let submitted = replay_terminal(&output, 28, 96);
+    assert!(submitted.contains("› visible immediately"), "{submitted}");
+    assert!(submitted.contains("Working"), "{submitted}");
+    assert!(!submitted.contains("sending"), "{submitted}");
 
     tcsetwinsize(
         &master,
@@ -249,7 +472,8 @@ fn real_pty_journey_preserves_scrollback_paste_resize_idle_events_editor_and_sig
     assert_eq!(format!("{:?}", tcgetattr(&slave).unwrap()), original_mode);
     let final_output = String::from_utf8_lossy(&output);
     assert!(final_output.contains("\u{1b}[?2004l"));
-    assert!(searchable_terminal_output(&output).contains("scrollbacksurvivestheliveviewport"));
+    assert!(final_output.contains("\u{1b}[?1049l"));
+    assert!(searchable_terminal_output(&output).contains("transcriptsurvivestheliveviewport"));
     drop(slave);
     drop(master);
     host.join().unwrap();
@@ -477,7 +701,7 @@ fn pty_snapshot(profile: &ProfileId, session: &SessionId, root: &RootTreeId) -> 
         message_id: MessageId::new(),
         final_id: Some(EntryId::new()),
         role: MessageRole::Assistant,
-        text: "scrollback survives the live viewport".into(),
+        text: "transcript survives the live viewport".into(),
         committed: true,
     });
     state
@@ -533,6 +757,86 @@ fn searchable_terminal_output(output: &[u8]) -> String {
         }
     }
     searchable
+}
+
+fn replay_terminal(output: &[u8], rows: usize, cols: usize) -> String {
+    let mut cells = vec![vec![' '; cols]; rows];
+    let mut row = 0_usize;
+    let mut col = 0_usize;
+    let decoded = String::from_utf8_lossy(output);
+    let mut characters = decoded.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' {
+            if characters.next_if_eq(&'[').is_none() {
+                continue;
+            }
+            let mut parameters = String::new();
+            for parameter in characters.by_ref() {
+                if ('@'..='~').contains(&parameter) {
+                    let numbers = parameters
+                        .trim_start_matches('?')
+                        .split(';')
+                        .map(|value| value.parse::<usize>().unwrap_or(0))
+                        .collect::<Vec<_>>();
+                    match parameter {
+                        'H' | 'f' => {
+                            row = numbers.first().copied().unwrap_or(1).max(1) - 1;
+                            col = numbers.get(1).copied().unwrap_or(1).max(1) - 1;
+                        }
+                        'A' => row = row.saturating_sub(numbers.first().copied().unwrap_or(1)),
+                        'B' => {
+                            row = row
+                                .saturating_add(numbers.first().copied().unwrap_or(1))
+                                .min(rows.saturating_sub(1));
+                        }
+                        'C' => {
+                            col = col
+                                .saturating_add(numbers.first().copied().unwrap_or(1))
+                                .min(cols.saturating_sub(1));
+                        }
+                        'D' => col = col.saturating_sub(numbers.first().copied().unwrap_or(1)),
+                        'G' => col = numbers.first().copied().unwrap_or(1).max(1) - 1,
+                        'J' if numbers.first().copied().unwrap_or(0) == 2 => {
+                            for line in &mut cells {
+                                line.fill(' ');
+                            }
+                        }
+                        'K' if row < rows => {
+                            if numbers.first().copied().unwrap_or(0) == 2 {
+                                cells[row].fill(' ');
+                            } else {
+                                cells[row][col.min(cols)..].fill(' ');
+                            }
+                        }
+                        _ => {}
+                    }
+                    break;
+                }
+                parameters.push(parameter);
+            }
+            continue;
+        }
+        match character {
+            '\r' => col = 0,
+            '\n' => {
+                row = row.saturating_add(1).min(rows.saturating_sub(1));
+                col = 0;
+            }
+            value if value.is_control() => {}
+            value if row < rows && col < cols => {
+                cells[row][col] = value;
+                col = col
+                    .saturating_add(UnicodeWidthChar::width(value).unwrap_or(0))
+                    .min(cols);
+            }
+            _ => {}
+        }
+    }
+    cells
+        .into_iter()
+        .map(|line| line.into_iter().collect::<String>().trim_end().to_owned())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn drain(file: &mut File, output: &mut Vec<u8>) {

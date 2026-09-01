@@ -8,6 +8,9 @@ use keith_agent_types::{
     ProfileId, ProtocolVersion, Revision, RootTreeId, Sequence, SessionId, ToolCallId, TurnId,
     UtcTimestamp, WorkspaceId,
 };
+use keith_platform_contracts::{
+    AuditCorrelationId, CancellationId, ExternalAction, LifecycleState, ResourceBounds,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -36,6 +39,14 @@ pub enum Feature {
     DeliveryDispatch,
     AttachmentStaging,
     SelfEvolution,
+    ChannelAccounts,
+    AcpConnections,
+    Plugins,
+    ConnectedApps,
+    Computers,
+    Recordings,
+    Recipes,
+    HarnessRepairs,
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -89,10 +100,15 @@ pub enum ClientCommand {
     ListProfiles,
     ListSessions(SessionFilter),
     CreateSession(CreateSession),
+    ForkSession(ForkSession),
     AttachSession(AttachSession),
-    DetachSession { session_id: SessionId },
+    DetachSession {
+        session_id: SessionId,
+    },
     AcknowledgeEvents(EventAcknowledgement),
-    ResumeSession { session_id: SessionId },
+    ResumeSession {
+        session_id: SessionId,
+    },
     BranchSession(BranchRequest),
     SelectBranch(SelectBranch),
     SubmitPrompt(SubmitPrompt),
@@ -101,23 +117,192 @@ pub enum ClientCommand {
     SelectModel(ModelSelection),
     CreateGoal(CreateGoal),
     UpdateGoal(UpdateGoal),
-    ListGoals { session_id: SessionId },
-    ListChildren { session_id: SessionId },
+    ListGoals {
+        session_id: SessionId,
+    },
+    ListChildren {
+        session_id: SessionId,
+    },
     CreateChild(CreateChild),
     SendChildMessage(ChildMessageRequest),
-    ArchiveChild { child_id: ChildId },
+    ArchiveChild {
+        child_id: ChildId,
+    },
     CreateSchedule(CreateSchedule),
     UpdateSchedule(UpdateSchedule),
-    DeleteSchedule { job_id: JobId },
+    DeleteSchedule {
+        job_id: JobId,
+    },
     QueryMemory(MemoryQuery),
     ResolveConfirmation(ConfirmationResolution),
     Export(ExportRequest),
     SetBackgroundControl(BackgroundControl),
     StageAttachment(StagedAttachment),
-    ClaimDelivery { channel: String },
+    ClaimDelivery {
+        channel: String,
+        external_account: String,
+    },
     AcknowledgeDelivery(DeliveryAcknowledgement),
     FailDelivery(DeliveryFailure),
+    ChannelAccount(ChannelAccountCommand),
+    Integration(IntegrationCommand),
+    HarnessRepair(HarnessRepairCommand),
     Evolution(EvolutionCommand),
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "action", content = "parameters")]
+pub enum ChannelAccountCommand {
+    List {
+        profile_id: ProfileId,
+    },
+    Inspect {
+        profile_id: ProfileId,
+        account_id: String,
+    },
+    Connect(ChannelAccountConfiguration),
+    Configure(ChannelAccountConfiguration),
+    Test {
+        profile_id: ProfileId,
+        account_id: String,
+    },
+    Pause {
+        profile_id: ProfileId,
+        account_id: String,
+        expected_revision: u64,
+    },
+    Resume {
+        profile_id: ProfileId,
+        account_id: String,
+        expected_revision: u64,
+    },
+    RotateCredentials {
+        profile_id: ProfileId,
+        account_id: String,
+        credential_references: Vec<String>,
+        expected_generation: u64,
+        expected_revision: u64,
+    },
+    Remove {
+        profile_id: ProfileId,
+        account_id: String,
+        expected_revision: u64,
+    },
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct ChannelAccountConfiguration {
+    pub profile_id: ProfileId,
+    pub adapter: String,
+    pub account_id: String,
+    pub display_name: String,
+    pub credential_references: Vec<String>,
+    pub credential_generation: u64,
+    pub requested_scopes: Vec<String>,
+    pub callback_origin: Option<String>,
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessRepairMode {
+    Advisory,
+    Shadow,
+    Autonomous,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "action", content = "parameters")]
+pub enum HarnessRepairCommand {
+    Refresh {
+        profile_id: ProfileId,
+    },
+    SetMode {
+        profile_id: ProfileId,
+        mode: HarnessRepairMode,
+    },
+    Approve {
+        profile_id: ProfileId,
+        operation_id: EntityId,
+    },
+    Promote {
+        profile_id: ProfileId,
+        operation_id: EntityId,
+    },
+    Reverse {
+        profile_id: ProfileId,
+        operation_id: EntityId,
+    },
+    RetryCurrentTask {
+        profile_id: ProfileId,
+        operation_id: EntityId,
+    },
+}
+
+#[derive(
+    Clone, Copy, Debug, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationService {
+    ChannelAccount,
+    AcpConnection,
+    Plugin,
+    ConnectedApp,
+    ComputerSession,
+    ControlLease,
+    Recording,
+    Recipe,
+    HarnessRepair,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "action", content = "parameters")]
+pub enum IntegrationCommand {
+    List {
+        profile_id: ProfileId,
+        service: Option<IntegrationService>,
+    },
+    Inspect {
+        profile_id: ProfileId,
+        service: IntegrationService,
+        resource_id: EntityId,
+    },
+    Mutate(Box<IntegrationMutation>),
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct IntegrationMutation {
+    pub profile_id: ProfileId,
+    pub service: IntegrationService,
+    pub resource_id: Option<EntityId>,
+    pub native_resource_key: String,
+    pub display_label: String,
+    pub expected_revision: Option<Revision>,
+    pub idempotency_key: String,
+    pub operation: IntegrationOperation,
+    pub authority: ExternalAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationOperation {
+    Connect,
+    Configure,
+    Test,
+    Install,
+    Start,
+    Pause,
+    Resume,
+    Stop,
+    Cancel,
+    Delete,
+    Export,
+    TakeControl,
+    ReleaseControl,
+    StartRecording,
+    StopRecording,
+    Publish,
+    Reverse,
 }
 
 /// Installation-scoped self-evolution commands. Authority and credentials deliberately never
@@ -159,6 +344,12 @@ pub struct SessionFilter {
 pub struct CreateSession {
     pub profile_id: ProfileId,
     pub workspace_id: WorkspaceId,
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct ForkSession {
+    pub source_session_id: SessionId,
     pub title: Option<String>,
 }
 
@@ -477,7 +668,184 @@ pub enum ResponsePayload {
     Background(BackgroundProjection),
     Artifact(ArtifactId),
     DeliveryClaim(Option<Box<DeliveryDispatch>>),
+    ChannelAccounts(Vec<ChannelAccountProjection>),
+    ChannelAccount(Box<ChannelAccountProjection>),
+    ProfileIntegrations(Box<ProfileIntegrationsProjection>),
+    IntegrationResource(Box<IntegrationResourceProjection>),
+    IntegrationDeletion(IntegrationDeletionProjection),
+    HarnessRepairs(Box<HarnessRepairsProjection>),
     Evolution(Box<EvolutionProjection>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelAccountLifecycle {
+    Connecting,
+    Healthy,
+    Degraded,
+    Throttled,
+    Paused,
+    Revoked,
+    Failed,
+    Removed,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct ChannelAccountSetupProjection {
+    pub required_credential_references: Vec<String>,
+    pub required_scopes: Vec<String>,
+    pub callback_state: Option<String>,
+    pub webhook_configured: bool,
+    pub polling_configured: bool,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct ChannelAccountQueueProjection {
+    pub pending: u32,
+    pub capacity: u32,
+    pub notification_budget_remaining: u32,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct ChannelAccountProjection {
+    pub profile_id: ProfileId,
+    pub adapter: String,
+    pub account_id: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub lifecycle: ChannelAccountLifecycle,
+    pub setup: ChannelAccountSetupProjection,
+    pub credential_references: Vec<String>,
+    pub credential_generation: u64,
+    pub capabilities: Vec<String>,
+    pub queue: ChannelAccountQueueProjection,
+    pub reconnect_attempt: u32,
+    pub throttled_until: Option<UtcTimestamp>,
+    pub cursor_present: bool,
+    pub last_event_at: Option<UtcTimestamp>,
+    pub last_delivery_at: Option<UtcTimestamp>,
+    pub last_transition_at: UtcTimestamp,
+    pub safe_error: Option<String>,
+    pub restartable: bool,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum IntegrationAvailabilityProjection {
+    Available,
+    Disabled,
+    Unavailable { safe_reason: String },
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct IntegrationServiceProjection {
+    pub service: IntegrationService,
+    pub availability: IntegrationAvailabilityProjection,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct IntegrationResourceProjection {
+    pub id: EntityId,
+    pub profile_id: ProfileId,
+    pub owning_session_id: Option<SessionId>,
+    pub service: IntegrationService,
+    pub native_resource_key: String,
+    pub display_label: String,
+    pub lifecycle: LifecycleState,
+    pub cancellation_id: CancellationId,
+    pub audit_correlation: AuditCorrelationId,
+    pub bounds: ResourceBounds,
+    pub controls: BTreeSet<IntegrationControl>,
+    pub safe_error: Option<String>,
+    pub revision: Revision,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
+}
+
+#[derive(
+    Clone, Copy, Debug, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationControl {
+    Restart,
+    Cancel,
+    Export,
+    Delete,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct ProfileIntegrationsProjection {
+    pub profile_id: ProfileId,
+    pub through_sequence: Sequence,
+    pub services: Vec<IntegrationServiceProjection>,
+    pub resources: Vec<IntegrationResourceProjection>,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct IntegrationDeletionProjection {
+    pub profile_id: ProfileId,
+    pub service: IntegrationService,
+    pub resource_id: EntityId,
+    pub deleted_records: u64,
+    pub remaining_records: u64,
+    pub remaining_derived_indexes: Option<u64>,
+    pub remaining_media_objects: Option<u64>,
+    pub retained_operation_records: u64,
+    pub retained_audit_records: u64,
+    pub retention_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct HarnessRepairAvailabilityProjection {
+    pub advisory: bool,
+    pub shadow: bool,
+    pub autonomous: bool,
+    pub shadow_unavailable_reason: Option<String>,
+    pub autonomous_unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct HarnessRepairMetricsProjection {
+    pub cases: u64,
+    pub task_success_basis_points: u16,
+    pub truthful_completion_basis_points: u16,
+    pub safety_basis_points: u16,
+    pub correction_adherence_basis_points: u16,
+    pub tokens: u64,
+    pub external_cost_micros: u64,
+    pub latency_ms: u64,
+    pub retries: u32,
+    pub cpu_ms: u64,
+    pub peak_memory_bytes: u64,
+    pub disk_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct HarnessRepairProjection {
+    pub id: EntityId,
+    pub candidate_id: EntityId,
+    pub mode: HarnessRepairMode,
+    pub phase: String,
+    pub headline: String,
+    pub summary: String,
+    pub metrics: HarnessRepairMetricsProjection,
+    pub needs_approval: bool,
+    pub can_retry_current_task: bool,
+    pub can_promote: bool,
+    pub can_reverse: bool,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct HarnessRepairsProjection {
+    pub profile_id: ProfileId,
+    pub availability: HarnessRepairAvailabilityProjection,
+    pub selected_mode: HarnessRepairMode,
+    pub repairs: Vec<HarnessRepairProjection>,
+    pub safe_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -853,6 +1221,28 @@ pub struct EventEnvelope {
     pub sequence: Sequence,
     pub occurred_at: UtcTimestamp,
     pub event: DaemonEvent,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct ProfileEventEnvelope {
+    pub protocol: ProtocolVersion,
+    pub profile_id: ProfileId,
+    pub generation: Generation,
+    pub sequence: Sequence,
+    pub occurred_at: UtcTimestamp,
+    pub event: ProfileIntegrationEvent,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "event", content = "payload")]
+pub enum ProfileIntegrationEvent {
+    Snapshot(Box<ProfileIntegrationsProjection>),
+    ResourceChanged(Box<IntegrationResourceProjection>),
+    ResourceRemoved {
+        service: IntegrationService,
+        resource_id: EntityId,
+    },
+    ServiceAvailabilityChanged(IntegrationServiceProjection),
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -1241,6 +1631,36 @@ mod tests {
         assert!(!encoded.contains("credential"));
         assert!(!encoded.contains("authority"));
         assert!(!encoded.contains("identity"));
+    }
+
+    #[test]
+    fn fork_session_wire_names_the_source_without_assigning_the_destination() {
+        let source_session_id = SessionId::new();
+        let message = WireMessage::Command(CommandEnvelope {
+            protocol: CURRENT_PROTOCOL_VERSION,
+            command_id: CommandId::new(),
+            client_id: ClientId::new(),
+            sent_at: UtcTimestamp::from_unix_millis(1),
+            session_id: Some(source_session_id.clone()),
+            command: ClientCommand::ForkSession(ForkSession {
+                source_session_id: source_session_id.clone(),
+                title: Some("Independent fork".into()),
+            }),
+        });
+        for format in [WireFormat::Json, WireFormat::Binary] {
+            let encoded = encode(format, &message).unwrap();
+            assert_eq!(decode(format, &encoded).unwrap(), message);
+        }
+        let encoded = serde_json::to_value(&message).unwrap();
+        assert_eq!(
+            encoded["payload"]["command"]["parameters"]["source_session_id"],
+            source_session_id.to_string()
+        );
+        assert!(
+            encoded["payload"]["command"]["parameters"]
+                .get("session_id")
+                .is_none()
+        );
     }
 
     #[test]

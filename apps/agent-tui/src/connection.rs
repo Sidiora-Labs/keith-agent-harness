@@ -619,6 +619,10 @@ impl TuiArguments {
                 println!("agent-tui {}", env!("CARGO_PKG_VERSION"));
                 return Ok(None);
             }
+            if matches!(argument.as_str(), "--help" | "-h") {
+                print_help(&program);
+                return Ok(None);
+            }
             if argument == "--reduced-motion" {
                 reduced_motion = true;
                 continue;
@@ -720,6 +724,16 @@ impl TuiArguments {
     }
 }
 
+fn print_help(program: &OsString) {
+    let executable = Path::new(program)
+        .file_name()
+        .unwrap_or(program.as_os_str())
+        .to_string_lossy();
+    println!(
+        "Keith terminal agent\n\nUsage: {executable} [OPTIONS]\n\nOptions:\n  --socket <PATH>                Attach to a running Keith daemon\n  --session <ID>                 Open a specific conversation\n  --data-root <PATH>             Start and supervise a local Keith daemon\n  --daemon-executable <PATH>     Override the supervised daemon binary\n  --worker-executable <PATH>     Override the supervised worker binary\n  --remote <WS_URL>              Connect to an authenticated remote daemon\n  --token-env <NAME>             Read the remote bearer token from this variable\n  --color <MODE>                 truecolor, 256, none, or contrast\n  --reduced-motion               Disable animated activity indicators\n  --startup-timeout-ms <MS>      Connection startup timeout\n  -h, --help                     Print help\n  -V, --version                  Print version"
+    );
+}
+
 fn sibling_binary(program: &OsString, name: &str) -> PathBuf {
     let mut path = PathBuf::from(program);
     path.set_file_name(name);
@@ -733,7 +747,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use keith_agent_types::{
-        CommandId, CommonError, EntityId, ErrorCode, Generation, RootTreeId, Sequence, UtcTimestamp,
+        CommandId, CommonError, EntityId, ErrorCode, Generation, ProfileId, RootTreeId, Sequence,
+        UtcTimestamp,
     };
     use keith_protocol::{
         ClientCommand, CommandResult, DaemonEvent, EventEnvelope, ResponsePayload, SessionFilter,
@@ -861,6 +876,83 @@ mod tests {
         ));
         client.reconnect(None, Duration::from_secs(1)).unwrap();
         client.execute(list_command(client_id), |_| {}).unwrap();
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn local_transport_preserves_profile_scoped_integration_commands_and_projections() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.sock");
+        let listener = keith_connection::bind_permissioned_local(&path).unwrap();
+        let profile_id = ProfileId::new();
+        let expected_profile = profile_id.clone();
+        let server = thread::spawn(move || {
+            let stream = keith_connection::accept_local(&listener).unwrap();
+            let mut transport = negotiate_local_client(stream);
+            let WireMessage::Command(command) = transport.receive().unwrap() else {
+                panic!("integration command required");
+            };
+            assert!(matches!(
+                command.command,
+                ClientCommand::Integration(keith_protocol::IntegrationCommand::List {
+                    profile_id,
+                    service: None,
+                }) if profile_id == expected_profile
+            ));
+            transport
+                .send(&WireMessage::CommandResult(CommandResultEnvelope {
+                    protocol: CURRENT_PROTOCOL_VERSION,
+                    command_id: command.command_id,
+                    completed_at: UtcTimestamp::UNIX_EPOCH,
+                    result: CommandResult::Data(Box::new(ResponsePayload::ProfileIntegrations(
+                        Box::new(keith_protocol::ProfileIntegrationsProjection {
+                            profile_id: expected_profile,
+                            through_sequence: Sequence::new(2),
+                            services: vec![keith_protocol::IntegrationServiceProjection {
+                                service: keith_protocol::IntegrationService::ConnectedApp,
+                                availability:
+                                    keith_protocol::IntegrationAvailabilityProjection::Available,
+                            }],
+                            resources: Vec::new(),
+                        }),
+                    ))),
+                }))
+                .unwrap();
+        });
+
+        let client_id = ClientId::new();
+        let mut client = AgentConnectionClient::connect(
+            ConnectionMode::Attach { socket_path: path },
+            client_id.clone(),
+            None,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let result = client
+            .execute(
+                CommandEnvelope {
+                    protocol: CURRENT_PROTOCOL_VERSION,
+                    command_id: CommandId::new(),
+                    client_id,
+                    sent_at: UtcTimestamp::UNIX_EPOCH,
+                    session_id: None,
+                    command: ClientCommand::Integration(keith_protocol::IntegrationCommand::List {
+                        profile_id: profile_id.clone(),
+                        service: None,
+                    }),
+                },
+                |_| {},
+            )
+            .unwrap();
+        assert!(matches!(
+            result.result,
+            CommandResult::Data(payload)
+                if matches!(payload.as_ref(),
+                    ResponsePayload::ProfileIntegrations(projection)
+                        if projection.profile_id == profile_id
+                            && projection.through_sequence == Sequence::new(2))
+        ));
         drop(client);
         server.join().unwrap();
     }
@@ -1104,6 +1196,11 @@ mod tests {
         };
         assert!(native.data_root.is_absolute());
         assert!(native.socket_path.is_absolute());
+        assert!(
+            TuiArguments::parse(["agent-tui", "--help"])
+                .unwrap()
+                .is_none()
+        );
         assert!(TuiArguments::parse(["agent-tui", "--remote", "ws://localhost"]).is_err());
     }
 }

@@ -5,12 +5,13 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use keith_configuration::{PlatformServiceGroup, ServiceEnablementConfig};
 use keith_daemon_core::{DaemonCore, DaemonOptions};
 use keith_local_runtime::{LocalRuntimeLaunchConfig, RuntimeCredentialKeySource};
 use keith_platform::PlatformPaths;
@@ -28,6 +29,7 @@ struct Arguments {
     openai_base_url: String,
     anthropic_base_url: String,
     provider_base_urls: BTreeMap<String, String>,
+    services: ServiceEnablementConfig,
 }
 
 enum CredentialKeySource {
@@ -37,10 +39,12 @@ enum CredentialKeySource {
 }
 
 const CHILD_ENV: &str = "KEITH_DAEMON_CHILD";
+const LAUNCHER_PID_ENV: &str = "KEITH_DAEMON_LAUNCHER_PID";
 const READY_PATH_ENV: &str = "KEITH_DAEMON_READY_PATH";
 const READY_IMAGE_ENV: &str = "KEITH_DAEMON_READY_IMAGE";
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_POLL: Duration = Duration::from_millis(20);
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl Arguments {
     #[allow(clippy::too_many_lines)]
@@ -61,6 +65,7 @@ impl Arguments {
         let mut openai_base_url = "https://api.openai.com".to_owned();
         let mut anthropic_base_url = "https://api.anthropic.com".to_owned();
         let mut provider_base_urls = BTreeMap::new();
+        let mut services = ServiceEnablementConfig::default();
         while let Some(argument) = arguments.next() {
             let argument = argument
                 .into_string()
@@ -128,6 +133,21 @@ impl Arguments {
                         return Err(format!("provider base URL for {provider} was repeated"));
                     }
                 }
+                "--enable-service" => {
+                    let service = value
+                        .into_string()
+                        .map_err(|_| "service name must be UTF-8".to_owned())?;
+                    let service = match service.as_str() {
+                        "channels" => PlatformServiceGroup::Channels,
+                        "acp" => PlatformServiceGroup::Acp,
+                        "plugins" => PlatformServiceGroup::Plugins,
+                        "connected_apps" => PlatformServiceGroup::ConnectedApps,
+                        "computers" => PlatformServiceGroup::Computers,
+                        "teaching" => PlatformServiceGroup::Teaching,
+                        _ => return Err(format!("unknown service {service}")),
+                    };
+                    services.set_enabled(service, true);
+                }
                 "--idle-seconds" => {
                     idle_seconds = value
                         .into_string()
@@ -174,6 +194,7 @@ impl Arguments {
             openai_base_url,
             anthropic_base_url,
             provider_base_urls,
+            services,
         }))
     }
 }
@@ -187,9 +208,11 @@ fn run_child() -> Result<(), String> {
         .map_err(|error| format!("failed to register SIGTERM: {error}"))?;
     signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))
         .map_err(|error| format!("failed to register SIGINT: {error}"))?;
+    let _launcher_watch = spawn_launcher_watch(Arc::clone(&shutdown), arguments.socket.clone())?;
     let options = DaemonOptions {
         idle_evict_after: Duration::from_secs(arguments.idle_seconds),
         evolution_source_root: Some(arguments.workspace_root.clone()),
+        services: arguments.services.clone(),
         ..DaemonOptions::default()
     };
     let runtime = LocalRuntimeLaunchConfig {
@@ -217,14 +240,16 @@ fn run_child() -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     let ready_path = std::env::var_os(READY_PATH_ENV).map(PathBuf::from);
     let ready_image = std::env::var(READY_IMAGE_ENV).ok();
-    daemon
+    let result = daemon
         .serve_local_with_ready(&arguments.socket, &shutdown, || {
             if let (Some(path), Some(image_id)) = (&ready_path, &ready_image) {
                 write_ready(path, image_id)?;
             }
             Ok(())
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    shutdown.store(true, Ordering::Release);
+    result
 }
 
 #[allow(clippy::too_many_lines)]
@@ -237,15 +262,18 @@ fn run_launcher() -> Result<(), String> {
         return run_child();
     }
     let data_root = launcher_data_root(&original_arguments)?;
+    let socket = launcher_socket(&original_arguments, &data_root)?;
     let staging_root = data_root.join("self-evolution").join("daemon-images");
     let bootstrap = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut staging =
         DaemonStaging::open(&staging_root, &bootstrap).map_err(|error| error.to_string())?;
+    withdraw_owned_socket(&socket);
     let shutdown = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))
         .map_err(|error| format!("failed to register launcher SIGTERM: {error}"))?;
     signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))
         .map_err(|error| format!("failed to register launcher SIGINT: {error}"))?;
+    let readiness_retry_deadline = std::time::Instant::now() + READY_TIMEOUT;
 
     loop {
         let selection = staging
@@ -260,6 +288,7 @@ fn run_launcher() -> Result<(), String> {
         let spawned = Command::new(&selection.image.executable)
             .args(&original_arguments)
             .env(CHILD_ENV, "1")
+            .env(LAUNCHER_PID_ENV, std::process::id().to_string())
             .env(READY_PATH_ENV, &ready_path)
             .env(READY_IMAGE_ENV, &selection.image.image_id)
             .spawn();
@@ -335,10 +364,92 @@ fn run_launcher() -> Result<(), String> {
                 if shutdown.load(std::sync::atomic::Ordering::Acquire) {
                     return Ok(());
                 }
+                if std::time::Instant::now() < readiness_retry_deadline {
+                    thread::sleep(READY_POLL);
+                    continue;
+                }
                 return Err(reason);
             }
         }
     }
+}
+
+fn spawn_launcher_watch(
+    shutdown: Arc<AtomicBool>,
+    socket: PathBuf,
+) -> Result<Option<thread::JoinHandle<()>>, String> {
+    let Some(encoded) = std::env::var_os(LAUNCHER_PID_ENV) else {
+        return Ok(None);
+    };
+    let launcher_pid = encoded
+        .to_string_lossy()
+        .parse::<u32>()
+        .map_err(|_| "daemon launcher PID is invalid".to_owned())?;
+    if launcher_pid == 0 || launcher_pid == std::process::id() {
+        return Err("daemon launcher PID is invalid".into());
+    }
+    Ok(Some(thread::spawn(move || {
+        while !shutdown.load(Ordering::Acquire) {
+            if !launcher_process_is_alive(launcher_pid) {
+                terminate_orphaned_daemon(&socket);
+            }
+            thread::sleep(READY_POLL);
+        }
+    })))
+}
+
+fn terminate_orphaned_daemon(socket: &std::path::Path) -> ! {
+    withdraw_owned_socket(socket);
+    std::process::exit(70);
+}
+
+fn withdraw_owned_socket(socket: &std::path::Path) {
+    match fs::remove_file(socket) {
+        Ok(()) => {
+            if let Some(parent) = socket.parent()
+                && let Ok(directory) = File::open(parent)
+            {
+                let _ = directory.sync_all();
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {}
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn launcher_process_is_alive(pid: u32) -> bool {
+    fs::read_to_string(PathBuf::from("/proc").join(pid.to_string()).join("stat"))
+        .ok()
+        .and_then(|stat| stat.split_whitespace().nth(2).map(str::to_owned))
+        .is_some_and(|state| state != "Z")
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn launcher_process_is_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(windows)]
+fn launcher_process_is_alive(pid: u32) -> bool {
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .is_ok_and(|output| {
+            String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                line.split(',')
+                    .nth(1)
+                    .is_some_and(|value| value.trim_matches('"') == pid.to_string())
+            })
+        })
+}
+
+#[cfg(not(any(unix, windows)))]
+const fn launcher_process_is_alive(_pid: u32) -> bool {
+    false
 }
 
 fn launcher_data_root(arguments: &[OsString]) -> Result<PathBuf, String> {
@@ -357,6 +468,20 @@ fn launcher_data_root(arguments: &[OsString]) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
+fn launcher_socket(arguments: &[OsString], data_root: &std::path::Path) -> Result<PathBuf, String> {
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index] == "--socket" {
+            return arguments
+                .get(index + 1)
+                .map(PathBuf::from)
+                .ok_or_else(|| "missing value for --socket".to_owned());
+        }
+        index = index.saturating_add(2);
+    }
+    Ok(data_root.join("agentd.sock"))
+}
+
 fn await_ready(
     child: &mut std::process::Child,
     ready_path: &std::path::Path,
@@ -371,7 +496,7 @@ fn await_ready(
             ));
         }
         if shutdown.load(std::sync::atomic::Ordering::Acquire) {
-            let _ = child.kill();
+            let _ = stop_child(child);
             return Err("daemon launcher was asked to shut down".into());
         }
         match fs::read_to_string(ready_path) {
@@ -396,11 +521,40 @@ fn wait_for_exit(
             return Ok(status);
         }
         if shutdown.load(std::sync::atomic::Ordering::Acquire) {
-            let _ = child.kill();
+            return stop_child(child);
+        }
+        thread::sleep(READY_POLL);
+    }
+}
+
+fn stop_child(child: &mut Child) -> Result<ExitStatus, String> {
+    request_child_shutdown(child)?;
+    let deadline = std::time::Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            return Ok(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().map_err(|error| error.to_string())?;
             return child.wait().map_err(|error| error.to_string());
         }
         thread::sleep(READY_POLL);
     }
+}
+
+#[cfg(unix)]
+fn request_child_shutdown(child: &Child) -> Result<(), String> {
+    let pid = i32::try_from(child.id()).map_err(|_| "daemon child PID is invalid".to_owned())?;
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(not(unix))]
+fn request_child_shutdown(child: &mut Child) -> Result<(), String> {
+    child.kill().map_err(|error| error.to_string())
 }
 
 fn write_ready(path: &std::path::Path, image_id: &str) -> Result<(), std::io::Error> {

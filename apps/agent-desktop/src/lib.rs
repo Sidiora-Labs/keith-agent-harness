@@ -227,8 +227,7 @@ impl DesktopLifecycle {
             || !config.daemon_executable.is_file()
             || !config.worker_executable.is_file()
             || !config.web_executable.is_file()
-            || !config.asset_root.join("agent_web.js").is_file()
-            || !config.asset_root.join("agent_web_bg.wasm").is_file()
+            || !config.asset_root.join("ui/index.html").is_file()
             || !valid_production_web_assets(&config.asset_root)
             || !config.workspace_root.is_dir()
             || config.login_secret_env.is_empty()
@@ -444,30 +443,27 @@ impl DesktopLifecycle {
 }
 
 fn valid_production_web_assets(root: &Path) -> bool {
-    let manifest_path = root.join("ui/.vite/manifest.json");
-    let Ok(encoded) = fs::read(manifest_path) else {
+    let ui = root.join("ui");
+    let Ok(index) = fs::read_to_string(ui.join("index.html")) else {
         return false;
     };
-    let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&encoded) else {
+    if !index.starts_with("<!DOCTYPE html>") || !index.contains("Opening Keith") {
         return false;
-    };
-    let Some(entry) = manifest.get("src/index.tsx") else {
-        return false;
-    };
-    let Some(script) = entry.get("file").and_then(serde_json::Value::as_str) else {
-        return false;
-    };
-    let Some(styles) = entry.get("css").and_then(serde_json::Value::as_array) else {
-        return false;
-    };
-    entry.get("isEntry").and_then(serde_json::Value::as_bool) == Some(true)
-        && safe_relative_asset(script)
-        && root.join("ui").join(script).is_file()
-        && !styles.is_empty()
-        && styles.iter().all(|style| {
-            style.as_str().is_some_and(|path| {
-                safe_relative_asset(path) && root.join("ui").join(path).is_file()
-            })
+    }
+    let assets = index
+        .match_indices("/assets/ui/")
+        .filter_map(|(offset, _)| {
+            index[offset + "/assets/ui/".len()..]
+                .split(['\"', '\''])
+                .next()
+        })
+        .map(|asset| asset.split('?').next().unwrap_or(asset))
+        .collect::<BTreeSet<_>>();
+    !assets.is_empty()
+        && assets.iter().all(|asset| {
+            asset.starts_with("_next/static/")
+                && safe_relative_asset(asset)
+                && ui.join(asset).is_file()
         })
 }
 

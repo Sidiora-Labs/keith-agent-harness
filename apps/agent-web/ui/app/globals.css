@@ -1,3 +1,7 @@
+@import '../components/computer/computer.css';
+@import '../components/computer/teach-task.css';
+@import '../components/harness/harness-repairs.css';
+
 :root,
 .neo-matte-theme {
   --background: #080808;
@@ -243,8 +247,179 @@ button:disabled {
 
 .secondary-nav {
   display: grid;
+  max-height: 52%;
+  overflow-y: auto;
   gap: 2px;
   padding-top: 10px;
+}
+
+.integration-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.integration-heading,
+.integration-resources article > header,
+.integration-actions,
+.service-availability,
+.integration-safe-error {
+  display: flex;
+  align-items: center;
+}
+
+.integration-heading {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.integration-heading h3,
+.integration-heading p,
+.integration-resources strong,
+.integration-resources small,
+.integration-safe-error {
+  margin: 0;
+}
+
+.integration-heading p {
+  max-width: 560px;
+  color: var(--neo-text-tertiary);
+  font-size: 12px;
+}
+
+.service-availability {
+  width: fit-content;
+  margin: 0;
+  padding: 6px 9px;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--neo-text-secondary);
+  font-size: 11px;
+}
+
+.service-availability.available {
+  color: var(--neo-status-success);
+}
+
+.service-availability.disabled,
+.service-availability.unavailable {
+  color: var(--neo-status-warning);
+}
+
+.integration-resources {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.integration-resources > article,
+.computer-resource-list article {
+  display: grid;
+  min-width: 0;
+  padding: 14px;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--neo-layer-surface);
+}
+
+.integration-resources article > header {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.integration-resources article > header > div,
+.computer-resource-list article > div {
+  display: grid;
+  min-width: 0;
+}
+
+.integration-resources strong,
+.integration-resources small,
+.computer-resource-list strong,
+.computer-resource-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.integration-resources small,
+.computer-resource-list small,
+.computer-resource-list p {
+  color: var(--neo-text-tertiary);
+  font-size: 11px;
+}
+
+.integration-resources dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  gap: 8px;
+}
+
+.integration-resources dl div {
+  min-width: 0;
+}
+
+.integration-resources dt {
+  color: var(--neo-text-tertiary);
+  font-size: 10px;
+}
+
+.integration-resources dd {
+  overflow: hidden;
+  margin: 1px 0 0;
+  color: var(--neo-text-secondary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.integration-actions {
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.integration-safe-error {
+  padding: 8px 10px;
+  gap: 7px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--neo-status-danger) 10%, transparent);
+  color: var(--neo-status-danger);
+  font-size: 11px;
+}
+
+.computer-resource-list {
+  display: grid;
+  margin: 0 12px 12px;
+  gap: 8px;
+}
+
+.computer-resource-list h3,
+.computer-resource-list p {
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .integration-resources {
+    grid-template-columns: 1fr;
+  }
+
+  .integration-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .integration-panel *,
+  .integration-panel *::before,
+  .integration-panel *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
 
 .secondary-nav button {
@@ -1047,10 +1222,47 @@ button:disabled {
 }
 
 .work-body {
+  display: flex;
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  padding: 18px;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.work-stage-switcher {
+  display: flex;
+  flex: 0 0 auto;
+  width: fit-content;
+  margin: 10px 12px 0;
+  padding: 3px;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--neo-layer-control);
+}
+
+.work-stage-switcher button {
+  min-height: 30px;
+  padding: 0 11px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--neo-text-tertiary);
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.work-stage-switcher button.is-active {
+  background: var(--neo-layer-raised);
+  color: var(--neo-text-primary);
+}
+
+.teach-task-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 14px;
+  overflow: auto;
 }
 
 .current-work,
@@ -1823,6 +2035,282 @@ button:disabled {
 
   .login-card {
     padding: 26px;
+  }
+}
+
+.connected-apps {
+  display: grid;
+  gap: 16px;
+}
+
+.apps-toolbar,
+.apps-session,
+.app-account-heading,
+.app-account-actions,
+.apps-notice {
+  display: flex;
+  align-items: center;
+}
+
+.apps-toolbar {
+  gap: 10px;
+}
+
+.apps-search {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--neo-layer-surface);
+  color: var(--neo-text-tertiary);
+}
+
+.apps-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--neo-text-primary);
+  outline: 0;
+}
+
+.apps-connect {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--neo-layer-surface);
+}
+
+.apps-notice {
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--neo-status-success) 35%, var(--border));
+  border-radius: 10px;
+  color: var(--neo-text-secondary);
+}
+
+.apps-notice span {
+  flex: 1;
+}
+
+.apps-notice a {
+  color: var(--neo-text-primary);
+  font-weight: 600;
+}
+
+.apps-session {
+  gap: 8px;
+  color: var(--neo-text-tertiary);
+  font-size: 12px;
+}
+
+.apps-session code {
+  overflow: hidden;
+  margin-left: auto;
+  max-width: 42%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.apps-safe-result {
+  overflow: auto;
+  max-height: 160px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--neo-layer-canvas);
+  color: var(--neo-text-secondary);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.apps-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.app-card {
+  display: grid;
+  align-content: start;
+  gap: 13px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--neo-layer-surface);
+}
+
+.app-card > header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.app-card h3,
+.app-card p {
+  margin: 0;
+}
+
+.app-card header p,
+.app-account small {
+  color: var(--neo-text-tertiary);
+  font-size: 11px;
+}
+
+.app-mark {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--neo-layer-raised);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.app-tool-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.app-tool-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--neo-text-tertiary);
+  font-size: 10px;
+}
+
+.app-tool-list code {
+  overflow: hidden;
+  color: var(--neo-text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-accounts {
+  display: grid;
+  gap: 8px;
+}
+
+.app-account {
+  display: grid;
+  gap: 9px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.app-account-heading {
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.app-account-heading > div {
+  display: grid;
+  min-width: 0;
+}
+
+.app-account-heading strong,
+.app-account-heading small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-account-actions {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.app-account-actions button {
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--neo-text-secondary);
+  font-size: 11px;
+}
+
+.app-account-actions button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--neo-text-primary);
+}
+
+.app-account-actions .danger-button {
+  border-color: color-mix(in srgb, var(--neo-status-danger) 45%, var(--border));
+  color: var(--neo-status-danger);
+}
+
+.app-tools-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 7px;
+}
+
+.app-tools-form label {
+  display: grid;
+  gap: 5px;
+  color: var(--neo-text-tertiary);
+  font-size: 10px;
+}
+
+.app-tools-form input {
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--neo-layer-canvas);
+  color: var(--neo-text-primary);
+  font-size: 10px;
+}
+
+.app-tools-form button {
+  min-height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--neo-layer-control);
+  color: var(--neo-text-primary);
+  font-size: 10px;
+}
+
+.apps-empty {
+  display: grid;
+  min-height: 120px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  color: var(--neo-text-tertiary);
+  text-align: center;
+}
+
+.apps-empty p {
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .apps-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .apps-toolbar {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

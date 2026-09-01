@@ -134,8 +134,8 @@ use keith_self_evolution::{
 use keith_session_store::{
     CompactionFailureStage, CompactionOutput, CompactionPolicy, CompactionRequest,
     CompactionTrigger, ContentBlock as StoredContentBlock, MessageRole as StoredMessageRole,
-    Sensitivity, SessionEntry, SessionEntryPayload, SessionManifest, SessionStore,
-    SessionStoreError, StoredMessage, TurnTerminalStatus, WriterIdentity,
+    NewSession, Sensitivity, SessionEntry, SessionEntryPayload, SessionKind, SessionManifest,
+    SessionStore, SessionStoreError, StoredMessage, TurnTerminalStatus, WriterIdentity,
 };
 use keith_skills::{SkillLimits, SkillRegistry, SkillRoots, SkillSelectionRequest};
 use keith_state_store::{EmbeddedStore, FileBackupHook, StoreError};
@@ -1806,6 +1806,102 @@ impl LocalRuntime {
             allowed_tools: allowed_tools(&profile),
         })?;
         Ok(session)
+    }
+
+    /// Creates an independent assigned root from a source session's committed active context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either session assignment is invalid, the source cannot be loaded,
+    /// or the fork's context and authority cannot be persisted durably.
+    pub fn fork_session_assigned(
+        &self,
+        source_session_id: &SessionId,
+        session_id: &SessionId,
+        root_tree_id: &RootTreeId,
+        title: Option<String>,
+        generation: Generation,
+    ) -> Result<SessionManifest, LocalRuntimeError> {
+        if source_session_id == session_id {
+            return Err(LocalRuntimeError::Invalid(
+                "fork source and destination sessions must differ".into(),
+            ));
+        }
+        if self
+            .root_scope
+            .as_ref()
+            .is_some_and(|root_scope| root_scope != root_tree_id)
+        {
+            return Err(LocalRuntimeError::Invalid(
+                "assigned fork root does not match the worker lease".into(),
+            ));
+        }
+        let source = self.sessions.manifest(source_session_id)?;
+        if source.archived || source.root_tree_id == *root_tree_id {
+            return Err(LocalRuntimeError::Invalid(
+                "fork source must be active and use an independent root".into(),
+            ));
+        }
+        let source_entries = source
+            .active_leaf
+            .as_ref()
+            .map(|leaf| self.sessions.load_index(source_session_id)?.ancestry(leaf))
+            .transpose()?
+            .unwrap_or_default();
+        let profile = self.profile(&source.profile_id)?;
+        if profile.profile.workspace_id != source.workspace_id {
+            return Err(LocalRuntimeError::SessionProfileMismatch(
+                source_session_id.clone(),
+                source.profile_id,
+            ));
+        }
+        self.configure_model_route(&profile)?;
+        let now = UtcTimestamp::now()?;
+        let session = self.sessions.create(NewSession {
+            kind: SessionKind::Root,
+            session_id: session_id.clone(),
+            root_tree_id: root_tree_id.clone(),
+            parent_session_id: None,
+            profile_id: profile.profile.id.clone(),
+            workspace_id: profile.profile.workspace_id.clone(),
+            created_at: now,
+            label: title.or_else(|| source.label.map(|label| format!("Fork of {label}"))),
+            profile_snapshot: source.profile_snapshot,
+        })?;
+        let copy_result = (|| {
+            let mut writer = self.sessions.acquire_writer(
+                session_id,
+                self.writer_identity(generation, UtcTimestamp::now()?),
+            )?;
+            for source_entry in source_entries {
+                let parent = writer.manifest().active_leaf.clone();
+                if let Some(payload) = fork_context_payload(&source_entry.payload, parent.as_ref())
+                {
+                    writer.append(parent, source_entry.timestamp, payload)?;
+                }
+            }
+            Ok::<(), LocalRuntimeError>(())
+        })();
+        if let Err(error) = copy_result {
+            let cleanup_identity = self.writer_identity(generation, UtcTimestamp::now()?);
+            let _ = self.sessions.archive_session(session_id, cleanup_identity);
+            let _ = self.sessions.delete_archived(session_id);
+            return Err(error);
+        }
+        if let Err(error) = self.children.register_root(ParentAuthority {
+            session_id: session.session_id.clone(),
+            root_tree_id: session.root_tree_id.clone(),
+            profile_id: profile.profile.id.clone(),
+            workspace_id: profile.profile.workspace_id.clone(),
+            workspace_root: profile.resources.workspace_root.clone(),
+            allowed_tools: allowed_tools(&profile),
+        }) {
+            let cleanup_identity = self.writer_identity(generation, UtcTimestamp::now()?);
+            let _ = self.sessions.archive_session(session_id, cleanup_identity);
+            let _ = self.sessions.delete_archived(session_id);
+            return Err(error.into());
+        }
+        self.sessions.manifest(session_id).map_err(Into::into)
     }
 
     pub fn select_model(
@@ -4338,6 +4434,11 @@ impl LocalRuntime {
         else {
             return Ok(());
         };
+        let external_account = external_account.as_ref().ok_or_else(|| {
+            LocalRuntimeError::Invalid(
+                "channel delivery reply route requires an exact external account".into(),
+            )
+        })?;
         let manifest = self.owned_manifest(&action.session_id)?;
         self.system_modules
             .deliveries
@@ -4351,9 +4452,7 @@ impl LocalRuntime {
                     source: delivery_source(action),
                     route: ChannelReplyRoute {
                         channel: channel.clone(),
-                        external_account: external_account
-                            .clone()
-                            .unwrap_or_else(|| channel.clone()),
+                        external_account: external_account.clone(),
                         conversation: conversation_id.clone(),
                         thread: thread_id.clone(),
                         reply_to_message: reply_to_message.clone(),
@@ -4369,11 +4468,15 @@ impl LocalRuntime {
         Ok(())
     }
 
-    fn claim_delivery(&self, channel: &str) -> Result<CommandResult, LocalRuntimeError> {
+    fn claim_delivery(
+        &self,
+        channel: &str,
+        external_account: &str,
+    ) -> Result<CommandResult, LocalRuntimeError> {
         let claim = self
             .system_modules
             .deliveries
-            .claim_next_for_channel(channel, UtcTimestamp::now()?)
+            .claim_next_for_account(channel, external_account, UtcTimestamp::now()?)
             .map_err(module_error)?;
         let claim = if let Some(claim) = claim {
             let artifacts = match self.stage_delivery_artifacts(&claim) {
@@ -5380,6 +5483,7 @@ impl LocalRuntime {
                 enabled_mcp_servers: Vec::new(),
                 enabled_plugins: Vec::new(),
                 channels: vec!["web".into(), "terminal".into()],
+                service_policy: keith_configuration::ProfileServicePolicy::default(),
                 autonomy: ProfileAutonomy {
                     mode: AutonomyMode::Bounded,
                     max_children: 4,
@@ -7310,7 +7414,7 @@ fn runtime_resource_policy() -> Result<ResourcePolicy, LocalRuntimeError> {
                 ResourceKind::SafeParallelTools
                 | ResourceKind::Children
                 | ResourceKind::Processes => 128,
-                ResourceKind::RecursiveDepth => 16,
+                ResourceKind::RecursiveDepth | ResourceKind::EvolutionHypotheses => 16,
                 ResourceKind::Kernels | ResourceKind::Browsers => 32,
                 ResourceKind::Schedules => 4_096,
                 ResourceKind::Workers
@@ -7318,6 +7422,9 @@ fn runtime_resource_policy() -> Result<ResourcePolicy, LocalRuntimeError> {
                 | ResourceKind::Channels
                 | ResourceKind::BackgroundInitiatives
                 | ResourceKind::McpSessions => 64,
+                ResourceKind::EvolutionShadowTrees => 8,
+                ResourceKind::EvolutionBuilds => 2,
+                ResourceKind::EvolutionCanaries => 4,
                 _ => unreachable!("concurrency kind list contains only concurrency resources"),
             };
             (
@@ -7846,6 +7953,7 @@ fn optional_memory_sensitivity_argument(
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn merge_tool_properties(left: serde_json::Value, right: serde_json::Value) -> serde_json::Value {
     let mut properties = left.as_object().cloned().unwrap_or_default();
     if let Some(right) = right.as_object() {
@@ -8139,6 +8247,7 @@ struct MemoryTool {
 }
 
 impl MemoryTool {
+    #[allow(clippy::needless_pass_by_value)]
     fn all(modules: Arc<ProfileModules>, session_id: SessionId) -> Vec<Self> {
         [
             MemoryToolKind::Create,
@@ -8287,6 +8396,7 @@ impl ManagedTool for MemoryTool {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn memory_tool_definition(kind: MemoryToolKind) -> ToolDefinition {
     let write_source = serde_json::json!({
         "source_entry_id": {"type": "string", "description": "Exact committed source entry ID"},
@@ -9587,6 +9697,16 @@ impl CommandRuntime for CandidateCanaryRuntime {
     ) -> Result<RuntimeSession, String> {
         unavailable()
     }
+    fn fork_session_assigned(
+        &self,
+        _: &SessionId,
+        _: &SessionId,
+        _: &RootTreeId,
+        _: Option<String>,
+        _: Generation,
+    ) -> Result<RuntimeSession, String> {
+        unavailable()
+    }
     fn select_model(&self, _: &keith_protocol::ModelSelection) -> Result<(), String> {
         unavailable()
     }
@@ -9753,6 +9873,26 @@ impl CommandRuntime for LocalRuntime {
         .map_err(|error| error.to_string())
     }
 
+    fn fork_session_assigned(
+        &self,
+        source_session_id: &SessionId,
+        session_id: &SessionId,
+        root_tree_id: &RootTreeId,
+        title: Option<String>,
+        generation: Generation,
+    ) -> Result<RuntimeSession, String> {
+        LocalRuntime::fork_session_assigned(
+            self,
+            source_session_id,
+            session_id,
+            root_tree_id,
+            title,
+            generation,
+        )
+        .map(|session| runtime_session(&session))
+        .map_err(|error| error.to_string())
+    }
+
     fn select_model(&self, selection: &keith_protocol::ModelSelection) -> Result<(), String> {
         LocalRuntime::select_model(
             self,
@@ -9899,7 +10039,10 @@ impl CommandRuntime for LocalRuntime {
                 })
             }
             ClientCommand::StageAttachment(request) => self.stage_attachment(request),
-            ClientCommand::ClaimDelivery { channel } => self.claim_delivery(channel),
+            ClientCommand::ClaimDelivery {
+                channel,
+                external_account,
+            } => self.claim_delivery(channel, external_account),
             ClientCommand::AcknowledgeDelivery(acknowledgement) => {
                 self.acknowledge_delivery(acknowledgement)
             }
@@ -9907,12 +10050,16 @@ impl CommandRuntime for LocalRuntime {
             ClientCommand::ListProfiles
             | ClientCommand::ListSessions(_)
             | ClientCommand::CreateSession(_)
+            | ClientCommand::ForkSession(_)
             | ClientCommand::AttachSession(_)
             | ClientCommand::DetachSession { .. }
             | ClientCommand::AcknowledgeEvents(_)
             | ClientCommand::ResumeSession { .. }
             | ClientCommand::SubmitPrompt(_)
             | ClientCommand::SelectModel(_)
+            | ClientCommand::ChannelAccount(_)
+            | ClientCommand::Integration(_)
+            | ClientCommand::HarnessRepair(_)
             | ClientCommand::Evolution(_) => Err(LocalRuntimeError::UnsupportedCommand),
         };
         result.map_err(|error| error.to_string())
@@ -9934,6 +10081,52 @@ fn runtime_session(session: &SessionManifest) -> RuntimeSession {
     }
 }
 
+fn fork_context_payload(
+    payload: &SessionEntryPayload,
+    current_leaf: Option<&EntryId>,
+) -> Option<SessionEntryPayload> {
+    match payload {
+        SessionEntryPayload::UserMessage { message } => Some(SessionEntryPayload::UserMessage {
+            message: message.clone(),
+        }),
+        SessionEntryPayload::AssistantMessage { message }
+        | SessionEntryPayload::AssistantActivity { message, .. }
+        | SessionEntryPayload::AssistantFinal { message, .. } => {
+            Some(SessionEntryPayload::AssistantMessage {
+                message: message.clone(),
+            })
+        }
+        SessionEntryPayload::ToolCall {
+            call_id,
+            name,
+            arguments,
+        } => Some(SessionEntryPayload::ToolCall {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            arguments: arguments.clone(),
+        }),
+        SessionEntryPayload::ToolResult {
+            call_id,
+            content,
+            is_error,
+            failure,
+        } => Some(SessionEntryPayload::ToolResult {
+            call_id: call_id.clone(),
+            content: content.clone(),
+            is_error: *is_error,
+            failure: failure.clone(),
+        }),
+        SessionEntryPayload::Compaction { summary, .. }
+        | SessionEntryPayload::CompactionCheckpoint { summary, .. } => {
+            current_leaf.map(|compacted_through| SessionEntryPayload::Compaction {
+                summary: summary.clone(),
+                compacted_through: compacted_through.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -9943,6 +10136,7 @@ mod tests {
     use std::time::Duration;
 
     use keith_credentials::{CredentialOwner, CredentialRef, SecretValue};
+    use keith_runtime_api::{RuntimeRequest, RuntimeResponse};
 
     use super::*;
 
@@ -10029,6 +10223,150 @@ mod tests {
             validate_prompt_text(&"x".repeat(MAX_RUNTIME_PROMPT_BYTES + 1)),
             Err(LocalRuntimeError::Invalid(_))
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn acp_fork_copies_committed_context_and_diverges_ordering_and_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path().join("data");
+        let credential_root = data_root.join("credentials");
+        let workspace_root = root.path().join("workspace");
+        let key = [73_u8; 32];
+        seed_provider_credential(&credential_root, key, "openai", "fork-test-secret");
+        let configuration = |root_scope| LocalRuntimeConfig {
+            data_root: data_root.clone(),
+            credential_root: credential_root.clone(),
+            credential_key: MasterKey::from_bytes(key),
+            workspace_root: workspace_root.clone(),
+            openai_base_url: "http://127.0.0.1:65535".into(),
+            anthropic_base_url: "http://127.0.0.1:65535".into(),
+            provider_base_urls: BTreeMap::new(),
+            root_scope,
+            worker_id: WorkerId::new(),
+            owner_instance: EntityId::new(),
+        };
+        let message = |role, text: &str| StoredMessage {
+            role,
+            content: vec![StoredContentBlock::Text { text: text.into() }],
+            provider_metadata: BTreeMap::new(),
+        };
+
+        let runtime = LocalRuntime::open(configuration(None)).unwrap();
+        let profile = runtime.registered_profiles().unwrap().remove(0);
+        let source = runtime
+            .create_session(
+                &profile.profile.id,
+                &profile.profile.workspace_id,
+                Some("Source conversation".into()),
+            )
+            .unwrap();
+        let mut source_writer = runtime
+            .sessions
+            .acquire_writer(
+                &source.session_id,
+                runtime.writer_identity(Generation::ZERO, UtcTimestamp::from_unix_millis(1)),
+            )
+            .unwrap();
+        let user = source_writer
+            .append(
+                None,
+                UtcTimestamp::from_unix_millis(1),
+                SessionEntryPayload::UserMessage {
+                    message: message(StoredMessageRole::User, "source question"),
+                },
+            )
+            .unwrap();
+        source_writer
+            .append(
+                Some(user.id),
+                UtcTimestamp::from_unix_millis(2),
+                SessionEntryPayload::AssistantMessage {
+                    message: message(StoredMessageRole::Assistant, "source answer"),
+                },
+            )
+            .unwrap();
+        drop(source_writer);
+        drop(runtime);
+
+        let fork_session_id = SessionId::new();
+        let fork_root_tree_id = RootTreeId::new();
+        let fork_runtime =
+            LocalRuntime::open(configuration(Some(fork_root_tree_id.clone()))).unwrap();
+        let fork = match (RuntimeRequest::ForkSession {
+            source_session_id: source.session_id.clone(),
+            session_id: fork_session_id.clone(),
+            root_tree_id: fork_root_tree_id.clone(),
+            title: Some("ACP fork".into()),
+            generation: Generation::ZERO,
+        })
+        .execute(&fork_runtime)
+        {
+            RuntimeResponse::Session(session) => session,
+            response => panic!("unexpected fork response: {response:?}"),
+        };
+        assert_ne!(fork.session_id, source.session_id);
+        assert_ne!(fork.root_tree_id, source.root_tree_id);
+        assert_eq!(fork.profile_id, source.profile_id);
+        assert_eq!(
+            fork_runtime
+                .sessions
+                .manifest(&fork_session_id)
+                .unwrap()
+                .profile_snapshot,
+            source.profile_snapshot
+        );
+        let fork_snapshot = fork_runtime
+            .snapshot(&fork_session_id, Generation::ZERO, SessionState::Ready)
+            .unwrap();
+        assert_eq!(
+            fork_snapshot
+                .messages
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["source question", "source answer"]
+        );
+
+        let mut fork_writer = fork_runtime
+            .sessions
+            .acquire_writer(
+                &fork_session_id,
+                fork_runtime.writer_identity(Generation::ZERO, UtcTimestamp::from_unix_millis(3)),
+            )
+            .unwrap();
+        fork_writer
+            .append(
+                fork_writer.manifest().active_leaf.clone(),
+                UtcTimestamp::from_unix_millis(3),
+                SessionEntryPayload::UserMessage {
+                    message: message(StoredMessageRole::User, "fork-only question"),
+                },
+            )
+            .unwrap();
+        drop(fork_writer);
+        drop(fork_runtime);
+
+        let reopened = LocalRuntime::open(configuration(None)).unwrap();
+        let source_snapshot = reopened
+            .snapshot(&source.session_id, Generation::ZERO, SessionState::Ready)
+            .unwrap();
+        let fork_snapshot = reopened
+            .snapshot(&fork_session_id, Generation::ZERO, SessionState::Ready)
+            .unwrap();
+        assert_eq!(source_snapshot.messages.len(), 2);
+        assert_eq!(fork_snapshot.messages.len(), 3);
+        assert_eq!(fork_snapshot.messages[2].text, "fork-only question");
+
+        let source_cancellation = CancellationToken::default();
+        let fork_cancellation = CancellationToken::default();
+        reopened.active_cancellations.lock().unwrap().extend([
+            (source.session_id.clone(), source_cancellation.clone()),
+            (fork_session_id.clone(), fork_cancellation.clone()),
+        ]);
+        assert!(CommandRuntime::cancel_active(&reopened, &fork_session_id).unwrap());
+        assert!(fork_cancellation.is_cancelled());
+        assert!(!source_cancellation.is_cancelled());
     }
 
     #[test]

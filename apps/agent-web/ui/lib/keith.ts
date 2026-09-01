@@ -96,6 +96,9 @@ export interface SessionSnapshot {
     [key: string]: unknown
   }
   terminal?: TerminalProjection | null
+  computer?: unknown | null
+  teaching?: unknown | null
+  harness_repairs?: unknown | null
   revision: number
 }
 
@@ -103,6 +106,63 @@ export interface MemoryResult {
   source: string
   excerpt: string
   score_micros: number
+}
+
+export const INTEGRATION_SERVICES = [
+  'channel_account',
+  'acp_connection',
+  'plugin',
+  'connected_app',
+  'computer_session',
+  'control_lease',
+  'recording',
+  'recipe',
+  'harness_repair',
+] as const
+
+export type IntegrationService = (typeof INTEGRATION_SERVICES)[number]
+export type IntegrationControl = 'restart' | 'cancel' | 'export' | 'delete'
+export type IntegrationOperation =
+  | 'cancel'
+  | 'export'
+  | 'pause'
+  | 'resume'
+  | 'stop'
+  | 'test'
+  | 'release_control'
+  | 'stop_recording'
+  | 'reverse'
+
+export interface IntegrationServiceProjection {
+  service: IntegrationService
+  availability:
+    | { state: 'available' }
+    | { state: 'disabled' }
+    | { state: 'unavailable'; safe_reason: string }
+}
+
+export interface IntegrationResourceProjection {
+  id: string
+  profile_id: string
+  owning_session_id?: string | null
+  service: IntegrationService
+  native_resource_key: string
+  display_label: string
+  lifecycle: string
+  cancellation_id: string
+  audit_correlation: string
+  controls: IntegrationControl[]
+  safe_error?: string | null
+  revision: number
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
+export interface ProfileIntegrationsProjection {
+  profile_id: string
+  through_sequence: number
+  services: IntegrationServiceProjection[]
+  resources: IntegrationResourceProjection[]
 }
 
 export interface EvolutionLedgerEntry {
@@ -168,6 +228,66 @@ export function evolutionLedgerContent(entry: EvolutionLedgerEntry): EvolutionLe
 }
 
 export type Command = { command: string; parameters?: unknown }
+
+export function integrationListCommand(
+  profileId: string,
+  service: IntegrationService | null = null,
+): Command {
+  return {
+    command: 'integration',
+    parameters: { action: 'list', parameters: { profile_id: profileId, service } },
+  }
+}
+
+export function integrationOperationCommand(
+  profileId: string,
+  sessionId: string,
+  resource: IntegrationResourceProjection,
+  operation: IntegrationOperation,
+): Command {
+  const [requestedCapability, risk] = integrationAuthority(operation)
+  const idempotencyKey = createUlid()
+  const repeatable = operation === 'test' || operation === 'export'
+  return {
+    command: 'integration',
+    parameters: {
+      action: 'mutate',
+      parameters: {
+        profile_id: profileId,
+        service: resource.service,
+        resource_id: resource.id,
+        native_resource_key: resource.native_resource_key,
+        display_label: resource.display_label,
+        expected_revision: resource.revision,
+        idempotency_key: idempotencyKey,
+        operation,
+        authority: {
+          profile_id: profileId,
+          session_id: sessionId,
+          acting_principal: createUlid(),
+          requested_capability: requestedCapability,
+          risk,
+          approval: { risk, state: { state: 'not_required' } },
+          target: resource.native_resource_key,
+          target_digest: `integration:${resource.service}:${resource.id}:${resource.revision}`,
+          cancellation_id: operation === 'cancel' ? resource.cancellation_id : createUlid(),
+          reply_route: null,
+          audit_correlation: createUlid(),
+          external_effect: repeatable
+            ? { kind: 'repeatable' }
+            : { kind: 'idempotent', delivery_key: idempotencyKey },
+        },
+      },
+    },
+  }
+}
+
+export function integrationsFromResult(
+  result: CommandResult,
+): ProfileIntegrationsProjection | null {
+  const value = dataFromResult<unknown>(result, 'profile_integrations')
+  return parseIntegrations(value)
+}
 
 export type EvolutionIntent =
   | { action: 'status' }
@@ -651,6 +771,156 @@ export function visibleUserText(text: string): string {
     }
   } catch {}
   return text
+}
+
+function integrationAuthority(operation: IntegrationOperation): [string, string] {
+  if (operation === 'test' || operation === 'export') return ['read', 'read_only']
+  if (operation === 'stop_recording') return ['demonstration_record', 'reversible_local_write']
+  if (operation === 'reverse') return ['harness_reverse', 'reversible_local_write']
+  return ['local_write', 'reversible_local_write']
+}
+
+function parseIntegrations(value: unknown): ProfileIntegrationsProjection | null {
+  const candidate = object(value)
+  const profileId = safeProjectionId(candidate.profile_id)
+  const throughSequence = safeUnsigned(candidate.through_sequence)
+  if (!profileId || throughSequence === null) return null
+  if (!Array.isArray(candidate.services) || candidate.services.length > INTEGRATION_SERVICES.length) {
+    return null
+  }
+  if (!Array.isArray(candidate.resources) || candidate.resources.length > 4_096) return null
+  const services = candidate.services.map(parseIntegrationService)
+  const resources = candidate.resources.map((resource) => parseIntegrationResource(resource, profileId))
+  if (services.some((service) => service === null) || resources.some((resource) => resource === null)) {
+    return null
+  }
+  const typedServices = services as IntegrationServiceProjection[]
+  const typedResources = resources as IntegrationResourceProjection[]
+  if (new Set(typedServices.map((service) => service.service)).size !== typedServices.length) {
+    return null
+  }
+  if (new Set(typedResources.map((resource) => `${resource.service}:${resource.id}`)).size !== typedResources.length) {
+    return null
+  }
+  return {
+    profile_id: profileId,
+    through_sequence: throughSequence,
+    services: typedServices,
+    resources: typedResources,
+  }
+}
+
+function parseIntegrationService(value: unknown): IntegrationServiceProjection | null {
+  const candidate = object(value)
+  const service = integrationService(candidate.service)
+  const availability = object(candidate.availability)
+  const state = String(availability.state ?? '')
+  if (!service || !['available', 'disabled', 'unavailable'].includes(state)) return null
+  if (state === 'unavailable') {
+    const safeReason = safeProjectionText(availability.safe_reason)
+    return safeReason
+      ? { service, availability: { state, safe_reason: safeReason } }
+      : null
+  }
+  return { service, availability: { state: state as 'available' | 'disabled' } }
+}
+
+function parseIntegrationResource(
+  value: unknown,
+  profileId: string,
+): IntegrationResourceProjection | null {
+  const candidate = object(value)
+  const id = safeProjectionId(candidate.id)
+  const resourceProfile = safeProjectionId(candidate.profile_id)
+  const service = integrationService(candidate.service)
+  const nativeResourceKey = safeProjectionText(candidate.native_resource_key, 256)
+  const displayLabel = safeProjectionText(candidate.display_label)
+  const lifecycle = safeProjectionText(candidate.lifecycle, 64)
+  const cancellationId = safeProjectionId(candidate.cancellation_id)
+  const auditCorrelation = safeProjectionId(candidate.audit_correlation)
+  const revision = safeUnsigned(candidate.revision)
+  const createdAt = safeTimestamp(candidate.created_at)
+  const updatedAt = safeTimestamp(candidate.updated_at)
+  const owningSession = candidate.owning_session_id == null
+    ? null
+    : safeProjectionId(candidate.owning_session_id)
+  const safeError = candidate.safe_error == null
+    ? null
+    : safeProjectionText(candidate.safe_error)
+  if (
+    !id
+    || resourceProfile !== profileId
+    || !service
+    || !nativeResourceKey
+    || !displayLabel
+    || !lifecycle
+    || !cancellationId
+    || !auditCorrelation
+    || revision === null
+    || createdAt === null
+    || updatedAt === null
+    || (candidate.owning_session_id != null && owningSession === null)
+    || (candidate.safe_error != null && safeError === null)
+    || !Array.isArray(candidate.controls)
+    || candidate.controls.length > 4
+  ) return null
+  const controls = candidate.controls.map(integrationControl)
+  if (controls.some((control) => control === null) || new Set(controls).size !== controls.length) {
+    return null
+  }
+  return {
+    id,
+    profile_id: resourceProfile,
+    owning_session_id: owningSession,
+    service,
+    native_resource_key: nativeResourceKey,
+    display_label: displayLabel,
+    lifecycle,
+    cancellation_id: cancellationId,
+    audit_correlation: auditCorrelation,
+    controls: controls as IntegrationControl[],
+    safe_error: safeError,
+    revision,
+    created_at: createdAt,
+    updated_at: updatedAt,
+  }
+}
+
+function integrationService(value: unknown): IntegrationService | null {
+  return INTEGRATION_SERVICES.includes(value as IntegrationService)
+    ? value as IntegrationService
+    : null
+}
+
+function integrationControl(value: unknown): IntegrationControl | null {
+  return ['restart', 'cancel', 'export', 'delete'].includes(String(value))
+    ? value as IntegrationControl
+    : null
+}
+
+function safeProjectionId(value: unknown): string | null {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
+    ? value
+    : null
+}
+
+function safeProjectionText(value: unknown, maxBytes = 4_096): string | null {
+  if (typeof value !== 'string' || !value.trim() || new TextEncoder().encode(value).length > maxBytes) {
+    return null
+  }
+  return /authorization:\s*bearer|access[_-]?token|refresh[_-]?token|api[_-]?key|password\s*=|secret\s*=|\bsk-/i.test(value)
+    ? null
+    : value
+}
+
+function safeUnsigned(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
+function safeTimestamp(value: unknown): Timestamp | null {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 ? value : null
+  if (typeof value !== 'string' || value.length > 128 || !Number.isFinite(Date.parse(value))) return null
+  return value
 }
 
 function installSnapshot(current: ProjectionState, snapshot: SessionSnapshot): ProjectionState {

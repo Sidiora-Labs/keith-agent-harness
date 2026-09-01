@@ -18,15 +18,15 @@ fn config(directory: &tempfile::TempDir) -> DesktopProcessConfig {
     let settings = DesktopBootstrap::initialize(&state, &data, "http://127.0.0.1:37431").unwrap();
     let assets = directory.path().join("assets");
     fs::create_dir(&assets).unwrap();
-    fs::write(assets.join("agent_web.js"), b"packaged javascript").unwrap();
-    fs::write(assets.join("agent_web_bg.wasm"), b"packaged wasm").unwrap();
-    fs::create_dir_all(assets.join("ui/.vite")).unwrap();
-    fs::create_dir_all(assets.join("ui/assets")).unwrap();
-    fs::write(assets.join("ui/assets/keith.js"), b"packaged application").unwrap();
-    fs::write(assets.join("ui/assets/keith.css"), b"packaged tokens").unwrap();
+    fs::create_dir_all(assets.join("ui/_next/static/chunks")).unwrap();
     fs::write(
-        assets.join("ui/.vite/manifest.json"),
-        br#"{"src/index.tsx":{"file":"assets/keith.js","isEntry":true,"css":["assets/keith.css"]}}"#,
+        assets.join("ui/_next/static/chunks/keith.js"),
+        b"packaged application",
+    )
+    .unwrap();
+    fs::write(
+        assets.join("ui/index.html"),
+        br#"<!DOCTYPE html><main>Opening Keith</main><script src="/assets/ui/_next/static/chunks/keith.js"></script>"#,
     )
     .unwrap();
     DesktopProcessConfig {
