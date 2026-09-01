@@ -738,3 +738,17 @@ Keith Agent combines the Delta-1 supervised recursive runtime with the Gamma-3 a
 5. WORKER activation, retry, recovery, maintenance, compaction, and delivery failures SHALL remain separate from accepted-action final identity and terminal ownership.
 6. A real-process fault suite SHALL cover cold start, slow start, startup timeout, worker exit, daemon restart, response loss before and after acceptance, repeated command delivery, reconnect, exactly one user entry, exactly one final ID, and no manual retry requirement.
 
+## Requirement 57: Competitive parity: durable approval, host isolation, turn control, and verification mass
+
+**User Story:** As the operator of a supervised agent, I want tool execution gated by a durable human decision, host isolation that never silently degrades, and turn controls that distinguish stopping from redirecting, so that autonomy stays containable and recoverable.
+
+### Acceptance Criteria
+
+1. TOOL confirmation SHALL suspend the in-flight call rather than block an executor thread, SHALL be keyed by tool call id, and SHALL resume, deny, or time out without discarding completed work.
+2. PENDING approvals SHALL be persisted durably before the operator is prompted and SHALL survive daemon restart, client reload, and worker replacement.
+3. APPROVAL prompts SHALL redact secret-bearing arguments, and every decision SHALL record decider and timestamp in the session ledger.
+4. PRODUCTION code paths SHALL contain no panicking unwrap or expect outside cfg(test).
+5. HOST isolation SHALL use native Landlock on Linux and Seatbelt on macOS, SHALL refuse untrusted execution when no backend is available, and SHALL NEVER silently reduce isolation.
+6. TURN control SHALL distinguish interrupt, steer, and redirect, and steering SHALL drain at tool boundaries as well as turn boundaries.
+7. VERIFICATION mass SHALL reach parity with production line count for every crate owning a durable boundary.
+
