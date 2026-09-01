@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,13 +24,19 @@ use keith_daemon_core::RootManifest;
 use keith_local_runtime::{LocalRuntimeLaunchConfig, RuntimeCredentialKeySource};
 use keith_protocol::{
     AttachSession, ClientCommand, ClientHello, CommandEnvelope, CommandResult, CreateGoal,
-    GoalLimits, ResponsePayload, SessionFilter, SessionState, WireFormat, WireMessage,
+    DaemonEvent, GoalLimits, ResponsePayload, SessionFilter, SessionState, WireFormat, WireMessage,
+};
+use keith_self_evolution::{
+    DaemonRestartConsent, DaemonStaging, DaemonStagingPhase, EvolutionGuard, GateKind, GateResult,
+    StagingRequest, ToolchainIdentity, WorkerImage, WorkerImageManifest,
 };
 use keith_worker_runtime::{WorkerRunState, read_registration, registration_path};
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
 #[cfg(unix)]
 use nix::unistd::Pid;
+use ring::signature::{Ed25519KeyPair, KeyPair};
+use sha2::{Digest, Sha256};
 
 fn write_manifest(
     data_root: &Path,
@@ -557,4 +563,250 @@ async fn native_platform_bridge_reaches_the_real_daemon_and_leased_worker() {
         let _ = daemon.wait().unwrap();
         terminate_pid(worker_pid);
     }
+}
+
+#[cfg(unix)]
+fn signed_daemon_image(executable: &[u8], build_id: &str) -> (WorkerImage, [u8; 32]) {
+    let output = "real verification gate exited successfully";
+    let gates = [
+        GateKind::Formatting,
+        GateKind::StrictClippy,
+        GateKind::WorkspaceTests,
+        GateKind::DependencyPolicy,
+        GateKind::Security,
+        GateKind::Platform,
+    ]
+    .into_iter()
+    .map(|gate| GateResult {
+        gate,
+        exit_code: 0,
+        elapsed_millis: 1,
+        output: output.into(),
+        output_sha256: sha256(output.as_bytes()),
+        sandbox: keith_sandbox::SandboxStatus::detect(),
+    })
+    .collect();
+    let manifest = WorkerImageManifest {
+        format: "keith-worker-image-v1".into(),
+        build_id: build_id.into(),
+        base_revision: "a".repeat(40),
+        source_manifest_sha256: sha256(build_id.as_bytes()),
+        executable_sha256: sha256(executable),
+        executable_bytes: u64::try_from(executable.len()).unwrap(),
+        toolchain: ToolchainIdentity {
+            rustc: "rustc process-test".into(),
+            cargo: "cargo process-test".into(),
+            target: std::env::consts::ARCH.into(),
+        },
+        worker_report: keith_build_info::BuildReport {
+            component: "daemon".into(),
+            package_version: env!("CARGO_PKG_VERSION").into(),
+            build_id: build_id.into(),
+            protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
+            storage_schema: CURRENT_SCHEMA_VERSION.to_string(),
+            enabled_features: BTreeSet::from(["supervised_restart".into()]),
+        },
+        gates,
+        artifact_source_paths: vec![PathBuf::from("apps/agentd/src/main.rs")],
+        change_class: "c".into(),
+    };
+    let key = Ed25519KeyPair::from_seed_unchecked(&[73; 32]).unwrap();
+    let public_key = key.public_key().as_ref().try_into().unwrap();
+    let signature = key.sign(&keith_agent_types::canonical_json_bytes(&manifest).unwrap());
+    let image = WorkerImage::from_signed_parts(
+        manifest,
+        executable.to_vec(),
+        signature.as_ref().to_vec(),
+        public_key,
+        &public_key,
+    )
+    .unwrap();
+    (image, public_key)
+}
+
+#[cfg(unix)]
+fn stage_daemon(
+    data_root: &Path,
+    executable: &Path,
+    build_id: &str,
+) -> keith_self_evolution::StagedDaemonImage {
+    let bytes = fs::read(executable).unwrap();
+    let (image, public_key) = signed_daemon_image(&bytes, build_id);
+    let staging_root = data_root.join("self-evolution/daemon-images");
+    let guard = EvolutionGuard::new(data_root).unwrap();
+    let mut staging = DaemonStaging::open(&staging_root, executable).unwrap();
+    staging
+        .stage(StagingRequest {
+            image: &image,
+            trusted_public_key: &public_key,
+            consent: &DaemonRestartConsent {
+                owner_identity: "installation-owner-process-test".into(),
+                restart_required: true,
+                affected_scope: vec!["Keith daemon, catalog, and local endpoint".into()],
+                reversal_path: "Restore the pinned known-good daemon image".into(),
+            },
+            guard: &guard,
+        })
+        .unwrap()
+}
+
+#[cfg(unix)]
+fn start_daemon_with_fault(
+    data_root: &Path,
+    socket: &Path,
+    boundary: Option<&str>,
+    image_id: Option<&str>,
+) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agentd"));
+    command
+        .arg("--data-root")
+        .arg(data_root)
+        .arg("--socket")
+        .arg(socket)
+        .arg("--worker-executable")
+        .arg(env!("CARGO_BIN_EXE_keith-daemon-worker-host"))
+        .arg("--idle-seconds")
+        .arg("60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    if let (Some(boundary), Some(image_id)) = (boundary, image_id) {
+        command
+            .env("KEITH_DAEMON_STARTUP_FAIL_AT", boundary)
+            .env("KEITH_DAEMON_STARTUP_FAIL_IMAGE", image_id);
+    }
+    command.spawn().unwrap()
+}
+
+#[cfg(unix)]
+fn stop_launcher(process: &mut Child) {
+    send_signal(process, Signal::SIGTERM);
+    assert!(process.wait().unwrap().success());
+}
+
+#[cfg(unix)]
+fn attach_and_observe_restoration(socket: &Path, session_id: &SessionId) {
+    let (mut transport, client_id) = open_connection(socket);
+    transport
+        .send(&WireMessage::Command(CommandEnvelope {
+            protocol: CURRENT_PROTOCOL_VERSION,
+            command_id: CommandId::new(),
+            client_id,
+            sent_at: UtcTimestamp::UNIX_EPOCH,
+            session_id: Some(session_id.clone()),
+            command: ClientCommand::AttachSession(AttachSession {
+                session_id: session_id.clone(),
+                resume: None,
+            }),
+        }))
+        .unwrap();
+    let mut result = false;
+    let mut warning = false;
+    for _ in 0..4 {
+        match transport.receive().unwrap() {
+            WireMessage::CommandResult(envelope) => {
+                assert!(matches!(envelope.result, CommandResult::Data(_)));
+                result = true;
+            }
+            WireMessage::Event(envelope) => {
+                if let DaemonEvent::Warning(error) = envelope.event {
+                    assert!(error.message.contains("restored the previous daemon"));
+                    warning = true;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(result && warning);
+}
+
+#[cfg(unix)]
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_daemon_real_process_success_failures_restore_and_restart_stably() {
+    let directory = tempfile::tempdir().unwrap();
+    let data_root = directory.path().join("data");
+    let socket = directory.path().join("agentd.sock");
+    let workspace = directory.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let root = RootTreeId::new();
+    let session = SessionId::new();
+    let launch = LocalRuntimeLaunchConfig {
+        data_root: data_root.clone(),
+        credential_root: data_root.join("credentials"),
+        credential_key_source: RuntimeCredentialKeySource::Restricted(
+            data_root.join("credentials"),
+        ),
+        workspace_root: workspace,
+        openai_base_url: "http://127.0.0.1:1".into(),
+        anthropic_base_url: "http://127.0.0.1:1".into(),
+        provider_base_urls: std::collections::BTreeMap::new(),
+    };
+    seed_provider_credential(&launch);
+    let profile = seed_runtime_session(&launch, &root, &session);
+    write_manifest(&data_root, &root, &session, &profile);
+
+    let executable = Path::new(env!("CARGO_BIN_EXE_agentd"));
+    let successful = stage_daemon(&data_root, executable, "daemon-success");
+    let mut daemon = start_daemon_with_fault(&data_root, &socket, None, None);
+    drop(connect_when_ready(&socket));
+    stop_launcher(&mut daemon);
+    let staging_root = data_root.join("self-evolution/daemon-images");
+    let staging = DaemonStaging::open(&staging_root, executable).unwrap();
+    assert_eq!(
+        staging.staged().unwrap().unwrap().phase,
+        DaemonStagingPhase::Active
+    );
+    drop(staging);
+
+    let mut repeated = start_daemon_with_fault(&data_root, &socket, None, None);
+    drop(connect_when_ready(&socket));
+    stop_launcher(&mut repeated);
+
+    let migration = stage_daemon(&data_root, executable, "daemon-migration-failure");
+    let mut restored = start_daemon_with_fault(
+        &data_root,
+        &socket,
+        Some("migration"),
+        Some(&migration.candidate.image_id),
+    );
+    drop(connect_when_ready(&socket));
+    attach_and_observe_restoration(&socket, &session);
+    stop_launcher(&mut restored);
+    let staging = DaemonStaging::open(&staging_root, executable).unwrap();
+    let migration_state = staging.staged().unwrap().unwrap();
+    assert_eq!(migration_state.phase, DaemonStagingPhase::Restored);
+    assert_eq!(
+        migration_state.pinned.image_id,
+        successful.candidate.image_id
+    );
+    assert!(migration_state.candidate.executable.is_file());
+    drop(staging);
+
+    let mut stable_restore = start_daemon_with_fault(&data_root, &socket, None, None);
+    drop(connect_when_ready(&socket));
+    stop_launcher(&mut stable_restore);
+
+    let readiness = stage_daemon(&data_root, executable, "daemon-readiness-failure");
+    let mut readiness_restored = start_daemon_with_fault(
+        &data_root,
+        &socket,
+        Some("readiness"),
+        Some(&readiness.candidate.image_id),
+    );
+    drop(connect_when_ready(&socket));
+    stop_launcher(&mut readiness_restored);
+    let staging = DaemonStaging::open(&staging_root, executable).unwrap();
+    let readiness_state = staging.staged().unwrap().unwrap();
+    assert_eq!(readiness_state.phase, DaemonStagingPhase::Restored);
+    assert_eq!(
+        readiness_state.pinned.image_id,
+        successful.candidate.image_id
+    );
+    assert!(readiness_state.candidate.executable.is_file());
 }

@@ -7,11 +7,13 @@ pub use events::*;
 pub use recovery::*;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, TryLockError};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,27 +28,95 @@ use keith_connection::{
 };
 use keith_protocol::{
     AgentActivityKind, AgentActivityOutcome, AgentActivityProjection, ClientCommand, CommandError,
-    CommandResult, CommandResultEnvelope, DaemonEvent, EventEnvelope, Feature, MessageProjection,
-    ResponsePayload, SessionFilter, SessionSnapshot, SessionState, SessionSummary, ToolProjection,
-    WireFormat, WireMessage, negotiate,
+    CommandResult, CommandResultEnvelope, DaemonEvent, EventEnvelope,
+    EvolutionAvailabilityProjection, EvolutionCommand, EvolutionDisclosureProjection,
+    EvolutionHypothesisProjection, EvolutionLedgerProjection, EvolutionProjection, Feature,
+    MessageProjection, ResponsePayload, SessionFilter, SessionSnapshot, SessionState,
+    SessionSummary, ToolProjection, WireFormat, WireMessage, negotiate,
 };
 use keith_runtime_api::{
     AcceptedPrompt, RuntimeAgentOutcome, RuntimeEvent, RuntimeEventKind, RuntimeRequest,
     RuntimeResponse, RuntimeSession,
+};
+use keith_self_evolution::CanaryRunner;
+use keith_self_evolution::{
+    DaemonRestorationNotice, EvolutionEvent, EvolutionLedger, HypothesisState,
+    InstallationAuthority, LedgerText, ReversalScope, ReversalTransaction, SelfEvolutionEnablement,
+    StagingError, acknowledge_restoration_notice, read_pending_restoration_notice,
 };
 use keith_state_store::{EmbeddedStore, FileBackupHook, StoreError};
 use keith_state_store_core::{
     AtomicStateRepository, Collection, RecordMutation, VersionedRecord, WritePrecondition,
 };
 use keith_supervisor::{
-    SupervisorError, SupervisorOptions, WorkerEvent, WorkerStatus, WorkerSupervisor,
-    signal_active_cancellation,
+    SupervisorError, SupervisorOptions, WorkerEvent, WorkerImageRegistry, WorkerRollProof,
+    WorkerStatus, WorkerSupervisor, signal_active_cancellation,
 };
+use keith_telemetry::{CandidateObservation, CandidateSignal, MetricName, TelemetryError};
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_PROMPT_BYTES: usize = 256 * 1024;
+const MAX_CANDIDATE_OBSERVATIONS: usize = 4_096;
+
+fn read_or_create_secret(path: &Path) -> io::Result<[u8; 32]> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    match options.open(path) {
+        Ok(mut file) => {
+            let mut secret = [0_u8; 32];
+            if let Err(error) = SystemRandom::new()
+                .fill(&mut secret)
+                .map_err(|_| io::Error::other("operating-system randomness unavailable"))
+            {
+                drop(file);
+                let _ = fs::remove_file(path);
+                return Err(error);
+            }
+            if let Err(error) = file.write_all(&secret).and_then(|()| file.sync_all()) {
+                drop(file);
+                let _ = fs::remove_file(path);
+                return Err(error);
+            }
+            Ok(secret)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "daemon secret is not a regular file",
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.mode() & 0o077 != 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "daemon secret permissions must be 0600",
+                    ));
+                }
+            }
+            let mut file = OpenOptions::new().read(true).open(path)?;
+            let mut secret = [0_u8; 32];
+            file.read_exact(&mut secret)?;
+            let mut trailing = [0_u8; 1];
+            if file.read(&mut trailing)? != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "daemon secret has an invalid length",
+                ));
+            }
+            Ok(secret)
+        }
+        Err(error) => Err(error),
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
@@ -249,6 +319,7 @@ pub struct DaemonOptions {
     pub replay_capacity: usize,
     pub client_queue_capacity: usize,
     pub command_dedup_capacity: usize,
+    pub evolution_source_root: Option<PathBuf>,
 }
 
 impl Default for DaemonOptions {
@@ -261,6 +332,7 @@ impl Default for DaemonOptions {
             replay_capacity: 4_096,
             client_queue_capacity: 256,
             command_dedup_capacity: 4_096,
+            evolution_source_root: None,
         }
     }
 }
@@ -288,6 +360,16 @@ pub struct DaemonCore {
     startup_recovery: StartupRecoveryReport,
     worker_runtime_enabled: bool,
     last_runtime_maintenance: Option<Instant>,
+    pending_daemon_restoration: Option<DaemonRestorationNotice>,
+    candidate_observations: Vec<CandidateObservation>,
+    evolution: EvolutionController,
+}
+
+struct EvolutionController {
+    source_root: PathBuf,
+    ledger: Arc<EvolutionLedger<EmbeddedStore>>,
+    enablement: SelfEvolutionEnablement<EmbeddedStore>,
+    authority: InstallationAuthority,
 }
 
 #[derive(Debug, Error)]
@@ -296,6 +378,10 @@ pub enum DaemonError {
     Catalog(#[from] CatalogError),
     #[error(transparent)]
     Supervisor(#[from] SupervisorError),
+    #[error("canary recovery failed: {0}")]
+    Canary(#[from] keith_self_evolution::CanaryError),
+    #[error("daemon replacement recovery failed: {0}")]
+    Staging(#[from] StagingError),
     #[error("daemon endpoint failed: {0}")]
     Connection(#[from] keith_connection::ConnectionError),
     #[error("daemon I/O failed: {0}")]
@@ -316,6 +402,10 @@ pub enum DaemonError {
     State(#[from] StoreError),
     #[error("daemon prompt ingress is corrupt: {0}")]
     PromptIngress(#[from] serde_json::Error),
+    #[error(transparent)]
+    Telemetry(#[from] TelemetryError),
+    #[error("self-evolution controller failed: {0}")]
+    Evolution(String),
 }
 
 impl DaemonCore {
@@ -362,7 +452,14 @@ impl DaemonCore {
         runtime_config: Option<PathBuf>,
     ) -> Result<Self, DaemonError> {
         fs::create_dir_all(&data_root)?;
+        CanaryRunner::open(
+            data_root.join("self-evolution").join("canaries"),
+            options.supervisor.clone(),
+        )?;
         let (catalog, startup_recovery) = recover_daemon_startup(&data_root)?;
+        let pending_daemon_restoration = read_pending_restoration_notice(
+            data_root.join("self-evolution").join("daemon-images"),
+        )?;
         let worker_runtime_enabled = runtime_config.is_some();
         let mut supervisor = if let Some(runtime_config) = runtime_config {
             WorkerSupervisor::open_with_runtime_config(
@@ -382,6 +479,49 @@ impl DaemonCore {
         let command_ledger = CommandLedger::new(options.command_dedup_capacity)?;
         let prompt_ingress =
             EmbeddedStore::open(&data_root.join("state.sqlite"), Some(&FileBackupHook))?;
+        let evolution_store = Arc::new(EmbeddedStore::open(
+            &data_root.join("state.sqlite"),
+            Some(&FileBackupHook),
+        )?);
+        let evolution_root = data_root.join("self-evolution");
+        fs::create_dir_all(&evolution_root)?;
+        let signing_seed = read_or_create_secret(&evolution_root.join("ledger.seed"))?;
+        let authority_secret = read_or_create_secret(&evolution_root.join("authority.seed"))?;
+        let ledger = Arc::new(
+            EvolutionLedger::from_seed(evolution_store, &signing_seed)
+                .map_err(|error| DaemonError::Evolution(error.to_string()))?,
+        );
+        let source_root = options
+            .evolution_source_root
+            .clone()
+            .unwrap_or_else(|| data_root.clone());
+        let enabled = ledger
+            .records()
+            .map_err(|error| DaemonError::Evolution(error.to_string()))?
+            .iter()
+            .rev()
+            .find_map(|record| match record.event {
+                EvolutionEvent::Enable { .. } => Some(true),
+                EvolutionEvent::Disable { .. } => Some(false),
+                _ => None,
+            })
+            .unwrap_or(false);
+        let enablement = SelfEvolutionEnablement::new_restored(
+            source_root.clone(),
+            authority_secret,
+            "installation-owner".into(),
+            Arc::clone(&ledger),
+            enabled,
+        );
+        let authority = enablement
+            .authenticate_installation(&authority_secret)
+            .map_err(|error| DaemonError::Evolution(error.to_string()))?;
+        let evolution = EvolutionController {
+            source_root,
+            ledger,
+            enablement,
+            authority,
+        };
         Ok(Self {
             instance_id: EntityId::new(),
             data_root,
@@ -396,6 +536,9 @@ impl DaemonCore {
             startup_recovery,
             worker_runtime_enabled,
             last_runtime_maintenance: None,
+            pending_daemon_restoration,
+            candidate_observations: Vec::new(),
+            evolution,
         })
     }
 
@@ -417,12 +560,121 @@ impl DaemonCore {
         }
     }
 
+    /// Removes and returns candidate observations accumulated by daemon maintenance.
+    pub fn take_candidate_observations(&mut self) -> Vec<CandidateObservation> {
+        std::mem::take(&mut self.candidate_observations)
+    }
+
+    /// Records a turn-level candidate signal only when its image and generation still identify
+    /// the active worker. This closes attribution before watchdog consumption.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the root is inactive or the supplied candidate identity is stale.
+    pub fn record_candidate_signal(
+        &mut self,
+        root_tree_id: &RootTreeId,
+        generation: Generation,
+        image_id: &str,
+        signal: CandidateSignal,
+    ) -> Result<(), DaemonError> {
+        let worker = self
+            .supervisor
+            .status(root_tree_id)
+            .filter(|worker| worker.generation == generation && worker.image_id == image_id)
+            .ok_or_else(|| {
+                DaemonError::Runtime("candidate observation attribution is stale".into())
+            })?;
+        self.push_candidate_observation(CandidateObservation::new(
+            worker.image_id,
+            worker.root_tree_id,
+            worker.generation,
+            UtcTimestamp::now().map_err(|error| DaemonError::Runtime(error.to_string()))?,
+            signal,
+        )?);
+        Ok(())
+    }
+
+    /// Records a hypothesis metric against an active candidate worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the candidate attribution is stale or the clock is unavailable.
+    pub fn record_candidate_metric(
+        &mut self,
+        root_tree_id: &RootTreeId,
+        generation: Generation,
+        image_id: &str,
+        metric: MetricName,
+        value: u64,
+    ) -> Result<(), DaemonError> {
+        self.record_candidate_signal(
+            root_tree_id,
+            generation,
+            image_id,
+            CandidateSignal::HypothesisMetric { metric, value },
+        )
+    }
+
+    fn push_candidate_observation(&mut self, observation: CandidateObservation) {
+        if self.candidate_observations.len() == MAX_CANDIDATE_OBSERVATIONS {
+            self.candidate_observations.remove(0);
+        }
+        self.candidate_observations.push(observation);
+    }
+
+    #[must_use]
+    pub const fn worker_image_registry(&self) -> &WorkerImageRegistry {
+        self.supervisor.image_registry()
+    }
+
+    pub const fn worker_image_registry_mut(&mut self) -> &mut WorkerImageRegistry {
+        self.supervisor.image_registry_mut()
+    }
+
     pub fn event_hub(&self, root_tree_id: &RootTreeId) -> Option<&EventHub> {
         self.event_hubs.get(root_tree_id)
     }
 
     pub fn event_hub_mut(&mut self, root_tree_id: &RootTreeId) -> Option<&mut EventHub> {
         self.event_hubs.get_mut(root_tree_id)
+    }
+
+    /// Returns the cataloged roots that currently have an active worker generation.
+    pub fn active_worker_roots(&self) -> Vec<RootTreeId> {
+        self.supervisor.active_roots()
+    }
+
+    /// Rolls one active root to one exact installed image and refreshes its event hub in place.
+    ///
+    /// The daemon process and unrelated roots remain alive. The supervisor restores the exact
+    /// previous image if candidate startup fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the root is unknown, rolling fails, or the replacement generation's
+    /// snapshot cannot seed the event hub.
+    pub fn roll_worker_to_image(
+        &mut self,
+        root_tree_id: &RootTreeId,
+        image_id: &str,
+    ) -> Result<WorkerRollProof, DaemonError> {
+        if self.catalog.root(root_tree_id).is_none() {
+            return Err(DaemonError::UnknownRoot(root_tree_id.clone()));
+        }
+        let proof = self.supervisor.roll_to_image(root_tree_id, image_id)?;
+        self.refresh_event_hub(root_tree_id, proof.generation)?;
+        Ok(proof)
+    }
+
+    /// Rebuilds or replaces one root's event hub for an already active generation without
+    /// restarting the daemon.
+    pub fn refresh_event_hub(
+        &mut self,
+        root_tree_id: &RootTreeId,
+        generation: Generation,
+    ) -> Result<(), DaemonError> {
+        self.ensure_event_hub(root_tree_id, generation)
     }
 
     /// Lazily activates the worker that owns a cataloged root session.
@@ -538,7 +790,57 @@ impl DaemonCore {
     ///
     /// Returns an error when worker inspection or eviction fails.
     pub fn maintain(&mut self) -> Result<(), DaemonError> {
+        let workers_before_monitor = self
+            .supervisor
+            .statuses()
+            .into_iter()
+            .map(|worker| ((worker.root_tree_id.clone(), worker.generation), worker))
+            .collect::<BTreeMap<_, _>>();
         self.last_worker_events = self.supervisor.monitor()?;
+        let observed_at =
+            UtcTimestamp::now().map_err(|error| DaemonError::Runtime(error.to_string()))?;
+        let mut observations = Vec::new();
+        for event in &self.last_worker_events {
+            let (root_tree_id, generation, crashed) = match event {
+                WorkerEvent::Fatal {
+                    root_tree_id,
+                    generation,
+                    ..
+                } => (root_tree_id, *generation, true),
+                WorkerEvent::Exited {
+                    root_tree_id,
+                    generation,
+                    success,
+                } => (root_tree_id, *generation, *success != Some(true)),
+            };
+            if crashed
+                && let Some(worker) =
+                    workers_before_monitor.get(&(root_tree_id.clone(), generation))
+            {
+                observations.push(CandidateObservation::new(
+                    worker.image_id.clone(),
+                    root_tree_id.clone(),
+                    generation,
+                    observed_at,
+                    CandidateSignal::WorkerCrash,
+                )?);
+            }
+        }
+        for worker in self.supervisor.statuses() {
+            observations.push(CandidateObservation::new(
+                worker.image_id,
+                worker.root_tree_id,
+                worker.generation,
+                observed_at,
+                CandidateSignal::ResourceUse {
+                    resident_bytes: worker.resources.resident_bytes,
+                    virtual_bytes: worker.resources.virtual_bytes,
+                },
+            )?);
+        }
+        for observation in observations {
+            self.push_candidate_observation(observation);
+        }
         let failed_roots = self
             .last_worker_events
             .iter()
@@ -624,6 +926,19 @@ impl DaemonCore {
         socket_path: &Path,
         shutdown: &AtomicBool,
     ) -> Result<(), DaemonError> {
+        self.serve_local_with_ready(socket_path, shutdown, || Ok(()))
+    }
+
+    /// Serves the local endpoint and reports positive readiness only after recovery and binding.
+    ///
+    /// # Errors
+    /// Returns an error when endpoint setup, the readiness acknowledgement, or serving fails.
+    pub fn serve_local_with_ready(
+        &mut self,
+        socket_path: &Path,
+        shutdown: &AtomicBool,
+        ready: impl FnOnce() -> Result<(), DaemonError>,
+    ) -> Result<(), DaemonError> {
         if let Some(parent) = socket_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -634,6 +949,19 @@ impl DaemonCore {
         }
         let listener = bind_permissioned_local(socket_path)?;
         set_local_listener_nonblocking(&listener, true)?;
+        self.startup_recovery.mark_endpoints_ready();
+        if startup_fault_requested("readiness") {
+            drop(listener);
+            let _ = fs::remove_file(socket_path);
+            return Err(DaemonError::Runtime(
+                "injected daemon readiness failure".into(),
+            ));
+        }
+        if let Err(error) = ready() {
+            drop(listener);
+            let _ = fs::remove_file(socket_path);
+            return Err(error);
+        }
         let maintenance_interval = self.options.maintenance_interval;
         let instance_id = self.instance_id.clone();
         let data_root = self.data_root.clone();
@@ -714,6 +1042,7 @@ impl DaemonCore {
             Feature::Snapshots,
             Feature::DeliveryDispatch,
             Feature::AttachmentStaging,
+            Feature::SelfEvolution,
         ]);
         let hello = negotiate(
             &client,
@@ -904,6 +1233,7 @@ impl DaemonCore {
             );
         }
         match command {
+            ClientCommand::Evolution(command) => self.execute_evolution_command(command),
             ClientCommand::ListProfiles => {
                 let result = if self.worker_runtime_enabled {
                     self.runtime_profiles()
@@ -1081,11 +1411,103 @@ impl DaemonCore {
             .root_for_session(&attach.session_id)
             .cloned()
             .ok_or_else(|| DaemonError::UnknownSession(attach.session_id.clone()))?;
-        let hub = self
-            .event_hubs
-            .get_mut(&root)
-            .ok_or(DaemonError::UnknownRoot(root))?;
-        Ok(hub.attach(client_id.clone(), attach.resume.as_ref()))
+        let pending = self.pending_daemon_restoration.clone();
+        let recovery = {
+            let hub = self
+                .event_hubs
+                .get_mut(&root)
+                .ok_or(DaemonError::UnknownRoot(root))?;
+            let recovery = hub.attach(client_id.clone(), attach.resume.as_ref());
+            if let Some(notice) = &pending {
+                hub.publish(DaemonEvent::Warning(CommonError::new(
+                    ErrorCode::Unavailable,
+                    format!(
+                        "Keith restored the previous daemon after a staged update failed to start: {}. The failed image remains available for inspection.",
+                        notice.reason
+                    ),
+                    false,
+                )))?;
+            }
+            recovery
+        };
+        if let Some(notice) = pending {
+            acknowledge_restoration_notice(
+                self.data_root.join("self-evolution").join("daemon-images"),
+                &notice.notice_id,
+            )?;
+            self.pending_daemon_restoration = None;
+        }
+        Ok(recovery)
+    }
+
+    fn execute_evolution_command(
+        &mut self,
+        command: EvolutionCommand,
+    ) -> (CommandResult, Vec<keith_protocol::EventEnvelope>) {
+        if matches!(command, EvolutionCommand::Enable { .. }) {
+            return rejected_evolution(
+                ErrorCode::Unauthorized,
+                "Clients cannot enable self-evolution. Use the installation-owner control on the daemon host after reviewing the complete disclosure.",
+            );
+        }
+        let now = match UtcTimestamp::now() {
+            Ok(now) => now,
+            Err(error) => return rejected_evolution(ErrorCode::Internal, &error.to_string()),
+        };
+        let page = match &command {
+            EvolutionCommand::BrowseLedger {
+                before_sequence,
+                limit,
+            } => (*before_sequence, usize::from((*limit).clamp(1, 200))),
+            _ => (None, 100),
+        };
+        let mutation = match command {
+            EvolutionCommand::Status | EvolutionCommand::BrowseLedger { .. } => Ok(()),
+            EvolutionCommand::Disable { reason } => self
+                .evolution
+                .enablement
+                .disable(&self.evolution.authority, &reason, now)
+                .map_err(|error| error.to_string()),
+            EvolutionCommand::Approve { hypothesis_id } => {
+                record_evolution_approval(&self.evolution, hypothesis_id, now)
+            }
+            EvolutionCommand::Revert {
+                promotion_id,
+                reason,
+            } => reverse_evolution(
+                &mut self.supervisor,
+                &self.data_root,
+                &self.evolution,
+                ReversalScope::Promotion(promotion_id),
+                &reason,
+                now,
+            ),
+            EvolutionCommand::RestoreBaseline { reason } => reverse_evolution(
+                &mut self.supervisor,
+                &self.data_root,
+                &self.evolution,
+                ReversalScope::HumanBaseline,
+                &reason,
+                now,
+            ),
+            EvolutionCommand::Enable { .. } => unreachable!(),
+        };
+        if let Err(error) = mutation {
+            return rejected_evolution(ErrorCode::Conflict, &error);
+        }
+        match evolution_projection(&self.evolution, page.0, page.1) {
+            Ok(projection) => {
+                for hub in self.event_hubs.values_mut() {
+                    let _ =
+                        hub.publish(DaemonEvent::EvolutionChanged(Box::new(projection.clone())));
+                }
+                (
+                    CommandResult::Data(Box::new(ResponsePayload::Evolution(Box::new(projection)))),
+                    Vec::new(),
+                )
+            }
+            Err(error) => rejected_evolution(ErrorCode::Internal, &error),
+        }
     }
 
     fn bootstrap_default_runtime_session(&mut self) -> Result<(), DaemonError> {
@@ -1675,6 +2097,18 @@ fn runtime_unavailable() -> DaemonError {
     DaemonError::Runtime("worker runtime is disabled".into())
 }
 
+#[cfg(debug_assertions)]
+pub(crate) fn startup_fault_requested(boundary: &str) -> bool {
+    std::env::var("KEITH_DAEMON_STARTUP_FAIL_AT").as_deref() == Ok(boundary)
+        && std::env::var("KEITH_DAEMON_STARTUP_FAIL_IMAGE").ok()
+            == std::env::var("KEITH_DAEMON_READY_IMAGE").ok()
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) const fn startup_fault_requested(_boundary: &str) -> bool {
+    false
+}
+
 const fn runtime_response_kind(response: &RuntimeResponse) -> &'static str {
     match response {
         RuntimeResponse::Profiles(_) => "profiles",
@@ -1682,6 +2116,7 @@ const fn runtime_response_kind(response: &RuntimeResponse) -> &'static str {
         RuntimeResponse::Session(_) => "session",
         RuntimeResponse::Snapshot(_) => "snapshot",
         RuntimeResponse::Command(_) => "command",
+        RuntimeResponse::CandidateCanary(_) => "candidate_canary",
         RuntimeResponse::Complete => "complete",
         RuntimeResponse::Failed(_) => "failed",
     }
@@ -1729,6 +2164,580 @@ fn rejected_runtime(error: String) -> (CommandResult, Vec<keith_protocol::EventE
     rejected_daemon(DaemonError::Runtime(error))
 }
 
+fn rejected_evolution(
+    code: ErrorCode,
+    message: &str,
+) -> (CommandResult, Vec<keith_protocol::EventEnvelope>) {
+    (
+        CommandResult::Rejected(CommandError {
+            error: CommonError::new(code, message, false),
+            unsupported_feature: None,
+        }),
+        Vec::new(),
+    )
+}
+
+fn record_evolution_approval(
+    controller: &EvolutionController,
+    hypothesis_id: EntityId,
+    now: UtcTimestamp,
+) -> Result<(), String> {
+    let event = EvolutionEvent::Consent {
+        hypothesis_id: hypothesis_id.clone(),
+        approved: true,
+        acting_identity: LedgerText::redacted("installation-owner", 256, &[])
+            .map_err(|error| error.to_string())?,
+    };
+    controller
+        .ledger
+        .append_checked(EntityId::new(), now, event, |records| {
+            if verified_hypothesis_state(records, &hypothesis_id)?
+                != Some(HypothesisState::AwaitingApproval)
+            {
+                return Err(keith_self_evolution::LedgerError::Store(
+                    "hypothesis is not awaiting explicit human approval".into(),
+                ));
+            }
+            if records.iter().any(|record| {
+                matches!(&record.event, EvolutionEvent::Consent { hypothesis_id: id, .. } if id == &hypothesis_id)
+            }) {
+                return Err(keith_self_evolution::LedgerError::Store(
+                    "a consent decision is already recorded for this hypothesis".into(),
+                ));
+            }
+            Ok(())
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn verified_hypothesis_state(
+    records: &[keith_self_evolution::EvolutionRecord],
+    hypothesis_id: &EntityId,
+) -> Result<Option<HypothesisState>, keith_self_evolution::LedgerError> {
+    let mut current: Option<(HypothesisState, u64, UtcTimestamp)> = None;
+    for record in records {
+        match &record.event {
+            EvolutionEvent::Hypothesis { hypothesis } if &hypothesis.id == hypothesis_id => {
+                if current.is_some() {
+                    return Err(keith_self_evolution::LedgerError::Quarantined(
+                        "duplicate hypothesis identity".into(),
+                    ));
+                }
+                current = Some((HypothesisState::Proposed, 0, record.occurred_at));
+            }
+            EvolutionEvent::Admission {
+                hypothesis_id: id,
+                admitted,
+                ..
+            } if id == hypothesis_id => {
+                let Some((HypothesisState::Proposed, 0, updated_at)) = current else {
+                    if !admitted && current.is_none() {
+                        continue;
+                    }
+                    return Err(keith_self_evolution::LedgerError::Quarantined(
+                        "admission is out of order".into(),
+                    ));
+                };
+                if record.occurred_at < updated_at {
+                    return Err(keith_self_evolution::LedgerError::Quarantined(
+                        "hypothesis timestamp regressed".into(),
+                    ));
+                }
+                current = Some((
+                    if *admitted {
+                        HypothesisState::Admitted
+                    } else {
+                        HypothesisState::Rejected
+                    },
+                    1,
+                    record.occurred_at,
+                ));
+            }
+            EvolutionEvent::HypothesisTransition {
+                hypothesis_id: id,
+                from,
+                to,
+                revision,
+                ..
+            } if id == hypothesis_id => {
+                let Some((state, current_revision, updated_at)) = current else {
+                    return Err(keith_self_evolution::LedgerError::Quarantined(
+                        "transition precedes hypothesis".into(),
+                    ));
+                };
+                if state != *from
+                    || current_revision.checked_add(1) != Some(*revision)
+                    || !valid_hypothesis_transition(*from, *to)
+                    || record.occurred_at < updated_at
+                {
+                    return Err(keith_self_evolution::LedgerError::Quarantined(
+                        "invalid hypothesis transition chain".into(),
+                    ));
+                }
+                current = Some((*to, *revision, record.occurred_at));
+            }
+            _ => {}
+        }
+    }
+    Ok(current.map(|(state, _, _)| state))
+}
+
+const fn valid_hypothesis_transition(from: HypothesisState, to: HypothesisState) -> bool {
+    use HypothesisState as State;
+    matches!(
+        (from, to),
+        (
+            State::Proposed,
+            State::Admitted | State::Rejected | State::Expired
+        ) | (
+            State::Admitted,
+            State::Proposing | State::Rejected | State::Expired
+        ) | (
+            State::Proposing,
+            State::Verifying | State::Failed | State::Expired
+        ) | (
+            State::Verifying,
+            State::Evaluating | State::Failed | State::Expired
+        ) | (
+            State::Evaluating,
+            State::AwaitingApproval | State::Promoting | State::Failed | State::Expired
+        ) | (
+            State::AwaitingApproval,
+            State::Promoting | State::Rejected | State::Expired
+        ) | (State::Promoting, State::Promoted | State::Failed)
+            | (State::Promoted, State::Observing)
+            | (
+                State::Observing,
+                State::Promoted | State::Reverted | State::Failed
+            )
+    )
+}
+
+fn reverse_evolution(
+    supervisor: &mut WorkerSupervisor,
+    data_root: &Path,
+    controller: &EvolutionController,
+    scope: ReversalScope,
+    reason: &str,
+    now: UtcTimestamp,
+) -> Result<(), String> {
+    let authority = controller
+        .enablement
+        .authorize_reversal(&controller.authority)
+        .map_err(|error| error.to_string())?;
+    let transaction = ReversalTransaction::open(
+        data_root.join("self-evolution").join("promotions"),
+        &controller.source_root,
+    )
+    .map_err(|error| error.to_string())?;
+    transaction
+        .reverse(
+            supervisor,
+            &controller.ledger,
+            keith_self_evolution::ReversalRequest {
+                scope,
+                trusted_public_key: controller.ledger.trusted_public_key(),
+                authority: &authority,
+                reason,
+                occurred_at: now,
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn evolution_projection(
+    controller: &EvolutionController,
+    before_sequence: Option<u64>,
+    limit: usize,
+) -> Result<EvolutionProjection, String> {
+    let availability = match keith_self_evolution::probe_availability(&controller.source_root) {
+        keith_self_evolution::EvolutionAvailability::Available { rustc, cargo } => {
+            EvolutionAvailabilityProjection::Available { rustc, cargo }
+        }
+        keith_self_evolution::EvolutionAvailability::Unavailable(reasons) => {
+            EvolutionAvailabilityProjection::Unavailable {
+                reasons: reasons
+                    .into_iter()
+                    .map(|reason| format!("{reason:?}"))
+                    .collect(),
+            }
+        }
+    };
+    let records = controller
+        .ledger
+        .records()
+        .map_err(|error| error.to_string())?;
+    let eligible = records
+        .iter()
+        .rev()
+        .filter(|record| before_sequence.is_none_or(|before| record.sequence < before));
+    let available = eligible.clone().count();
+    let mut ledger: Vec<EvolutionLedgerProjection> = eligible
+        .take(limit)
+        .map(evolution_ledger_projection)
+        .collect();
+    for row in &mut ledger {
+        if let Some(id) = row.hypothesis_id.clone() {
+            enrich_evolution_row(row, &id, &records);
+        }
+    }
+    let active = active_evolution_hypothesis(&records)?;
+    Ok(EvolutionProjection {
+        protocol_version: CURRENT_PROTOCOL_VERSION,
+        enabled: controller.enablement.enabled(),
+        state: if controller.enablement.enabled() { "enabled" } else { "disabled" }.into(),
+        availability,
+        disclosure: EvolutionDisclosureProjection {
+            editable_surface: "bounded, guard-approved Rust source outside the protected surface".into(),
+            protected_surface: "agent loop, personal memory, evolution guard and policy, evolution ledger, and release verification".into(),
+            autonomy: "tests and non-shipping material may proceed after verification; binary and daemon changes use stronger consent".into(),
+            reversal: "every promoted change remains individually reversible, including while evolution is disabled".into(),
+        },
+        active,
+        has_more_ledger: available > limit,
+        ledger,
+        guidance: (!controller.enablement.enabled()).then(|| "Self-evolution is disabled. Enablement is installation-owner-only and is not accepted from any client command.".into()),
+    })
+}
+
+fn enrich_evolution_row(
+    row: &mut EvolutionLedgerProjection,
+    hypothesis_id: &EntityId,
+    records: &[keith_self_evolution::EvolutionRecord],
+) {
+    for record in records {
+        match &record.event {
+            EvolutionEvent::Hypothesis { hypothesis } if &hypothesis.id == hypothesis_id => {
+                row.evidence = vec![format!(
+                    "{} measured by {} from {} recorded evidence item(s)",
+                    hypothesis.target_subsystem.as_str(),
+                    hypothesis.metric.as_str(),
+                    hypothesis.evidence_refs.len()
+                )];
+            }
+            EvolutionEvent::Proposal {
+                hypothesis_id: id,
+                readable_diff,
+            } if id == hypothesis_id => {
+                row.readable_diff = Some(readable_diff.as_str().into());
+            }
+            EvolutionEvent::Canary {
+                hypothesis_id: id,
+                before,
+                after,
+                ..
+            }
+            | EvolutionEvent::Observation {
+                hypothesis_id: id,
+                before,
+                after,
+                ..
+            } if id == hypothesis_id => {
+                row.measured_result = Some(format!("{before} -> {after}"));
+            }
+            EvolutionEvent::HypothesisTransition {
+                hypothesis_id: id,
+                to,
+                ..
+            } if id == hypothesis_id => {
+                row.state = hypothesis_state_label(*to).into();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn active_evolution_hypothesis(
+    records: &[keith_self_evolution::EvolutionRecord],
+) -> Result<Option<EvolutionHypothesisProjection>, String> {
+    let mut seen = BTreeSet::new();
+    let mut active = None;
+    for record in records.iter().rev() {
+        let id = match &record.event {
+            EvolutionEvent::Hypothesis { hypothesis } => Some(hypothesis.id.clone()),
+            EvolutionEvent::Admission { hypothesis_id, .. }
+            | EvolutionEvent::HypothesisTransition { hypothesis_id, .. }
+            | EvolutionEvent::Proposal { hypothesis_id, .. }
+            | EvolutionEvent::Gate { hypothesis_id, .. }
+            | EvolutionEvent::Canary { hypothesis_id, .. }
+            | EvolutionEvent::Consent { hypothesis_id, .. }
+            | EvolutionEvent::Promotion { hypothesis_id, .. }
+            | EvolutionEvent::Observation { hypothesis_id, .. }
+            | EvolutionEvent::Revert { hypothesis_id, .. } => Some(hypothesis_id.clone()),
+            _ => None,
+        };
+        let Some(id) = id else { continue };
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(state) =
+            verified_hypothesis_state(records, &id).map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        if !matches!(
+            state,
+            HypothesisState::Promoted
+                | HypothesisState::Reverted
+                | HypothesisState::Rejected
+                | HypothesisState::Expired
+                | HypothesisState::Failed
+        ) {
+            active = Some((id, state));
+            break;
+        }
+    }
+    let Some((id, state)) = active else {
+        return Ok(None);
+    };
+    let hypothesis = records.iter().find_map(|record| match &record.event {
+        EvolutionEvent::Hypothesis { hypothesis } if hypothesis.id == id => Some(hypothesis),
+        _ => None,
+    });
+    let Some(hypothesis) = hypothesis else {
+        return Ok(None);
+    };
+    let approval_recorded = records.iter().any(|record| {
+        matches!(
+            &record.event,
+            EvolutionEvent::Consent {
+                hypothesis_id,
+                approved: true,
+                ..
+            } if hypothesis_id == &id
+        )
+    });
+    let mut projection = EvolutionHypothesisProjection {
+        hypothesis_id: id.clone(),
+        target: hypothesis.target_subsystem.as_str().into(),
+        metric: hypothesis.metric.as_str().into(),
+        state: if state == HypothesisState::AwaitingApproval && approval_recorded {
+            "approval-recorded"
+        } else {
+            hypothesis_state_label(state)
+        }
+        .into(),
+        evidence: vec![format!(
+            "{} recorded evidence item(s)",
+            hypothesis.evidence_refs.len()
+        )],
+        measured_result: None,
+        readable_diff: None,
+        approval_required: state == HypothesisState::AwaitingApproval && !approval_recorded,
+    };
+    for record in records {
+        match &record.event {
+            EvolutionEvent::Proposal {
+                hypothesis_id,
+                readable_diff,
+            } if hypothesis_id == &id => {
+                projection.readable_diff = Some(readable_diff.as_str().into());
+            }
+            EvolutionEvent::Canary {
+                hypothesis_id,
+                before,
+                after,
+                ..
+            }
+            | EvolutionEvent::Observation {
+                hypothesis_id,
+                before,
+                after,
+                ..
+            } if hypothesis_id == &id => {
+                projection.measured_result = Some(format!("{before} -> {after}"));
+            }
+            _ => {}
+        }
+    }
+    Ok(Some(projection))
+}
+
+const fn hypothesis_state_label(state: HypothesisState) -> &'static str {
+    match state {
+        HypothesisState::Proposed => "proposed",
+        HypothesisState::Admitted => "admitted",
+        HypothesisState::Proposing => "proposing",
+        HypothesisState::Verifying => "verifying",
+        HypothesisState::Evaluating => "evaluating",
+        HypothesisState::AwaitingApproval => "awaiting-approval",
+        HypothesisState::Promoting => "promoting",
+        HypothesisState::Promoted => "promoted",
+        HypothesisState::Observing => "observing",
+        HypothesisState::Reverted => "reverted",
+        HypothesisState::Rejected => "rejected",
+        HypothesisState::Expired => "expired",
+        HypothesisState::Failed => "failed",
+    }
+}
+
+fn evolution_ledger_projection(
+    record: &keith_self_evolution::EvolutionRecord,
+) -> EvolutionLedgerProjection {
+    let mut hypothesis_id = None;
+    let mut promotion_id = None;
+    let mut evidence = Vec::new();
+    let mut measured_result = None;
+    let mut readable_diff = None;
+    let (kind, summary, state, reversible) = match &record.event {
+        EvolutionEvent::Hypothesis { hypothesis } => {
+            hypothesis_id = Some(hypothesis.id.clone());
+            evidence = hypothesis
+                .evidence_refs
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            (
+                "hypothesis",
+                format!(
+                    "Proposed improvement to {} measured by {}",
+                    hypothesis.target_subsystem.as_str(),
+                    hypothesis.metric.as_str()
+                ),
+                "proposed",
+                false,
+            )
+        }
+        EvolutionEvent::HypothesisTransition {
+            hypothesis_id: id,
+            to,
+            ..
+        } => {
+            hypothesis_id = Some(id.clone());
+            (
+                "state",
+                "Evolution state changed".into(),
+                match to {
+                    HypothesisState::AwaitingApproval => "awaiting-approval",
+                    HypothesisState::Promoted => "promoted",
+                    HypothesisState::Reverted => "reverted",
+                    HypothesisState::Failed => "failed",
+                    HypothesisState::Rejected => "rejected",
+                    HypothesisState::Expired => "expired",
+                    _ => "in-progress",
+                },
+                false,
+            )
+        }
+        EvolutionEvent::Proposal {
+            hypothesis_id: id,
+            readable_diff: diff,
+        } => {
+            hypothesis_id = Some(id.clone());
+            readable_diff = Some(diff.as_str().into());
+            (
+                "proposal",
+                "Source change proposed".into(),
+                "proposing",
+                false,
+            )
+        }
+        EvolutionEvent::Canary {
+            hypothesis_id: id,
+            before,
+            after,
+            passed,
+        }
+        | EvolutionEvent::Observation {
+            hypothesis_id: id,
+            before,
+            after,
+            healthy: passed,
+        } => {
+            hypothesis_id = Some(id.clone());
+            measured_result = Some(format!("{before} -> {after}"));
+            (
+                "measurement",
+                "Measured candidate result".into(),
+                if *passed { "passed" } else { "failed" },
+                false,
+            )
+        }
+        EvolutionEvent::Consent {
+            hypothesis_id: id,
+            approved,
+            ..
+        } => {
+            hypothesis_id = Some(id.clone());
+            (
+                "consent",
+                "Installation owner recorded a consent decision".into(),
+                if *approved { "approved" } else { "declined" },
+                false,
+            )
+        }
+        EvolutionEvent::Promotion {
+            hypothesis_id: id,
+            promotion_id: promotion,
+            ..
+        } => {
+            hypothesis_id = Some(id.clone());
+            promotion_id = Some(promotion.clone());
+            (
+                "promotion",
+                "Verified change promoted".into(),
+                "promoted",
+                true,
+            )
+        }
+        EvolutionEvent::Revert {
+            hypothesis_id: id,
+            promotion_ids,
+            ..
+        } => {
+            hypothesis_id = Some(id.clone());
+            promotion_id = promotion_ids.first().cloned();
+            (
+                "revert",
+                "Promoted change reversed".into(),
+                "reverted",
+                false,
+            )
+        }
+        EvolutionEvent::Enable { .. } => (
+            "enable",
+            "Self-evolution enabled by installation owner".into(),
+            "enabled",
+            false,
+        ),
+        EvolutionEvent::Disable { .. } => (
+            "disable",
+            "Self-evolution disabled by installation owner".into(),
+            "disabled",
+            false,
+        ),
+        other => (
+            "audit",
+            format!(
+                "{} recorded",
+                match other {
+                    EvolutionEvent::Admission { .. } => "Admission decision",
+                    EvolutionEvent::EvidenceAttestation { .. } => "Evidence",
+                    EvolutionEvent::Gate { .. } => "Verification gate",
+                    _ => "Evolution event",
+                }
+            ),
+            "recorded",
+            false,
+        ),
+    };
+    EvolutionLedgerProjection {
+        sequence: record.sequence,
+        occurred_at: record.occurred_at,
+        kind: kind.into(),
+        summary,
+        state: state.into(),
+        evidence,
+        measured_result,
+        readable_diff,
+        hypothesis_id,
+        promotion_id,
+        reversible,
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn rejected_daemon(error: DaemonError) -> (CommandResult, Vec<keith_protocol::EventEnvelope>) {
     (
@@ -1743,6 +2752,297 @@ fn rejected_daemon(error: DaemonError) -> (CommandResult, Vec<keith_protocol::Ev
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_evolution_secret_is_stable_and_rejects_unsafe_existing_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let secret_path = directory.path().join("authority.seed");
+        let first = read_or_create_secret(&secret_path).unwrap();
+        assert_eq!(read_or_create_secret(&secret_path).unwrap(), first);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+            assert_eq!(fs::metadata(&secret_path).unwrap().mode() & 0o777, 0o600);
+            fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(
+                read_or_create_secret(&secret_path).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            let target = directory.path().join("target");
+            fs::write(&target, [0_u8; 32]).unwrap();
+            let link = directory.path().join("link.seed");
+            symlink(&target, &link).unwrap();
+            assert_eq!(
+                read_or_create_secret(&link).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    fn evolution_test_daemon(root: &Path) -> DaemonCore {
+        let source_root = root.join("source");
+        fs::create_dir_all(&source_root).unwrap();
+        DaemonCore::open(
+            root.join("data"),
+            std::env::current_exe().unwrap(),
+            DaemonOptions {
+                evolution_source_root: Some(source_root),
+                ..DaemonOptions::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn evolution_data(result: CommandResult) -> EvolutionProjection {
+        let CommandResult::Data(payload) = result else {
+            panic!("expected authoritative evolution projection");
+        };
+        let ResponsePayload::Evolution(projection) = *payload else {
+            panic!("expected evolution payload");
+        };
+        *projection
+    }
+
+    fn ledger_text(value: &str) -> LedgerText {
+        LedgerText::redacted(value, 1024, &[]).unwrap()
+    }
+
+    fn append_awaiting_hypothesis(controller: &EvolutionController, hypothesis_id: &EntityId) {
+        let mut timestamp = 10_i64;
+        controller
+            .ledger
+            .append(
+                EntityId::new(),
+                UtcTimestamp::from_unix_millis(timestamp),
+                EvolutionEvent::Hypothesis {
+                    hypothesis: keith_self_evolution::LedgerHypothesis {
+                        id: hypothesis_id.clone(),
+                        evidence_refs: vec![EntityId::new()],
+                        target_subsystem: ledger_text("tool routing"),
+                        metric: ledger_text("turn failure rate"),
+                        baseline: 0.2,
+                        target: 0.1,
+                        revert_threshold: 0.25,
+                        expires_at: UtcTimestamp::from_unix_millis(4_000_000_000_000),
+                        measurement_slice: None,
+                        evidence_sources: Vec::new(),
+                        evidence_digests: Vec::new(),
+                    },
+                },
+            )
+            .unwrap();
+        timestamp += 1;
+        controller
+            .ledger
+            .append(
+                EntityId::new(),
+                UtcTimestamp::from_unix_millis(timestamp),
+                EvolutionEvent::Admission {
+                    hypothesis_id: hypothesis_id.clone(),
+                    admitted: true,
+                    reason: ledger_text("host evidence resolved"),
+                },
+            )
+            .unwrap();
+        let transitions = [
+            (HypothesisState::Admitted, HypothesisState::Proposing, 2),
+            (HypothesisState::Proposing, HypothesisState::Verifying, 3),
+            (HypothesisState::Verifying, HypothesisState::Evaluating, 4),
+            (
+                HypothesisState::Evaluating,
+                HypothesisState::AwaitingApproval,
+                5,
+            ),
+        ];
+        for (from, to, revision) in transitions {
+            timestamp += 1;
+            controller
+                .ledger
+                .append(
+                    EntityId::new(),
+                    UtcTimestamp::from_unix_millis(timestamp),
+                    EvolutionEvent::HypothesisTransition {
+                        hypothesis_id: hypothesis_id.clone(),
+                        from,
+                        to,
+                        revision,
+                        reason: None,
+                    },
+                )
+                .unwrap();
+        }
+        controller
+            .ledger
+            .append(
+                EntityId::new(),
+                UtcTimestamp::from_unix_millis(timestamp + 1),
+                EvolutionEvent::Proposal {
+                    hypothesis_id: hypothesis_id.clone(),
+                    readable_diff: ledger_text("Stop after the first verified matching route"),
+                },
+            )
+            .unwrap();
+        controller
+            .ledger
+            .append(
+                EntityId::new(),
+                UtcTimestamp::from_unix_millis(timestamp + 2),
+                EvolutionEvent::Canary {
+                    hypothesis_id: hypothesis_id.clone(),
+                    before: 0.2,
+                    after: 0.08,
+                    passed: true,
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn evolution_commands_enforce_owner_enablement_and_use_real_domain_mutations() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut daemon = evolution_test_daemon(directory.path());
+        let before = daemon.evolution.ledger.records().unwrap().len();
+        let (enable, _) = daemon.execute_evolution_command(EvolutionCommand::Enable {
+            disclosure_acknowledged: true,
+        });
+        let CommandResult::Rejected(enable) = enable else {
+            panic!("client enablement must be rejected");
+        };
+        assert_eq!(enable.error.code, ErrorCode::Unauthorized);
+        assert!(enable.error.message.contains("installation-owner control"));
+        assert_eq!(daemon.evolution.ledger.records().unwrap().len(), before);
+
+        let (disabled, _) = daemon.execute_evolution_command(EvolutionCommand::Disable {
+            reason: "owner paused evolution from the terminal".into(),
+        });
+        assert!(!evolution_data(disabled).enabled);
+        assert!(matches!(
+            daemon.evolution.ledger.records().unwrap().last().map(|row| &row.event),
+            Some(EvolutionEvent::Disable { reason, .. })
+                if reason.as_str() == "owner paused evolution from the terminal"
+        ));
+
+        let hypothesis_id = EntityId::new();
+        append_awaiting_hypothesis(&daemon.evolution, &hypothesis_id);
+        let (approved, _) = daemon.execute_evolution_command(EvolutionCommand::Approve {
+            hypothesis_id: hypothesis_id.clone(),
+        });
+        let approved = evolution_data(approved);
+        let active = approved
+            .active
+            .expect("awaiting hypothesis remains visible");
+        assert_eq!(active.hypothesis_id, hypothesis_id);
+        assert_eq!(active.state, "approval-recorded");
+        assert!(!active.approval_required);
+        assert!(matches!(
+            daemon
+                .evolution
+                .ledger
+                .records()
+                .unwrap()
+                .last()
+                .map(|row| &row.event),
+            Some(EvolutionEvent::Consent { approved: true, .. })
+        ));
+        let (duplicate, _) =
+            daemon.execute_evolution_command(EvolutionCommand::Approve { hypothesis_id });
+        assert!(
+            matches!(duplicate, CommandResult::Rejected(error) if error.error.code == ErrorCode::Conflict)
+        );
+
+        let (reversal, _) = daemon.execute_evolution_command(EvolutionCommand::Revert {
+            promotion_id: EntityId::new(),
+            reason: "verify the real reversal boundary".into(),
+        });
+        assert!(matches!(
+            reversal,
+            CommandResult::Rejected(error)
+                if error.error.code == ErrorCode::Conflict
+                    && error.error.message.contains("no committed promotion matches")
+        ));
+    }
+
+    #[test]
+    fn evolution_browse_is_exclusive_bounded_and_enriches_reversible_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut daemon = evolution_test_daemon(directory.path());
+        let hypothesis_id = EntityId::new();
+        append_awaiting_hypothesis(&daemon.evolution, &hypothesis_id);
+        let promotion_id = EntityId::new();
+        daemon
+            .evolution
+            .ledger
+            .append(
+                EntityId::new(),
+                UtcTimestamp::from_unix_millis(20),
+                EvolutionEvent::Promotion {
+                    hypothesis_id,
+                    promotion_id: promotion_id.clone(),
+                    artifact_id: ledger_text("worker-image"),
+                    artifact_digest: ledger_text(&"a".repeat(64)),
+                },
+            )
+            .unwrap();
+        let last_sequence = daemon
+            .evolution
+            .ledger
+            .records()
+            .unwrap()
+            .last()
+            .unwrap()
+            .sequence;
+
+        let (latest, _) = daemon.execute_evolution_command(EvolutionCommand::BrowseLedger {
+            before_sequence: None,
+            limit: 1,
+        });
+        let latest = evolution_data(latest);
+        assert_eq!(latest.ledger.len(), 1);
+        assert_eq!(latest.ledger[0].sequence, last_sequence);
+        assert_eq!(latest.ledger[0].promotion_id, Some(promotion_id));
+        assert!(latest.ledger[0].reversible);
+        assert!(!latest.ledger[0].evidence.is_empty());
+        assert!(latest.ledger[0].readable_diff.is_some());
+        assert_eq!(
+            latest.ledger[0].measured_result.as_deref(),
+            Some("0.2 -> 0.08")
+        );
+        assert!(latest.has_more_ledger);
+
+        let (previous, _) = daemon.execute_evolution_command(EvolutionCommand::BrowseLedger {
+            before_sequence: Some(last_sequence),
+            limit: 1,
+        });
+        let previous = evolution_data(previous);
+        assert_eq!(previous.ledger.len(), 1);
+        assert_eq!(previous.ledger[0].sequence, last_sequence - 1);
+        assert!(previous.has_more_ledger);
+    }
+
+    #[test]
+    fn signed_enablement_state_is_restored_when_the_daemon_reopens() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let daemon = evolution_test_daemon(root);
+        daemon
+            .evolution
+            .ledger
+            .append(
+                EntityId::new(),
+                UtcTimestamp::from_unix_millis(1),
+                EvolutionEvent::Enable {
+                    acting_identity: ledger_text("installation-owner"),
+                },
+            )
+            .unwrap();
+        drop(daemon);
+
+        let mut reopened = evolution_test_daemon(root);
+        let (status, _) = reopened.execute_evolution_command(EvolutionCommand::Status);
+        let status = evolution_data(status);
+        assert!(status.enabled);
+        assert_eq!(status.state, "enabled");
+    }
 
     fn manifest(root: RootTreeId, session: SessionId) -> RootManifest {
         RootManifest {

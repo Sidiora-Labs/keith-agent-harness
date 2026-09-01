@@ -365,10 +365,10 @@ fn render_overlay(
         }))
     };
     frame.render_widget(list, rows[2]);
-    let help = if overlay == TuiOverlay::Approvals {
-        "Alt-A allow once   Alt-D deny   Esc close"
-    } else {
-        "Enter choose   Tab next   Esc close"
+    let help = match overlay {
+        TuiOverlay::Approvals => "Alt-A allow once   Alt-D deny   Esc close",
+        TuiOverlay::Evolution => "Enter approve/revert   Tab next   Esc close",
+        _ => "Enter choose   Tab next   Esc close",
     };
     frame.render_widget(
         Paragraph::new(help).style(Style::new().bg(palette.layer).fg(palette.muted)),
@@ -385,6 +385,7 @@ const fn overlay_empty(overlay: TuiOverlay) -> &'static str {
         TuiOverlay::Work => "Nothing is in progress. Ask Keith to take care of something.",
         TuiOverlay::Memory => "No saved context is available for this conversation.",
         TuiOverlay::Diagnostics => "Attach a conversation to inspect diagnostics.",
+        TuiOverlay::Evolution => "No evolution history is available.",
     }
 }
 

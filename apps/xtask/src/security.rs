@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use keith_release::{decode_public_key, verify_packaged_build_reports, verify_release};
 use serde::Deserialize;
 
 const REQUIRED_ATTACKS: &[&str] = &[
@@ -47,6 +48,29 @@ const REQUIRED_ATTACKS: &[&str] = &[
     "redirect",
     "refinement_instruction",
     "schedule_isolation",
+    "self_evolution_authority_widening",
+    "self_evolution_candidate_tamper",
+    "self_evolution_crash_recovery",
+    "self_evolution_ledger_tamper",
+    "self_evolution_private_data",
+    "self_evolution_protected_path",
+    "self_evolution_absolute_path",
+    "self_evolution_build_script",
+    "self_evolution_credential_access",
+    "self_evolution_device_path",
+    "self_evolution_filesystem_escape",
+    "self_evolution_generated_output",
+    "self_evolution_network_escape",
+    "self_evolution_output_limit",
+    "self_evolution_process_escape",
+    "self_evolution_proc_macro",
+    "self_evolution_prompt_injection",
+    "self_evolution_rename_escape",
+    "self_evolution_resource_limit",
+    "self_evolution_symlink_escape",
+    "self_evolution_toolchain_override",
+    "self_evolution_unsigned_worker",
+    "self_evolution_workspace_manifest",
     "ssrf",
     "stale_lease",
     "symlink_race",
@@ -65,6 +89,18 @@ const PACKAGED_BINARIES: &[&str] = &[
     "channel-gateway",
     "kernel-runner",
     "tool-runner",
+];
+
+const RELEASE_BLOCKING_CLASSES: &[&str] = &[
+    "credential_exfiltration",
+    "self_evolution_candidate_tamper",
+    "self_evolution_credential_access",
+    "self_evolution_filesystem_escape",
+    "self_evolution_network_escape",
+    "self_evolution_process_escape",
+    "self_evolution_protected_path",
+    "self_evolution_unsigned_worker",
+    "unreversible_state",
 ];
 
 struct Probe {
@@ -249,6 +285,85 @@ const PROBES: &[Probe] = &[
         test: "startup_existing_daemon_crash_report_restart_and_graceful_stop_use_real_processes",
         attacks: &["packaged_desktop"],
     },
+    Probe {
+        package: "keith-self-evolution",
+        test: "build::tests::unsigned_wrongly_signed_and_tampered_worker_images_are_rejected",
+        attacks: &["self_evolution_candidate_tamper"],
+    },
+    Probe {
+        package: "keith-self-evolution",
+        test: "ledger::tests::tampering_quarantines_on_every_reopen",
+        attacks: &["self_evolution_ledger_tamper"],
+    },
+    Probe {
+        package: "keith-self-evolution",
+        test: "ledger::tests::gate_output_is_redacted_bounded_and_private_categories_are_rejected",
+        attacks: &["self_evolution_private_data"],
+    },
+    Probe {
+        package: "keith-self-evolution",
+        test: "guard::tests::guard_refuses_protected_artifacts_and_rename_targets",
+        attacks: &["self_evolution_protected_path"],
+    },
+    Probe {
+        package: "keith-self-evolution",
+        test: "budget::tests::recursion_and_every_authority_widening_capability_are_refused_before_mutation",
+        attacks: &["self_evolution_authority_widening"],
+    },
+    Probe {
+        package: "keith-self-evolution",
+        test: "promotion_crash_boundary_matrix_recovers_to_old_or_fully_committed_state",
+        attacks: &["self_evolution_crash_recovery"],
+    },
+    Probe {
+        package: "keith-self-evolution",
+        test: "traversal_absolute_device_and_symlink_escape_attacks_are_rejected",
+        attacks: &[
+            "self_evolution_absolute_path",
+            "self_evolution_device_path",
+            "self_evolution_symlink_escape",
+        ],
+    },
+    Probe {
+        package: "keith-self-evolution",
+        test: "rename_cannot_cross_into_protected_build_workspace_or_toolchain_surfaces",
+        attacks: &["self_evolution_rename_escape"],
+    },
+    Probe {
+        package: "keith-self-evolution",
+        test: "build_scripts_proc_macro_manifests_generated_output_and_toolchain_are_fail_closed",
+        attacks: &[
+            "self_evolution_build_script",
+            "self_evolution_generated_output",
+            "self_evolution_proc_macro",
+            "self_evolution_toolchain_override",
+            "self_evolution_workspace_manifest",
+        ],
+    },
+    Probe {
+        package: "keith-self-evolution",
+        test: "prompt_injection_cannot_obtain_shell_network_filesystem_or_credentials",
+        attacks: &[
+            "self_evolution_credential_access",
+            "self_evolution_filesystem_escape",
+            "self_evolution_network_escape",
+            "self_evolution_process_escape",
+            "self_evolution_prompt_injection",
+        ],
+    },
+    Probe {
+        package: "keith-self-evolution",
+        test: "sandbox_configuration_refuses_missing_network_cpu_memory_output_or_wall_limits",
+        attacks: &[
+            "self_evolution_output_limit",
+            "self_evolution_resource_limit",
+        ],
+    },
+    Probe {
+        package: "keith-self-evolution",
+        test: "unsigned_wrong_signer_and_tampered_worker_images_are_rejected_at_decode",
+        attacks: &["self_evolution_unsigned_worker"],
+    },
 ];
 
 #[derive(Debug, Deserialize)]
@@ -290,12 +405,9 @@ pub fn run(root: &Path) -> Result<(), String> {
         &fs::read(root.join("security/findings.json"))
             .map_err(|error| format!("security finding ledger is unavailable: {error}"))?,
     )?;
-    run_command(
-        root,
-        "cargo",
-        &["build", "--workspace", "--bins", "--release", "--locked"],
-    )?;
-    verify_packaged_binaries(root)?;
+    let release = required_path("KEITH_SECURITY_RELEASE_PATH")?;
+    let trusted_key = required_text("KEITH_SECURITY_TRUSTED_PUBLIC_KEY")?;
+    verify_packaged_binaries(&release, &trusted_key)?;
 
     let mut packages = BTreeMap::<&str, Vec<&str>>::new();
     for probe in PROBES {
@@ -367,7 +479,8 @@ fn validate_findings(bytes: &[u8]) -> Result<(), String> {
             return Err("security finding ledger contains an invalid finding".into());
         }
         if finding.status == FindingStatus::Open
-            && matches!(finding.severity, Severity::High | Severity::Critical)
+            && (matches!(finding.severity, Severity::High | Severity::Critical)
+                || RELEASE_BLOCKING_CLASSES.contains(&finding.class.as_str()))
         {
             return Err(format!(
                 "release blocked by open {:?} security finding {} ({})",
@@ -406,32 +519,52 @@ fn listed_tests(root: &Path, package: &str) -> Result<BTreeSet<String>, String> 
         .collect())
 }
 
-fn verify_packaged_binaries(root: &Path) -> Result<(), String> {
-    let release = target_directory(root).join("release");
+fn verify_packaged_binaries(release: &Path, trusted_key: &str) -> Result<(), String> {
+    if !release.is_absolute() {
+        return Err("KEITH_SECURITY_RELEASE_PATH must be absolute".into());
+    }
+    let trusted_key = decode_public_key(trusted_key).map_err(|error| error.to_string())?;
+    let verified = verify_release(release, &trusted_key).map_err(|error| error.to_string())?;
+    let host_target = format!("{}-{}", env::consts::ARCH, env::consts::OS);
+    if verified.manifest.target != host_target {
+        return Err(format!(
+            "signed release target {} does not match this host {host_target}",
+            verified.manifest.target
+        ));
+    }
+    if verified.manifest.build_id.trim().is_empty()
+        || verified.manifest.build_id.ends_with("+development")
+    {
+        return Err("security gate requires a freshly assembled non-development release".into());
+    }
     for binary in PACKAGED_BINARIES {
-        let path = release.join(format!("{binary}{}", env::consts::EXE_SUFFIX));
+        let path = release
+            .join("bin")
+            .join(format!("{binary}{}", env::consts::EXE_SUFFIX));
         if !path.is_file() {
             return Err(format!(
-                "packaged release binary is missing: {}",
+                "signed release binary is missing: {}",
                 path.display()
             ));
         }
     }
+    verify_packaged_build_reports(release, &verified.manifest)
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
-fn target_directory(root: &Path) -> PathBuf {
-    env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || root.join("target"),
-        |configured| {
-            let configured = PathBuf::from(configured);
-            if configured.is_absolute() {
-                configured
-            } else {
-                root.join(configured)
-            }
-        },
-    )
+fn required_path(name: &str) -> Result<PathBuf, String> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{name} must name a freshly assembled signed release directory"))
+}
+
+fn required_text(name: &str) -> Result<String, String> {
+    env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("{name} must contain an independently supplied trusted public key"))
 }
 
 fn run_command(root: &Path, program: &str, args: &[&str]) -> Result<(), String> {
@@ -483,5 +616,24 @@ mod tests {
             })
             .unwrap();
         validate_findings(&resolved).unwrap();
+    }
+
+    #[test]
+    fn protected_release_findings_block_at_every_severity() {
+        for class in RELEASE_BLOCKING_CLASSES {
+            let ledger = format!(
+                r#"{{
+                    "schema_version": 1,
+                    "findings": [{{
+                        "id": "SEC-PROTECTED",
+                        "severity": "low",
+                        "status": "open",
+                        "class": "{class}",
+                        "summary": "release invariant failure"
+                    }}]
+                }}"#
+            );
+            assert!(validate_findings(ledger.as_bytes()).is_err(), "{class}");
+        }
     }
 }

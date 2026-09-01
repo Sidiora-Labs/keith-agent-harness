@@ -29,6 +29,8 @@ pub enum Collection {
     AttentionCandidates,
     InitiativeHistory,
     EvolutionTransactions,
+    EvolutionLedger,
+    EvolutionLedgerHead,
     ToolExperience,
     KernelMetadata,
     ActiveOperations,
@@ -59,6 +61,8 @@ impl Collection {
             Self::AttentionCandidates => "attention_candidates",
             Self::InitiativeHistory => "initiative_history",
             Self::EvolutionTransactions => "evolution_transactions",
+            Self::EvolutionLedger => "evolution_ledger",
+            Self::EvolutionLedgerHead => "evolution_ledger_head",
             Self::ToolExperience => "tool_experience",
             Self::KernelMetadata => "kernel_metadata",
             Self::ActiveOperations => "active_operations",
@@ -106,6 +110,19 @@ pub struct CommitReceipt {
     pub applied_mutations: usize,
 }
 
+/// Outcome of the installation-wide, data-control-only evolution ledger erasure.
+///
+/// This operation deliberately has no profile or session scope: the evolution ledger and its
+/// authenticated head are installation-global state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvolutionLedgerErasureReport {
+    pub deleted_records: usize,
+    pub deleted_heads: usize,
+    pub remaining_records: usize,
+    pub remaining_heads: usize,
+}
+
 pub trait ClassifiedRepositoryError: Error + Send + Sync + 'static {
     fn is_conflict(&self) -> bool;
 }
@@ -117,6 +134,44 @@ pub trait AtomicStateRepository: Send + Sync {
     ///
     /// Returns the backend error when validation, persistence, or commit fails.
     fn transact(&self, mutations: &[RecordMutation]) -> Result<CommitReceipt, Self::Error>;
+}
+
+pub trait EvolutionLedgerRepository: Send + Sync {
+    type Error: ClassifiedRepositoryError;
+
+    /// # Errors
+    /// Returns the backend error when the record cannot be read.
+    fn get_evolution_record(&self, id: &EntityId) -> Result<Option<VersionedRecord>, Self::Error>;
+    /// # Errors
+    /// Returns the backend error when the ledger cannot be read.
+    fn list_evolution_records(&self) -> Result<Vec<VersionedRecord>, Self::Error>;
+    /// # Errors
+    /// Returns the backend error when the authenticated head cannot be read.
+    fn get_evolution_head(&self) -> Result<Option<VersionedRecord>, Self::Error>;
+    /// # Errors
+    /// Returns the backend error when the append precondition or commit fails.
+    fn append_evolution_record(
+        &self,
+        record: VersionedRecord,
+        head: VersionedRecord,
+        head_precondition: WritePrecondition,
+    ) -> Result<CommitReceipt, Self::Error>;
+}
+
+/// Privileged repository surface reserved for an explicit data-control erasure flow.
+///
+/// Generic transactions and [`EvolutionLedgerRepository`] remain append-only; consumers must
+/// deliberately import this separate capability to erase both installation-global collections.
+pub trait EvolutionLedgerDataControlRepository: Send + Sync {
+    type Error: ClassifiedRepositoryError;
+
+    /// Atomically erases the signed evolution ledger and its authenticated head.
+    ///
+    /// # Errors
+    /// Returns the backend error when deletion, remnant verification, or commit fails.
+    fn erase_evolution_ledger_for_data_control(
+        &self,
+    ) -> Result<EvolutionLedgerErasureReport, Self::Error>;
 }
 
 macro_rules! repository_trait {

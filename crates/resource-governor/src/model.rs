@@ -65,9 +65,14 @@ pub enum ResourceKind {
     Schedules,
     BackgroundInitiatives,
     McpSessions,
+    EvolutionHypotheses,
+    EvolutionShadowTrees,
+    EvolutionBuilds,
+    EvolutionCanaries,
     Tokens,
     ModelCostMicros,
     WallTimeMs,
+    CpuTimeMs,
     ToolCalls,
     MemoryBytes,
     StorageBytes,
@@ -93,6 +98,10 @@ impl ResourceKind {
                 | Self::Schedules
                 | Self::BackgroundInitiatives
                 | Self::McpSessions
+                | Self::EvolutionHypotheses
+                | Self::EvolutionShadowTrees
+                | Self::EvolutionBuilds
+                | Self::EvolutionCanaries
         )
     }
 
@@ -111,6 +120,10 @@ impl ResourceKind {
             Self::Schedules,
             Self::BackgroundInitiatives,
             Self::McpSessions,
+            Self::EvolutionHypotheses,
+            Self::EvolutionShadowTrees,
+            Self::EvolutionBuilds,
+            Self::EvolutionCanaries,
         ]
     }
 }

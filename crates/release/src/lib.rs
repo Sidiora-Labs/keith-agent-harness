@@ -89,6 +89,24 @@ pub fn decode_public_key(encoded: &str) -> Result<[u8; 32], ReleaseError> {
     decode_hex_exact::<32>(encoded.trim()).map_err(|()| ReleaseError::InvalidPublicKey)
 }
 
+/// Verifies a detached Ed25519 signature with an independently trusted public key.
+///
+/// # Errors
+///
+/// Returns [`ReleaseError::InvalidSignature`] when the signature is malformed or invalid.
+pub fn verify_detached_signature(
+    message: &[u8],
+    signature: &[u8],
+    expected_public_key: &[u8; 32],
+) -> Result<(), ReleaseError> {
+    let signature: [u8; 64] = signature
+        .try_into()
+        .map_err(|_| ReleaseError::InvalidSignature)?;
+    UnparsedPublicKey::new(&ED25519, expected_public_key)
+        .verify(message, &signature)
+        .map_err(|_| ReleaseError::InvalidSignature)
+}
+
 /// Verifies release identity, publisher key, signature, component compatibility, and every file.
 ///
 /// The release's own public-key file is never treated as a trust root. The caller must supply the
@@ -111,9 +129,7 @@ pub fn verify_release(
     }
     let signature = decode_hex_exact::<64>(&fs::read_to_string(root.join(SIGNATURE_FILE))?)
         .map_err(|()| ReleaseError::InvalidSignature)?;
-    UnparsedPublicKey::new(&ED25519, packaged_public_key)
-        .verify(&manifest_bytes, &signature)
-        .map_err(|_| ReleaseError::InvalidSignature)?;
+    verify_detached_signature(&manifest_bytes, &signature, &packaged_public_key)?;
 
     let manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes)?;
     validate_manifest(&manifest)?;

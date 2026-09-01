@@ -48,6 +48,9 @@ pub struct WorkerRegistration {
     pub worker_id: WorkerId,
     pub root_tree_id: RootTreeId,
     pub generation: Generation,
+    pub image_id: String,
+    pub image_manifest_sha256: String,
+    pub source_manifest_sha256: String,
     pub pid: u32,
     pub control_socket: PathBuf,
     pub started_at: UtcTimestamp,
@@ -550,9 +553,13 @@ pub struct WorkerArguments {
     pub lease_database: PathBuf,
     pub control_socket: PathBuf,
     pub grant: LeaseGrant,
+    pub image_id: String,
+    pub image_manifest_sha256: String,
+    pub source_manifest_sha256: String,
     pub heartbeat_interval: Duration,
     pub lease_duration: Duration,
     pub runtime_config: Option<PathBuf>,
+    pub canary: bool,
 }
 
 impl WorkerArguments {
@@ -566,41 +573,7 @@ impl WorkerArguments {
     {
         let mut arguments = arguments.into_iter().map(Into::into);
         let _program = arguments.next();
-        let mut values = std::collections::BTreeMap::new();
-        while let Some(argument) = arguments.next() {
-            let argument = argument
-                .into_string()
-                .map_err(|_| WorkerRuntimeError::InvalidArgument("non-UTF-8 argument".into()))?;
-            let value = arguments.next().ok_or_else(|| {
-                WorkerRuntimeError::InvalidArgument(format!("missing value for {argument}"))
-            })?;
-            let value = value
-                .into_string()
-                .map_err(|_| WorkerRuntimeError::InvalidArgument("non-UTF-8 value".into()))?;
-            if !matches!(
-                argument.as_str(),
-                "--state-dir"
-                    | "--lease-db"
-                    | "--control-socket"
-                    | "--root-tree"
-                    | "--worker-id"
-                    | "--generation"
-                    | "--authentication"
-                    | "--expires-at"
-                    | "--heartbeat-ms"
-                    | "--lease-ms"
-                    | "--runtime-config"
-            ) {
-                return Err(WorkerRuntimeError::InvalidArgument(format!(
-                    "unknown argument {argument}"
-                )));
-            }
-            if values.insert(argument.clone(), value).is_some() {
-                return Err(WorkerRuntimeError::InvalidArgument(format!(
-                    "duplicate argument {argument}"
-                )));
-            }
-        }
+        let (values, canary) = Self::scan_arguments(&mut arguments)?;
         let required = |name: &str| {
             values
                 .get(name)
@@ -619,6 +592,20 @@ impl WorkerArguments {
                 "lease duration must exceed two non-zero heartbeat intervals".into(),
             ));
         }
+        let image_id = required("--image-id")?;
+        if image_id.trim() != image_id || image_id.is_empty() || image_id.len() > 256 {
+            return Err(WorkerRuntimeError::InvalidArgument(
+                "invalid --image-id".into(),
+            ));
+        }
+        let image_manifest_sha256 = required_sha256(
+            &required("--image-manifest-sha256")?,
+            "--image-manifest-sha256",
+        )?;
+        let source_manifest_sha256 = required_sha256(
+            &required("--source-manifest-sha256")?,
+            "--source-manifest-sha256",
+        )?;
         Ok(Self {
             state_dir: PathBuf::from(required("--state-dir")?),
             lease_database: PathBuf::from(required("--lease-db")?),
@@ -640,10 +627,81 @@ impl WorkerArguments {
                     })?,
                 ),
             },
+            image_id,
+            image_manifest_sha256,
+            source_manifest_sha256,
             heartbeat_interval: Duration::from_millis(heartbeat_ms),
             lease_duration: Duration::from_millis(lease_ms),
             runtime_config: values.get("--runtime-config").map(PathBuf::from),
+            canary,
         })
+    }
+
+    fn scan_arguments(
+        arguments: &mut impl Iterator<Item = OsString>,
+    ) -> Result<(std::collections::BTreeMap<String, String>, bool), WorkerRuntimeError> {
+        let mut values = std::collections::BTreeMap::new();
+        let mut canary = false;
+        while let Some(argument) = arguments.next() {
+            let argument = argument
+                .into_string()
+                .map_err(|_| WorkerRuntimeError::InvalidArgument("non-UTF-8 argument".into()))?;
+            if argument == "--canary" {
+                if std::mem::replace(&mut canary, true) {
+                    return Err(WorkerRuntimeError::InvalidArgument(
+                        "duplicate argument --canary".into(),
+                    ));
+                }
+                continue;
+            }
+            let value = arguments.next().ok_or_else(|| {
+                WorkerRuntimeError::InvalidArgument(format!("missing value for {argument}"))
+            })?;
+            let value = value
+                .into_string()
+                .map_err(|_| WorkerRuntimeError::InvalidArgument("non-UTF-8 value".into()))?;
+            if !matches!(
+                argument.as_str(),
+                "--state-dir"
+                    | "--lease-db"
+                    | "--control-socket"
+                    | "--root-tree"
+                    | "--worker-id"
+                    | "--generation"
+                    | "--authentication"
+                    | "--expires-at"
+                    | "--image-id"
+                    | "--image-manifest-sha256"
+                    | "--source-manifest-sha256"
+                    | "--heartbeat-ms"
+                    | "--lease-ms"
+                    | "--runtime-config"
+            ) {
+                return Err(WorkerRuntimeError::InvalidArgument(format!(
+                    "unknown argument {argument}"
+                )));
+            }
+            if values.insert(argument.clone(), value).is_some() {
+                return Err(WorkerRuntimeError::InvalidArgument(format!(
+                    "duplicate argument {argument}"
+                )));
+            }
+        }
+        Ok((values, canary))
+    }
+}
+
+fn required_sha256(value: &str, argument: &str) -> Result<String, WorkerRuntimeError> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(value.to_owned())
+    } else {
+        Err(WorkerRuntimeError::InvalidArgument(format!(
+            "invalid {argument}"
+        )))
     }
 }
 
@@ -758,6 +816,9 @@ fn run_worker_inner(
         worker_id: arguments.grant.worker_id.clone(),
         root_tree_id: arguments.grant.root_tree_id.clone(),
         generation: arguments.grant.generation,
+        image_id: arguments.image_id.clone(),
+        image_manifest_sha256: arguments.image_manifest_sha256.clone(),
+        source_manifest_sha256: arguments.source_manifest_sha256.clone(),
         pid: std::process::id(),
         control_socket: arguments.control_socket.clone(),
         started_at,
@@ -1105,6 +1166,22 @@ pub fn read_registration(path: &Path) -> Result<WorkerRegistration, WorkerRuntim
             registration.version
         )));
     }
+    if registration.image_id.trim() != registration.image_id
+        || registration.image_id.is_empty()
+        || registration.image_id.len() > 256
+    {
+        return Err(WorkerRuntimeError::InvalidArgument(
+            "worker registration has an invalid image identity".into(),
+        ));
+    }
+    required_sha256(
+        &registration.image_manifest_sha256,
+        "worker registration image manifest digest",
+    )?;
+    required_sha256(
+        &registration.source_manifest_sha256,
+        "worker registration source manifest digest",
+    )?;
     Ok(registration)
 }
 
@@ -1139,6 +1216,42 @@ mod tests {
             authentication: EntityId::new(),
             expires_at: UtcTimestamp::from_unix_millis(1_000),
         }
+    }
+
+    fn worker_arguments(
+        root: &RootTreeId,
+        worker: &WorkerId,
+        authentication: &EntityId,
+    ) -> Vec<String> {
+        vec![
+            "agent-worker".into(),
+            "--state-dir".into(),
+            "/state".into(),
+            "--lease-db".into(),
+            "/state/leases.sqlite".into(),
+            "--control-socket".into(),
+            "/state/control.sock".into(),
+            "--root-tree".into(),
+            root.to_string(),
+            "--worker-id".into(),
+            worker.to_string(),
+            "--generation".into(),
+            "3".into(),
+            "--authentication".into(),
+            authentication.to_string(),
+            "--expires-at".into(),
+            "1000".into(),
+            "--image-id".into(),
+            "image-7".into(),
+            "--image-manifest-sha256".into(),
+            "a".repeat(64),
+            "--source-manifest-sha256".into(),
+            "b".repeat(64),
+            "--heartbeat-ms".into(),
+            "10".into(),
+            "--lease-ms".into(),
+            "50".into(),
+        ]
     }
 
     #[test]
@@ -1220,5 +1333,82 @@ mod tests {
         ));
         drop(first);
         WriterGuard::acquire(directory.path(), &grant).unwrap();
+    }
+
+    #[test]
+    fn worker_arguments_require_exact_immutable_image_identity() {
+        let root = RootTreeId::new();
+        let worker = WorkerId::new();
+        let authentication = EntityId::new();
+        let parsed =
+            WorkerArguments::parse(worker_arguments(&root, &worker, &authentication)).unwrap();
+        assert_eq!(parsed.image_id, "image-7");
+        assert_eq!(parsed.image_manifest_sha256, "a".repeat(64));
+        assert_eq!(parsed.source_manifest_sha256, "b".repeat(64));
+        assert!(!parsed.canary);
+
+        let mut canary = worker_arguments(&root, &worker, &authentication);
+        canary.insert(1, "--canary".into());
+        assert!(WorkerArguments::parse(canary).unwrap().canary);
+
+        let mut missing = worker_arguments(&root, &worker, &authentication);
+        let position = missing
+            .iter()
+            .position(|argument| argument == "--image-id")
+            .unwrap();
+        missing.drain(position..=position + 1);
+        assert!(matches!(
+            WorkerArguments::parse(missing),
+            Err(WorkerRuntimeError::InvalidArgument(message)) if message == "--image-id is required"
+        ));
+
+        let mut invalid = worker_arguments(&root, &worker, &authentication);
+        let position = invalid
+            .iter()
+            .position(|argument| argument == "--image-manifest-sha256")
+            .unwrap();
+        invalid[position + 1] = "A".repeat(64);
+        assert!(matches!(
+            WorkerArguments::parse(invalid),
+            Err(WorkerRuntimeError::InvalidArgument(message)) if message == "invalid --image-manifest-sha256"
+        ));
+    }
+
+    #[test]
+    fn registration_round_trip_preserves_exact_image_identity_and_rejects_legacy_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = RootTreeId::new();
+        let now = UtcTimestamp::from_unix_millis(100);
+        let registration = WorkerRegistration {
+            version: CURRENT_SCHEMA_VERSION,
+            worker_id: WorkerId::new(),
+            root_tree_id: root.clone(),
+            generation: Generation::new(3),
+            image_id: "image-7".into(),
+            image_manifest_sha256: "a".repeat(64),
+            source_manifest_sha256: "b".repeat(64),
+            pid: 42,
+            control_socket: directory.path().join("control.sock"),
+            started_at: now,
+            heartbeat_at: now,
+            state: WorkerRunState::Ready,
+        };
+        write_registration(directory.path(), &registration).unwrap();
+        assert_eq!(
+            read_registration(&registration_path(directory.path(), &root)).unwrap(),
+            registration
+        );
+
+        let mut legacy = serde_json::to_value(&registration).unwrap();
+        legacy.as_object_mut().unwrap().remove("image_id");
+        fs::write(
+            registration_path(directory.path(), &root),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_registration(&registration_path(directory.path(), &root)),
+            Err(WorkerRuntimeError::Serialization(_))
+        ));
     }
 }

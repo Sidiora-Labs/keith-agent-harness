@@ -35,6 +35,7 @@ pub enum Feature {
     WebSocket,
     DeliveryDispatch,
     AttachmentStaging,
+    SelfEvolution,
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -116,6 +117,36 @@ pub enum ClientCommand {
     ClaimDelivery { channel: String },
     AcknowledgeDelivery(DeliveryAcknowledgement),
     FailDelivery(DeliveryFailure),
+    Evolution(EvolutionCommand),
+}
+
+/// Installation-scoped self-evolution commands. Authority and credentials deliberately never
+/// cross the client wire; the daemon either performs a command with authority it already owns or
+/// returns an authoritative refusal.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "action", content = "parameters")]
+pub enum EvolutionCommand {
+    Status,
+    Enable {
+        disclosure_acknowledged: bool,
+    },
+    Disable {
+        reason: String,
+    },
+    Approve {
+        hypothesis_id: EntityId,
+    },
+    Revert {
+        promotion_id: EntityId,
+        reason: String,
+    },
+    RestoreBaseline {
+        reason: String,
+    },
+    BrowseLedger {
+        before_sequence: Option<u64>,
+        limit: u16,
+    },
 }
 
 #[derive(Clone, Debug, Default, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -446,6 +477,62 @@ pub enum ResponsePayload {
     Background(BackgroundProjection),
     Artifact(ArtifactId),
     DeliveryClaim(Option<Box<DeliveryDispatch>>),
+    Evolution(Box<EvolutionProjection>),
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvolutionAvailabilityProjection {
+    Available { rustc: String, cargo: String },
+    Unavailable { reasons: Vec<String> },
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct EvolutionDisclosureProjection {
+    pub editable_surface: String,
+    pub protected_surface: String,
+    pub autonomy: String,
+    pub reversal: String,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct EvolutionHypothesisProjection {
+    pub hypothesis_id: EntityId,
+    pub target: String,
+    pub metric: String,
+    pub state: String,
+    pub evidence: Vec<String>,
+    pub measured_result: Option<String>,
+    pub readable_diff: Option<String>,
+    pub approval_required: bool,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct EvolutionLedgerProjection {
+    pub sequence: u64,
+    pub occurred_at: UtcTimestamp,
+    pub kind: String,
+    pub summary: String,
+    pub state: String,
+    pub evidence: Vec<String>,
+    pub measured_result: Option<String>,
+    pub readable_diff: Option<String>,
+    pub hypothesis_id: Option<EntityId>,
+    pub promotion_id: Option<EntityId>,
+    pub reversible: bool,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
+pub struct EvolutionProjection {
+    pub protocol_version: ProtocolVersion,
+    pub enabled: bool,
+    pub state: String,
+    pub availability: EvolutionAvailabilityProjection,
+    pub disclosure: EvolutionDisclosureProjection,
+    pub active: Option<EvolutionHypothesisProjection>,
+    pub ledger: Vec<EvolutionLedgerProjection>,
+    pub has_more_ledger: bool,
+    pub guidance: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize, Deserialize)]
@@ -799,6 +886,7 @@ pub enum DaemonEvent {
     MemoryChanged(MemoryChangeProjection),
     UsageChanged(UsageProjection),
     PresenceChanged(PresenceProjection),
+    EvolutionChanged(Box<EvolutionProjection>),
     ConfirmationRequested {
         confirmation_id: EntityId,
         summary: String,
@@ -1124,10 +1212,35 @@ mod tests {
     fn fixture_and_unknown_command_behavior_are_stable() {
         let fixture = include_bytes!("../tests/fixtures/client-hello-v1.json");
         let decoded = decode(WireFormat::Json, fixture).unwrap();
-        assert_eq!(decoded.protocol(), CURRENT_PROTOCOL_VERSION);
+        assert_eq!(decoded.protocol(), ProtocolVersion::new(1, 0));
 
         let unknown = br#"{"message":"command","payload":{"protocol":{"major":1,"minor":0},"command_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","client_id":"01ARZ3NDEKTSV4RRFFQ69G5FAW","sent_at":0,"session_id":null,"command":{"command":"future_command"}}}"#;
         assert!(decode(WireFormat::Json, unknown).is_err());
+    }
+
+    #[test]
+    fn evolution_wire_contains_intent_but_no_authority_material() {
+        let message = WireMessage::Command(CommandEnvelope {
+            protocol: CURRENT_PROTOCOL_VERSION,
+            command_id: CommandId::new(),
+            client_id: ClientId::new(),
+            sent_at: UtcTimestamp::from_unix_millis(1),
+            session_id: None,
+            command: ClientCommand::Evolution(EvolutionCommand::Enable {
+                disclosure_acknowledged: true,
+            }),
+        });
+        let value: serde_json::Value =
+            serde_json::from_slice(&encode(WireFormat::Json, &message).unwrap()).unwrap();
+        assert_eq!(value["payload"]["command"]["command"], "evolution");
+        assert_eq!(
+            value["payload"]["command"]["parameters"]["action"],
+            "enable"
+        );
+        let encoded = serde_json::to_string(&value).unwrap();
+        assert!(!encoded.contains("credential"));
+        assert!(!encoded.contains("authority"));
+        assert!(!encoded.contains("identity"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ keith-build-info = { path = "../../crates/build-info" }
 keith-daemon-core = { path = "../../crates/daemon-core" }
 keith-local-runtime = { path = "../../crates/local-runtime" }
 keith-platform = { path = "../../crates/platform" }
+keith-self-evolution = { path = "../../crates/self-evolution" }
 keith-worker-runtime = { path = "../../crates/worker-runtime" }
 signal-hook.workspace = true
 serde_json.workspace = true
@@ -22,7 +23,10 @@ keith-agent-types = { path = "../../crates/agent-types" }
 keith-connection = { path = "../../crates/connection" }
 keith-credentials = { path = "../../crates/credentials" }
 keith-protocol = { path = "../../crates/protocol" }
+keith-sandbox = { path = "../../crates/sandbox" }
 nix.workspace = true
+ring.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 

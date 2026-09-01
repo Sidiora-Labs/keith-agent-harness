@@ -46,12 +46,17 @@ import {
   emptyProjection,
   eventSocketUrl,
   executeCommand,
+  evolutionLedgerContent,
+  executeEvolution,
+  evolutionCommand,
+  EVOLUTION_ENABLEMENT_GUIDANCE,
   getBootstrap,
   mergeSessions,
   visibleUserText,
   type BootstrapData,
   type Command,
   type CommandResult,
+  type EvolutionProjection,
   type MemoryResult,
   type MessageProjection,
   type LiveRunProjection,
@@ -433,6 +438,11 @@ export function KeithApp() {
     [runCommand, selectedProfile],
   )
 
+  const runSelectedCommand = useCallback(
+    (command: Command) => runCommand(selectedSession, command),
+    [runCommand, selectedSession],
+  )
+
   const resize = (event: ReactPointerEvent<HTMLDivElement>) => {
     const bounds = rootRef.current?.getBoundingClientRect()
     if (!bounds) return
@@ -574,7 +584,7 @@ export function KeithApp() {
         onSelect={selectConversation}
         onNew={() => void createConversation()}
         onQueryMemory={(query) => void queryMemory(query)}
-        onCommand={(command) => void runCommand(selectedSession, command)}
+        onCommand={runSelectedCommand}
       />
     </main>
   )
@@ -1110,7 +1120,7 @@ function ControlSheet({
   onSelect: (id: string) => void
   onNew: () => void
   onQueryMemory: (query: string) => void
-  onCommand: (command: Command) => void
+  onCommand: (command: Command) => Promise<CommandResult | null>
 }) {
   if (!sheet) return null
   const titles: Record<Exclude<SheetName, null>, string> = {
@@ -1173,11 +1183,62 @@ function SchedulePanel({ profileId, sessionId, snapshot, onCommand }: { profileI
   return <section><form className="panel-form" onSubmit={submit}><label>What should Keith do?<textarea name="prompt" required placeholder="Review the workspace and summarize changes" /></label><label>Repeat every<input name="seconds" type="number" min={60} defaultValue={3600} required /><span className="field-suffix">seconds</span></label><button className="primary-button" type="submit"><Calendar size={16} /> Create schedule</button></form><ProjectionList title="Current schedules" items={snapshot?.schedules ?? []} /></section>
 }
 
-function SettingsPanel({ bootstrap, profileId, sessionId, snapshot, onCommand }: { bootstrap: BootstrapData; profileId: string | null; sessionId: string | null; snapshot: SessionSnapshot | null; onCommand: (command: Command) => void }) {
+function SettingsPanel({ bootstrap, profileId, sessionId, snapshot, onCommand }: { bootstrap: BootstrapData; profileId: string | null; sessionId: string | null; snapshot: SessionSnapshot | null; onCommand: (command: Command) => Promise<CommandResult | null> }) {
   const model = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!sessionId) return; const data = new FormData(event.currentTarget); onCommand({ command: 'select_model', parameters: { session_id: sessionId, provider: String(data.get('provider') ?? '').trim(), model: String(data.get('model') ?? '').trim() } }) }
   const background = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!profileId) return; const mode = String(new FormData(event.currentTarget).get('mode') ?? 'disabled'); onCommand({ command: 'set_background_control', parameters: { profile_id: profileId, mode, pause_until: null } }) }
   const branchPoint = snapshot?.messages.toReversed().find((message) => message.final_id)?.final_id
-  return <div className="stacked-panels">{sessionId ? <section className="settings-section"><h3>Conversation</h3><p className="muted">Resume durable work or branch from the latest committed answer without rewriting history.</p><div className="settings-actions"><button className="secondary-button" onClick={() => onCommand({ command: 'resume_session', parameters: { session_id: sessionId } })}><Refresh size={16} /> Resume</button><button className="secondary-button" disabled={!branchPoint} onClick={() => branchPoint && onCommand({ command: 'branch_session', parameters: { session_id: sessionId, parent_entry_id: branchPoint, label: null } })}><Chat size={16} /> Branch</button></div></section> : null}<section className="settings-section"><h3>Model</h3><form className="panel-form compact" onSubmit={model}><label>Provider<input name="provider" placeholder="xiaomi" required /></label><label>Model<input name="model" placeholder="mimo-v2.5-pro" required /></label><button className="primary-button" type="submit">Use model</button></form></section><section className="settings-section"><h3>Background work</h3><form className="panel-form compact" onSubmit={background}><label>Mode<select name="mode" defaultValue="disabled"><option value="disabled">Disabled</option><option value="suggest">Suggest</option><option value="confirm_selected">Confirm selected</option><option value="bounded">Bounded</option></select></label><button className="primary-button" type="submit">Save mode</button></form></section>{profileId ? <section className="settings-section"><h3>Provider credential</h3><p className="muted">Write-only. The value is submitted directly to Keith and never saved in browser storage.</p><form className="panel-form compact" method="post" action={`/api/profiles/${encodeURIComponent(profileId)}/credentials`}><input type="hidden" name="csrf" value={bootstrap.csrf} /><label>Provider<input name="provider" required placeholder="xiaomi" /></label><label>Credential name<input name="name" required placeholder="api-key" /></label><label>Secret<input name="secret" type="password" required autoComplete="off" /></label><button className="primary-button" type="submit">Save credential</button></form></section> : null}{sessionId ? <section className="settings-section"><h3>Portable export</h3><button className="secondary-button" onClick={() => onCommand({ command: 'export', parameters: { session_id: sessionId, format: 'portable_bundle', include_artifacts: true } })}><Download size={16} /> Prepare export</button></section> : null}</div>
+  return <div className="stacked-panels"><EvolutionPanel onCommand={onCommand} />{sessionId ? <section className="settings-section"><h3>Conversation</h3><p className="muted">Resume durable work or branch from the latest committed answer without rewriting history.</p><div className="settings-actions"><button className="secondary-button" onClick={() => void onCommand({ command: 'resume_session', parameters: { session_id: sessionId } })}><Refresh size={16} /> Resume</button><button className="secondary-button" disabled={!branchPoint} onClick={() => branchPoint && void onCommand({ command: 'branch_session', parameters: { session_id: sessionId, parent_entry_id: branchPoint, label: null } })}><Chat size={16} /> Branch</button></div></section> : null}<section className="settings-section"><h3>Model</h3><form className="panel-form compact" onSubmit={model}><label>Provider<input name="provider" placeholder="xiaomi" required /></label><label>Model<input name="model" placeholder="mimo-v2.5-pro" required /></label><button className="primary-button" type="submit">Use model</button></form></section><section className="settings-section"><h3>Background work</h3><form className="panel-form compact" onSubmit={background}><label>Mode<select name="mode" defaultValue="disabled"><option value="disabled">Disabled</option><option value="suggest">Suggest</option><option value="confirm_selected">Confirm selected</option><option value="bounded">Bounded</option></select></label><button className="primary-button" type="submit">Save mode</button></form></section>{profileId ? <section className="settings-section"><h3>Provider credential</h3><p className="muted">Write-only. The value is submitted directly to Keith and never saved in browser storage.</p><form className="panel-form compact" method="post" action={`/api/profiles/${encodeURIComponent(profileId)}/credentials`}><input type="hidden" name="csrf" value={bootstrap.csrf} /><label>Provider<input name="provider" required placeholder="xiaomi" /></label><label>Credential name<input name="name" required placeholder="api-key" /></label><label>Secret<input name="secret" type="password" required autoComplete="off" /></label><button className="primary-button" type="submit">Save credential</button></form></section> : null}{sessionId ? <section className="settings-section"><h3>Portable export</h3><button className="secondary-button" onClick={() => void onCommand({ command: 'export', parameters: { session_id: sessionId, format: 'portable_bundle', include_artifacts: true } })}><Download size={16} /> Prepare export</button></section> : null}</div>
+}
+
+function EvolutionPanel({ onCommand }: { onCommand: (command: Command) => Promise<CommandResult | null> }) {
+  const [projection, setProjection] = useState<EvolutionProjection | null>(null)
+  const [guidance, setGuidance] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const refresh = useCallback(async () => {
+    setBusy(true)
+    const result = await onCommand(evolutionCommand({ action: 'browse_ledger', parameters: { before_sequence: null, limit: 100 } }))
+    const next = result ? dataFromResult<EvolutionProjection>(result, 'evolution') : undefined
+    if (next) setProjection(next)
+    setBusy(false)
+  }, [onCommand])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const mutate = async (command: Command) => {
+    setBusy(true)
+    const result = await onCommand(command)
+    const next = result ? dataFromResult<EvolutionProjection>(result, 'evolution') : undefined
+    if (next) setProjection(next)
+    setBusy(false)
+  }
+
+  const requestEnable = async () => {
+    setBusy(true)
+    setGuidance(null)
+    try {
+      const bootstrap = await getBootstrap()
+      const result = await executeEvolution(bootstrap, {
+        action: 'enable',
+        parameters: { disclosure_acknowledged: true },
+      })
+      const next = dataFromResult<EvolutionProjection>(result, 'evolution')
+      if (next) setProjection(next)
+    } catch (error) {
+      setGuidance(error instanceof Error ? error.message : EVOLUTION_ENABLEMENT_GUIDANCE)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return <section className="settings-section evolution-panel" aria-label="Self-evolution">
+    <div className="section-heading"><div><h3>Self-evolution</h3><p className="muted">Verified source changes with a permanent audit trail and one-action recovery.</p></div><span className={`status-badge ${projection?.enabled ? 'enabled' : ''}`}>{projection?.enabled ? 'Enabled' : 'Off'}</span></div>
+    {projection ? <dl className="evolution-disclosure"><div><dt>Editable</dt><dd>{projection.disclosure.editable_surface}</dd></div><div><dt>Protected</dt><dd>{projection.disclosure.protected_surface}</dd></div><div><dt>Autonomy</dt><dd>{projection.disclosure.autonomy}</dd></div><div><dt>Recovery</dt><dd>{projection.disclosure.reversal}</dd></div>{'unavailable' in projection.availability ? <div className="availability-warning"><dt>Unavailable</dt><dd>{projection.availability.unavailable.reasons.join(' ')}</dd></div> : null}</dl> : null}
+    {!projection?.enabled ? <div className="owner-boundary"><strong>Installation owner action required</strong><p>{guidance ?? projection?.guidance ?? EVOLUTION_ENABLEMENT_GUIDANCE}</p><button className="secondary-button" disabled={busy} onClick={() => void requestEnable()}>Request enablement</button></div> : <button className="secondary-button" disabled={busy} onClick={() => void mutate(evolutionCommand({ action: 'disable', parameters: { reason: 'Disabled from the authenticated web settings surface' } }))}>Disable self-evolution</button>}
+    {projection?.active ? <article className="evolution-active"><span className="eyebrow">Current change · {friendlyState(projection.active.state)}</span><h4>{projection.active.target}</h4><p><strong>Measure:</strong> {projection.active.metric}</p><div><strong>Evidence</strong><ul>{projection.active.evidence.map((item) => <li key={item}>{item}</li>)}</ul></div>{projection.active.readable_diff ? <details><summary>Readable source changes</summary><pre>{projection.active.readable_diff}</pre></details> : null}{projection.active.measured_result ? <p><strong>Measured result:</strong> {projection.active.measured_result}</p> : null}{projection.active.approval_required ? <button className="primary-button" disabled={busy} onClick={() => void mutate(evolutionCommand({ action: 'approve', parameters: { hypothesis_id: projection.active!.hypothesis_id } }))}><Check size={16} /> Approve this change</button> : null}</article> : null}
+    <div className="evolution-ledger"><div className="section-heading"><h4>Change history</h4><button className="text-button" disabled={busy} onClick={() => void refresh()}>Refresh</button></div>{projection?.ledger.length ? projection.ledger.map((entry) => { const content = evolutionLedgerContent(entry); return <article className="evolution-record" key={entry.sequence}><div><strong>{friendlyActivity(entry.kind)}</strong><time>{formatTimestamp(entry.occurred_at)}</time></div><p>{content.summary}</p><small>{friendlyState(content.state)}</small>{content.evidence.length ? <details><summary>Evidence</summary><ul>{content.evidence.map((item) => <li key={item}>{item}</li>)}</ul></details> : null}{content.readableDiff ? <details><summary>Readable source changes</summary><pre>{content.readableDiff}</pre></details> : null}{content.measuredResult ? <p><strong>Measured result:</strong> {content.measuredResult}</p> : null}{content.canRevert ? <button className="secondary-button" disabled={busy} onClick={() => void mutate(evolutionCommand({ action: 'revert', parameters: { promotion_id: entry.promotion_id!, reason: 'Owner selected one-action reversal in change history' } }))}><Refresh size={15} /> Revert</button> : null}</article> }) : <EmptyPanel icon={<Activity size={22} />} title="No recorded changes" copy="Verified proposals, results, promotions, and reversals will appear here in ordinary language." />}</div>
+    <div className="baseline-restore"><div><strong>Restore human-approved baseline</strong><p>Revert every self-evolution change in one action. This does not erase the audit history.</p></div><button className="danger-button" disabled={busy} onClick={() => void mutate(evolutionCommand({ action: 'restore_baseline', parameters: { reason: 'Owner selected baseline restore from web settings' } }))}>Restore baseline</button></div>
+  </section>
 }
 
 function FormCard({ icon, title, name, placeholder, onSubmit }: { icon: ReactNode; title: string; name: string; placeholder: string; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
@@ -1207,6 +1268,14 @@ function connectionLabel(connection: ConnectionState, active: boolean): string {
 function friendlyState(value: string): string {
   if (!value) return 'Ready'
   return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function formatTimestamp(value: number | string): string {
+  const date = new Date(typeof value === 'number' && value < 10_000_000_000 ? value * 1_000 : value)
+  return Number.isNaN(date.valueOf()) ? 'Recorded' : new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date)
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

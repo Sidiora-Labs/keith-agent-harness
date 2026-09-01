@@ -1,5 +1,12 @@
 #![forbid(unsafe_code)]
 
+mod image;
+
+pub use image::{
+    ImageInstallRequest, ImageRegistryError, InstalledImage, WorkerImageDataInventory,
+    WorkerImageRegistry, worker_image_data_inventory,
+};
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,6 +29,7 @@ use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 #[cfg(unix)]
 use nix::unistd::Pid;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,11 +52,24 @@ pub struct WorkerStatus {
     pub worker_id: WorkerId,
     pub root_tree_id: RootTreeId,
     pub generation: Generation,
+    pub image_id: String,
+    pub image_manifest_sha256: String,
+    pub source_manifest_sha256: String,
     pub pid: u32,
     pub health: WorkerHealth,
     pub heartbeat_at: UtcTimestamp,
     pub idle_for: Duration,
     pub resources: WorkerResourceState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkerRollProof {
+    pub root_tree_id: RootTreeId,
+    pub previous_generation: Generation,
+    pub previous_image_id: String,
+    pub generation: Generation,
+    pub image_id: String,
+    pub health: WorkerHealth,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -100,7 +121,9 @@ pub struct WorkerSupervisor {
     control_directory: PathBuf,
     next_control_id: u64,
     lease_database: PathBuf,
-    executable: PathBuf,
+    images: WorkerImageRegistry,
+    pinned_images: BTreeMap<String, InstalledImage>,
+    canary_mode: bool,
     runtime_config: Option<PathBuf>,
     options: SupervisorOptions,
     leases: LeaseManager,
@@ -111,6 +134,8 @@ pub struct WorkerSupervisor {
 pub enum SupervisorError {
     #[error("worker process I/O failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Image(#[from] ImageRegistryError),
     #[error("worker registration failed: {0}")]
     Registration(#[from] keith_worker_runtime::WorkerRuntimeError),
     #[error(transparent)]
@@ -141,6 +166,16 @@ pub enum SupervisorError {
     Runtime(String),
     #[error("worker returned a result for a different runtime request")]
     MismatchedRuntimeResponse,
+    #[error(
+        "worker {root_tree_id} failed to roll to image {candidate_image_id}: {roll_error}; rollback to {previous_image_id} failed: {rollback_error}"
+    )]
+    RollbackFailed {
+        root_tree_id: RootTreeId,
+        candidate_image_id: String,
+        previous_image_id: String,
+        roll_error: String,
+        rollback_error: String,
+    },
 }
 
 impl WorkerSupervisor {
@@ -154,7 +189,7 @@ impl WorkerSupervisor {
         executable: impl Into<PathBuf>,
         options: SupervisorOptions,
     ) -> Result<Self, SupervisorError> {
-        Self::open_internal(state_dir.into(), executable.into(), options, None)
+        Self::open_internal(state_dir.into(), &executable.into(), options, None)
     }
 
     /// Opens a supervisor that passes a non-secret runtime configuration to every worker.
@@ -170,7 +205,7 @@ impl WorkerSupervisor {
     ) -> Result<Self, SupervisorError> {
         Self::open_internal(
             state_dir.into(),
-            executable.into(),
+            &executable.into(),
             options,
             Some(runtime_config.into()),
         )
@@ -178,7 +213,7 @@ impl WorkerSupervisor {
 
     fn open_internal(
         state_dir: PathBuf,
-        executable: PathBuf,
+        executable: &Path,
         options: SupervisorOptions,
         runtime_config: Option<PathBuf>,
     ) -> Result<Self, SupervisorError> {
@@ -190,6 +225,7 @@ impl WorkerSupervisor {
         fs::create_dir_all(&state_dir)?;
         let lease_database = state_dir.join("leases.sqlite");
         let leases = LeaseManager::open(&lease_database)?;
+        let images = WorkerImageRegistry::open(state_dir.join("worker-images"), executable)?;
         let control_directory =
             std::env::temp_dir().join(format!("keith-agent-control-{}", WorkerId::new()));
         Ok(Self {
@@ -197,7 +233,9 @@ impl WorkerSupervisor {
             control_directory,
             next_control_id: 1,
             lease_database,
-            executable,
+            images,
+            pinned_images: BTreeMap::new(),
+            canary_mode: false,
             runtime_config,
             options,
             leases,
@@ -242,6 +280,12 @@ impl WorkerSupervisor {
             {
                 continue;
             }
+            let image = self.resolve_image(&registration.image_id)?;
+            if registration.image_manifest_sha256 != image.manifest_sha256
+                || registration.source_manifest_sha256 != image.source_manifest_sha256
+            {
+                return Err(SupervisorError::Image(ImageRegistryError::ArtifactMismatch));
+            }
             let control = connect_control(&registration, &grant, self.options.startup_timeout)?;
             self.workers
                 .entry(registration.root_tree_id.clone())
@@ -263,6 +307,41 @@ impl WorkerSupervisor {
     ///
     /// Returns an error when a live worker exists or claim, process, or handshake fails.
     pub fn start(&mut self, root_tree_id: RootTreeId) -> Result<WorkerStatus, SupervisorError> {
+        let image = self.images.resolve_current()?;
+        self.start_with_image(root_tree_id, &image)
+    }
+
+    /// Registers an already verified immutable candidate and enables the credential-free canary
+    /// worker entry point. The candidate identity is preserved in registration and generation
+    /// state rather than being replaced with a bootstrap identity.
+    ///
+    /// # Errors
+    /// Returns an error when the image bytes no longer match their installed digest.
+    pub fn pin_canary_image(&mut self, image: InstalledImage) -> Result<(), SupervisorError> {
+        verify_pinned_image(&image)?;
+        self.canary_mode = true;
+        self.pinned_images.insert(image.image_id.clone(), image);
+        Ok(())
+    }
+
+    /// Starts a worker generation bound to one exact pinned candidate image.
+    ///
+    /// # Errors
+    /// Returns an error when the image is absent, altered, or worker startup fails.
+    pub fn start_pinned(
+        &mut self,
+        root_tree_id: RootTreeId,
+        image_id: &str,
+    ) -> Result<WorkerStatus, SupervisorError> {
+        let image = self.resolve_image(image_id)?;
+        self.start_with_image(root_tree_id, &image)
+    }
+
+    fn start_with_image(
+        &mut self,
+        root_tree_id: RootTreeId,
+        image: &InstalledImage,
+    ) -> Result<WorkerStatus, SupervisorError> {
         if self
             .workers
             .get(&root_tree_id)
@@ -278,7 +357,7 @@ impl WorkerSupervisor {
             .control_directory
             .join(format!("worker-{}.sock", self.next_control_id));
         self.next_control_id = self.next_control_id.saturating_add(1);
-        let mut child = match self.spawn(&grant, &control_socket) {
+        let mut child = match self.spawn(&grant, &control_socket, image) {
             Ok(child) => child,
             Err(error) => {
                 let _ = self.leases.release(&grant);
@@ -299,6 +378,9 @@ impl WorkerSupervisor {
                 && registration.pid == child.id()
                 && registration.worker_id == grant.worker_id
                 && registration.generation == grant.generation
+                && registration.image_id == image.image_id
+                && registration.image_manifest_sha256 == image.manifest_sha256
+                && registration.source_manifest_sha256 == image.source_manifest_sha256
                 && registration.state == WorkerRunState::Ready
             {
                 match connect_control(&registration, &grant, self.options.startup_timeout) {
@@ -336,10 +418,29 @@ impl WorkerSupervisor {
         }
     }
 
-    fn spawn(&self, grant: &LeaseGrant, control_socket: &Path) -> Result<Child, SupervisorError> {
+    fn resolve_image(&self, image_id: &str) -> Result<InstalledImage, SupervisorError> {
+        if let Some(image) = self.pinned_images.get(image_id) {
+            verify_pinned_image(image)?;
+            return Ok(image.clone());
+        }
+        Ok(self.images.resolve(image_id)?)
+    }
+
+    fn spawn(
+        &self,
+        grant: &LeaseGrant,
+        control_socket: &Path,
+        image: &InstalledImage,
+    ) -> Result<Child, SupervisorError> {
         let heartbeat_ms = self.options.heartbeat_interval.as_millis().max(1);
         let lease_ms = self.options.lease_duration.as_millis().max(1);
-        let mut command = Command::new(&self.executable);
+        let mut command = Command::new(&image.executable);
+        if self.canary_mode {
+            command.env_clear().arg("--canary");
+            if let Some(path) = std::env::var_os("PATH") {
+                command.env("PATH", path);
+            }
+        }
         command
             .arg("--state-dir")
             .arg(&self.state_dir)
@@ -353,6 +454,12 @@ impl WorkerSupervisor {
             .arg(grant.worker_id.to_string())
             .arg("--generation")
             .arg(grant.generation.get().to_string())
+            .arg("--image-id")
+            .arg(&image.image_id)
+            .arg("--image-manifest-sha256")
+            .arg(&image.manifest_sha256)
+            .arg("--source-manifest-sha256")
+            .arg(&image.source_manifest_sha256)
             .arg("--authentication")
             .arg(grant.authentication.to_string())
             .arg("--expires-at")
@@ -364,12 +471,38 @@ impl WorkerSupervisor {
         if let Some(runtime_config) = &self.runtime_config {
             command.arg("--runtime-config").arg(runtime_config);
         }
-        command
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(SupervisorError::from)
+            .map_err(SupervisorError::from)?;
+        Ok(child)
+    }
+
+    #[must_use]
+    pub const fn image_registry(&self) -> &WorkerImageRegistry {
+        &self.images
+    }
+
+    pub const fn image_registry_mut(&mut self) -> &mut WorkerImageRegistry {
+        &mut self.images
+    }
+
+    /// Reclaims superseded images while protecting every live generation's bound image.
+    ///
+    /// # Errors
+    /// Returns an error when registry persistence or filesystem reclamation fails.
+    pub fn reclaim_images(
+        &mut self,
+        retained_history: usize,
+    ) -> Result<Vec<String>, SupervisorError> {
+        let live = self
+            .workers
+            .values()
+            .map(|worker| worker.registration.image_id.clone())
+            .collect();
+        Ok(self.images.reclaim(retained_history, &live)?)
     }
 
     pub fn statuses(&self) -> Vec<WorkerStatus> {
@@ -377,6 +510,11 @@ impl WorkerSupervisor {
             .values()
             .map(|worker| status_for(worker, self.options.stale_heartbeat))
             .collect()
+    }
+
+    /// Returns the exact roots currently owned by live supervisor generations.
+    pub fn active_roots(&self) -> Vec<RootTreeId> {
+        self.workers.keys().cloned().collect()
     }
 
     pub fn status(&self, root_tree_id: &RootTreeId) -> Option<WorkerStatus> {
@@ -683,6 +821,99 @@ impl WorkerSupervisor {
         self.start(root_tree_id.clone())
     }
 
+    /// Gracefully rolls one active root to one exact installed image.
+    ///
+    /// The current image is captured before drain. If candidate startup fails, the root is
+    /// restarted from that exact image rather than from the registry's mutable current pointer.
+    /// A successful return proves both a strictly newer generation and the requested healthy
+    /// image identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the root is inactive, the candidate is not installed or verified,
+    /// drain/startup fails, or rollback cannot restore the pinned previous image.
+    pub fn roll_to_image(
+        &mut self,
+        root_tree_id: &RootTreeId,
+        candidate_image_id: &str,
+    ) -> Result<WorkerRollProof, SupervisorError> {
+        let previous = self
+            .status(root_tree_id)
+            .ok_or_else(|| SupervisorError::NotActive(root_tree_id.clone()))?;
+        self.resolve_image(candidate_image_id)?;
+        self.drain(root_tree_id)?;
+        match self.start_pinned(root_tree_id.clone(), candidate_image_id) {
+            Ok(candidate)
+                if candidate.generation > previous.generation
+                    && candidate.image_id == candidate_image_id
+                    && candidate.health == WorkerHealth::Healthy =>
+            {
+                Ok(WorkerRollProof {
+                    root_tree_id: root_tree_id.clone(),
+                    previous_generation: previous.generation,
+                    previous_image_id: previous.image_id,
+                    generation: candidate.generation,
+                    image_id: candidate.image_id,
+                    health: candidate.health,
+                })
+            }
+            Ok(candidate) => {
+                let roll_error = format!(
+                    "replacement proof mismatch: generation {:?}, image {}, health {:?}",
+                    candidate.generation, candidate.image_id, candidate.health
+                );
+                let _ = self.drain(root_tree_id);
+                self.rollback_after_failed_roll(
+                    root_tree_id,
+                    candidate_image_id,
+                    previous,
+                    roll_error,
+                )
+            }
+            Err(error) => self.rollback_after_failed_roll(
+                root_tree_id,
+                candidate_image_id,
+                previous,
+                error.to_string(),
+            ),
+        }
+    }
+
+    /// Compatibility name for exact-image generation replacement used by promotion orchestration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the image is absent, altered, or worker startup fails.
+    pub fn restart_with_image(
+        &mut self,
+        root_tree_id: &RootTreeId,
+        image_id: &str,
+    ) -> Result<WorkerRollProof, SupervisorError> {
+        self.roll_to_image(root_tree_id, image_id)
+    }
+
+    fn rollback_after_failed_roll(
+        &mut self,
+        root_tree_id: &RootTreeId,
+        candidate_image_id: &str,
+        previous: WorkerStatus,
+        roll_error: String,
+    ) -> Result<WorkerRollProof, SupervisorError> {
+        match self.start_pinned(root_tree_id.clone(), &previous.image_id) {
+            Ok(_) => Err(SupervisorError::Runtime(format!(
+                "worker {root_tree_id} roll to image {candidate_image_id} failed and previous image {} was restored: {roll_error}",
+                previous.image_id
+            ))),
+            Err(rollback_error) => Err(SupervisorError::RollbackFailed {
+                root_tree_id: root_tree_id.clone(),
+                candidate_image_id: candidate_image_id.into(),
+                previous_image_id: previous.image_id,
+                roll_error,
+                rollback_error: rollback_error.to_string(),
+            }),
+        }
+    }
+
     /// Drains workers whose supervisor-observed activity exceeds `idle_limit`.
     ///
     /// # Errors
@@ -969,6 +1200,9 @@ fn status_for(worker: &ManagedWorker, stale_heartbeat: Duration) -> WorkerStatus
         worker_id: worker.registration.worker_id.clone(),
         root_tree_id: worker.registration.root_tree_id.clone(),
         generation: worker.registration.generation,
+        image_id: worker.registration.image_id.clone(),
+        image_manifest_sha256: worker.registration.image_manifest_sha256.clone(),
+        source_manifest_sha256: worker.registration.source_manifest_sha256.clone(),
         pid: worker.registration.pid,
         health,
         heartbeat_at: worker.registration.heartbeat_at,
@@ -1053,6 +1287,28 @@ fn add_duration(timestamp: UtcTimestamp, duration: Duration) -> Option<UtcTimest
         .map(UtcTimestamp::from_unix_millis)
 }
 
+fn verify_pinned_image(image: &InstalledImage) -> Result<(), SupervisorError> {
+    let metadata = fs::symlink_metadata(&image.executable)?;
+    if !image.verified || !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(SupervisorError::Image(ImageRegistryError::ArtifactMismatch));
+    }
+    let digest = Sha256::digest(fs::read(&image.executable)?).iter().fold(
+        String::new(),
+        |mut value, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(value, "{byte:02x}");
+            value
+        },
+    );
+    if digest != image.executable_sha256
+        || image.image_id != image.manifest_sha256
+        || image.source_manifest_sha256.len() != 64
+    {
+        return Err(SupervisorError::Image(ImageRegistryError::ArtifactMismatch));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1060,9 +1316,13 @@ mod tests {
     #[test]
     fn missing_registration_directory_is_an_empty_adoption_set() {
         let directory = tempfile::tempdir().unwrap();
+        // The registry bootstraps by hashing the worker executable, so it must exist.
+        // This worker is never started; only the empty adoption set is under test.
+        let executable = directory.path().join("agent-worker");
+        std::fs::write(&executable, b"not started by this test").unwrap();
         let mut supervisor = WorkerSupervisor::open(
-            directory.path(),
-            "/not/started/by-this-test",
+            directory.path().join("state"),
+            &executable,
             SupervisorOptions::default(),
         )
         .unwrap();

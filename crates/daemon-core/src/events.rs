@@ -445,6 +445,7 @@ fn apply_event(
             .confirmations
             .retain(|item| item.confirmation_id != *confirmation_id),
         DaemonEvent::AgentActivity(_)
+        | DaemonEvent::EvolutionChanged(_)
         | DaemonEvent::CommandAccepted { .. }
         | DaemonEvent::CommandRejected(_)
         | DaemonEvent::Warning(_)

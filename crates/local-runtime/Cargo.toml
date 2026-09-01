@@ -42,6 +42,7 @@ keith-resource-governor = { path = "../resource-governor" }
 keith-reviewer = { path = "../reviewer" }
 keith-routing = { path = "../routing" }
 keith-runtime-api = { path = "../runtime-api" }
+keith-self-evolution = { path = "../self-evolution" }
 keith-scheduler = { path = "../scheduler" }
 keith-session = { path = "../session" }
 keith-session-store = { path = "../session-store" }

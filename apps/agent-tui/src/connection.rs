@@ -568,6 +568,7 @@ fn client_hello(client_id: ClientId, resume: Option<ResumeCursor>) -> ClientHell
             Feature::Confirmations,
             Feature::Export,
             Feature::BackgroundControls,
+            Feature::SelfEvolution,
             Feature::Replay,
             Feature::Snapshots,
             Feature::FramedJson,

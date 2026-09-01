@@ -121,11 +121,15 @@ use keith_routing::{
     RouteResolver, SessionPolicy,
 };
 use keith_runtime_api::{
-    AcceptedPrompt, CommandRuntime, NoRuntimeEvents, RuntimeAgentOutcome, RuntimeEvent,
-    RuntimeEventKind, RuntimeEventSink, RuntimeSession,
+    AcceptedPrompt, CandidateCanaryMeasurement, CandidateCanaryOutcome, CandidateCanaryReport,
+    CandidateCanaryRequest, CandidateCanaryVerdict, CommandRuntime, NoRuntimeEvents,
+    RuntimeAgentOutcome, RuntimeEvent, RuntimeEventKind, RuntimeEventSink, RuntimeSession,
 };
 use keith_scheduler::{
     JobState, JobUpdate, MissedRunPolicy, NewScheduledJob, ScheduleSpec, Scheduler, SchedulerConfig,
+};
+use keith_self_evolution::{
+    CandidateOutcome, CorpusError, ReplayOutcome, ReplayTape, ReplayVerdict, TraceReplay, TraceStep,
 };
 use keith_session_store::{
     CompactionFailureStage, CompactionOutput, CompactionPolicy, CompactionRequest,
@@ -303,6 +307,22 @@ pub struct LocalRuntime {
     owner_instance: EntityId,
     system_modules: SystemModules,
     profile_modules: Mutex<BTreeMap<ProfileId, Arc<ProfileModules>>>,
+}
+
+/// Credential-free runtime used only by an isolated candidate worker.
+pub struct CandidateCanaryRuntime;
+
+impl CandidateCanaryRuntime {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for CandidateCanaryRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 struct RuntimeContextCompactor<'a> {
@@ -3872,6 +3892,7 @@ impl LocalRuntime {
                 | ActionSource::Waiting { .. }
                 | ActionSource::Awareness { .. }
                 | ActionSource::Refinement { .. }
+                | ActionSource::Evolution { .. }
                 | ActionSource::AutonomousContinuation { .. } => TurnIngress::Controller {
                     source_id: format!("action:{action_id}"),
                     action_id: Some(action_id.clone()),
@@ -4623,6 +4644,26 @@ impl LocalRuntime {
                 }),
             ActionPayload::Awareness { summary, .. } => Ok(summary.clone()),
             ActionPayload::SystemMaintenance { operation } => Ok(operation.clone()),
+            ActionPayload::Evolution { operation } => Ok(match operation {
+                keith_action_store::EvolutionOperation::EvaluateHypothesis => {
+                    "Evaluate the admitted self-evolution hypothesis".into()
+                }
+                keith_action_store::EvolutionOperation::PrepareShadow => {
+                    "Prepare the admitted isolated self-evolution shadow".into()
+                }
+                keith_action_store::EvolutionOperation::BuildCandidate => {
+                    "Build the admitted self-evolution candidate in its sandbox".into()
+                }
+                keith_action_store::EvolutionOperation::RunCanary => {
+                    "Run the admitted candidate canary".into()
+                }
+                keith_action_store::EvolutionOperation::ObservePromotion => {
+                    "Observe the admitted promotion window".into()
+                }
+                keith_action_store::EvolutionOperation::ReclaimResources => {
+                    "Reclaim the admitted self-evolution resources".into()
+                }
+            }),
             ActionPayload::ResumeWaiting { waiting_id } => {
                 let manifest = self.sessions.manifest(session_id)?;
                 let commitment = self
@@ -6243,6 +6284,7 @@ fn action_source_name(source: &ActionSource) -> &'static str {
         ActionSource::Waiting { .. } => "waiting",
         ActionSource::Awareness { .. } => "awareness",
         ActionSource::Refinement { .. } => "refinement",
+        ActionSource::Evolution { .. } => "evolution",
         ActionSource::AutonomousContinuation { .. } => "autonomous_continuation",
     }
 }
@@ -6263,6 +6305,9 @@ fn delivery_source(action: &SessionAction) -> DeliverySource {
         ActionSource::Awareness { event_id } => DeliverySource::Attention(event_id.clone()),
         ActionSource::Refinement { transaction_id } => {
             DeliverySource::Refinement(transaction_id.clone())
+        }
+        ActionSource::Evolution { generation_id, .. } => {
+            DeliverySource::Refinement(generation_id.clone())
         }
         ActionSource::AutonomousContinuation { goal_id } => DeliverySource::Goal(goal_id.clone()),
     }
@@ -9416,6 +9461,214 @@ impl From<keith_tool_runner_core::RunError> for LocalRuntimeError {
     }
 }
 
+fn canary_candidate(
+    trace: &[TraceStep],
+    tape: &mut ReplayTape,
+) -> Result<CandidateOutcome, CorpusError> {
+    let fingerprint = trace
+        .iter()
+        .find_map(|step| match step {
+            TraceStep::ProviderRequest { fingerprint } => Some(fingerprint.as_str()),
+            _ => None,
+        })
+        .ok_or_else(|| CorpusError::Candidate("provider request is absent".into()))?;
+    tape.expect_provider_request(fingerprint)?;
+    let mut outcome = ReplayOutcome::Failed;
+    let mut output = Vec::new();
+    let mut tokens = 0;
+    let mut operations = 1_u64;
+    while tape.peek_kind() == Some("provider_event") {
+        match tape.next_provider_event()? {
+            ModelEvent::TextDelta { text } => output.extend_from_slice(text.as_bytes()),
+            ModelEvent::Usage { usage } => tokens = usage.total_tokens(),
+            ModelEvent::Finished { reason } => {
+                outcome = match reason {
+                    StopReason::EndTurn => ReplayOutcome::Completed,
+                    StopReason::ToolUse => ReplayOutcome::ToolUse,
+                    StopReason::ContentRejected => ReplayOutcome::Rejected,
+                    _ => ReplayOutcome::Failed,
+                };
+            }
+            _ => {}
+        }
+    }
+    if let Ok(usage) = tape.next_provider_terminal()? {
+        tokens = usage.total_tokens();
+    }
+    let invocations = trace
+        .iter()
+        .filter_map(|step| match step {
+            TraceStep::ToolInvocation {
+                call_id,
+                name,
+                arguments,
+            } => Some((call_id.as_str(), name.as_str(), arguments)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut invocation = 0_usize;
+    let mut first_clock = None;
+    let mut last_clock = None;
+    while let Some(kind) = tape.peek_kind() {
+        match kind {
+            "tool_invocation" => {
+                let (call_id, name, arguments) = invocations
+                    .get(invocation)
+                    .ok_or_else(|| CorpusError::Candidate("unexpected tool invocation".into()))?;
+                tape.expect_tool_invocation(call_id, name, arguments)?;
+                invocation += 1;
+                operations = operations.saturating_add(1);
+            }
+            "tool_event" => {
+                let _ = tape.next_tool_event()?;
+            }
+            "tool_outcome" => {
+                let (_, tool_outcome) = tape.next_tool_outcome()?;
+                if let Some(bytes) = tool_outcome.output {
+                    output.extend_from_slice(&bytes);
+                }
+            }
+            "clock" => {
+                let now = tape.next_clock_millis()?;
+                first_clock.get_or_insert(now);
+                last_clock = Some(now);
+            }
+            "random" => {
+                let _ = tape.next_random_byte()?;
+            }
+            other => return Err(CorpusError::Candidate(format!("unexpected {other} step"))),
+        }
+    }
+    let latency_ms = last_clock
+        .unwrap_or_default()
+        .checked_sub(first_clock.unwrap_or_default())
+        .ok_or_else(|| CorpusError::Candidate("recorded clock regressed".into()))?
+        .try_into()
+        .map_err(|_| CorpusError::Candidate("recorded latency is invalid".into()))?;
+    Ok(CandidateOutcome {
+        outcome,
+        output,
+        tokens,
+        latency_ms,
+        operations,
+    })
+}
+
+fn unavailable<T>() -> Result<T, String> {
+    Err("canary worker rejects ordinary runtime operations".into())
+}
+
+impl CommandRuntime for CandidateCanaryRuntime {
+    fn profiles(&self) -> Result<Vec<ProfileSummary>, String> {
+        unavailable()
+    }
+    fn sessions(&self) -> Result<Vec<RuntimeSession>, String> {
+        unavailable()
+    }
+    fn create_default_session(&self, _: Option<String>) -> Result<RuntimeSession, String> {
+        unavailable()
+    }
+    fn create_session(&self, _: &keith_protocol::CreateSession) -> Result<RuntimeSession, String> {
+        unavailable()
+    }
+    fn create_default_session_assigned(
+        &self,
+        _: &SessionId,
+        _: &RootTreeId,
+        _: Option<String>,
+    ) -> Result<RuntimeSession, String> {
+        unavailable()
+    }
+    fn create_session_assigned(
+        &self,
+        _: &SessionId,
+        _: &RootTreeId,
+        _: &keith_protocol::CreateSession,
+    ) -> Result<RuntimeSession, String> {
+        unavailable()
+    }
+    fn select_model(&self, _: &keith_protocol::ModelSelection) -> Result<(), String> {
+        unavailable()
+    }
+    fn run_prompt(
+        &self,
+        _: &keith_protocol::SubmitPrompt,
+        _: Generation,
+    ) -> Result<SessionSnapshot, String> {
+        unavailable()
+    }
+    fn cancel_active(&self, _: &SessionId) -> Result<bool, String> {
+        unavailable()
+    }
+    fn snapshot(
+        &self,
+        _: &SessionId,
+        _: Generation,
+        _: SessionState,
+    ) -> Result<SessionSnapshot, String> {
+        unavailable()
+    }
+    fn execute_feature(
+        &self,
+        _: &ClientId,
+        _: Option<&SessionId>,
+        _: &ClientCommand,
+        _: Generation,
+    ) -> Result<CommandResult, String> {
+        unavailable()
+    }
+    fn maintain(&self) -> Result<(), String> {
+        unavailable()
+    }
+
+    fn candidate_canary(
+        &self,
+        request: &CandidateCanaryRequest,
+    ) -> Result<CandidateCanaryReport, String> {
+        let replay = TraceReplay::checked_in().map_err(|error| error.to_string())?;
+        let corpus = replay.corpus();
+        if request.corpus_version != corpus.version
+            || request.corpus_sha256 != corpus.content_sha256
+        {
+            return Err("candidate corpus identity differs from requested corpus".into());
+        }
+        let mut measurements = Vec::with_capacity(corpus.journeys.len());
+        for journey in &corpus.journeys {
+            let trace = journey.trace.clone();
+            let (measurement, verdict) = replay
+                .replay(&journey.id, |tape| canary_candidate(&trace, tape))
+                .map_err(|error| format!("journey {} failed: {error}", journey.id))?;
+            measurements.push(CandidateCanaryMeasurement {
+                journey_id: journey.id.clone(),
+                outcome: match measurement.outcome {
+                    ReplayOutcome::Completed => CandidateCanaryOutcome::Completed,
+                    ReplayOutcome::ToolUse => CandidateCanaryOutcome::ToolUse,
+                    ReplayOutcome::Rejected => CandidateCanaryOutcome::Rejected,
+                    ReplayOutcome::Failed => CandidateCanaryOutcome::Failed,
+                },
+                output_sha256: measurement.digest,
+                tokens: measurement.tokens,
+                latency_ms: measurement.latency_ms,
+                operations: measurement.operations,
+                verdict: match verdict {
+                    ReplayVerdict::Improved => CandidateCanaryVerdict::Improved,
+                    ReplayVerdict::Equivalent => CandidateCanaryVerdict::Equivalent,
+                    ReplayVerdict::Regressed => CandidateCanaryVerdict::Regressed,
+                    ReplayVerdict::Inconclusive => CandidateCanaryVerdict::Inconclusive,
+                },
+            });
+        }
+        if measurements.len() != 7 {
+            return Err("candidate corpus did not produce all seven journeys".into());
+        }
+        Ok(CandidateCanaryReport {
+            corpus_version: corpus.version,
+            corpus_sha256: corpus.content_sha256.clone(),
+            measurements,
+        })
+    }
+}
+
 impl CommandRuntime for LocalRuntime {
     fn profiles(&self) -> Result<Vec<ProfileSummary>, String> {
         LocalRuntime::profiles(self).map_err(|error| error.to_string())
@@ -9659,7 +9912,8 @@ impl CommandRuntime for LocalRuntime {
             | ClientCommand::AcknowledgeEvents(_)
             | ClientCommand::ResumeSession { .. }
             | ClientCommand::SubmitPrompt(_)
-            | ClientCommand::SelectModel(_) => Err(LocalRuntimeError::UnsupportedCommand),
+            | ClientCommand::SelectModel(_)
+            | ClientCommand::Evolution(_) => Err(LocalRuntimeError::UnsupportedCommand),
         };
         result.map_err(|error| error.to_string())
     }

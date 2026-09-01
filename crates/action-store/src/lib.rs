@@ -46,6 +46,36 @@ pub enum ActionSource {
     AutonomousContinuation {
         goal_id: GoalId,
     },
+    Evolution {
+        generation_id: EntityId,
+        ancestry: Vec<ActionAncestorKind>,
+        execution: EvolutionExecution,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionAncestorKind {
+    Ordinary,
+    Evolution,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvolutionExecution {
+    OrdinarySession,
+    DedicatedChild,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvolutionOperation {
+    EvaluateHypothesis,
+    PrepareShadow,
+    BuildCandidate,
+    RunCanary,
+    ObservePromotion,
+    ReclaimResources,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -145,6 +175,9 @@ pub enum ActionPayload {
     SystemMaintenance {
         operation: String,
     },
+    Evolution {
+        operation: EvolutionOperation,
+    },
 }
 
 impl ActionPayload {
@@ -161,6 +194,7 @@ impl ActionPayload {
                 None
             }
             Self::SystemMaintenance { operation } => Some(operation),
+            Self::Evolution { .. } => None,
         }
     }
 
@@ -286,6 +320,12 @@ pub enum ActionStoreError {
     QueueFull,
     #[error("session background queue reached its configured limit")]
     BackgroundQueueFull,
+    #[error("evolution actions must use background priority and when-idle delivery")]
+    EvolutionScheduling,
+    #[error("recursive evolution actions are refused at admission")]
+    RecursiveEvolution,
+    #[error("children dedicated to evolution are refused at admission")]
+    DedicatedEvolutionChild,
     #[error("action cannot transition from {from:?} to {to:?}")]
     IllegalTransition { from: ActionState, to: ActionState },
     #[error("session already has a running model turn")]
@@ -661,6 +701,34 @@ fn validate_action(action: &SessionAction) -> Result<(), ActionStoreError> {
             "turn-boundary delivery is reserved for steering payloads".into(),
         ));
     }
+    match (&action.source, &action.payload) {
+        (
+            ActionSource::Evolution {
+                ancestry,
+                execution,
+                ..
+            },
+            ActionPayload::Evolution { .. },
+        ) => {
+            if action.priority != ActionPriority::Background
+                || action.delivery != DeliveryPolicy::WhenIdle
+            {
+                return Err(ActionStoreError::EvolutionScheduling);
+            }
+            if *execution == EvolutionExecution::DedicatedChild {
+                return Err(ActionStoreError::DedicatedEvolutionChild);
+            }
+            if ancestry.len() > 32 || ancestry.contains(&ActionAncestorKind::Evolution) {
+                return Err(ActionStoreError::RecursiveEvolution);
+            }
+        }
+        (ActionSource::Evolution { .. }, _) | (_, ActionPayload::Evolution { .. }) => {
+            return Err(ActionStoreError::Invalid(
+                "evolution source and payload must be paired".into(),
+            ));
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -781,6 +849,28 @@ mod tests {
 
     fn inbox(path: &Path, config: ActionInboxConfig) -> PersistentActionInbox<EmbeddedStore> {
         PersistentActionInbox::new(EmbeddedStore::open(path, None).unwrap(), config).unwrap()
+    }
+
+    fn evolution_action(session_id: &SessionId) -> SessionAction {
+        SessionAction {
+            id: ActionId::new(),
+            session_id: session_id.clone(),
+            source: ActionSource::Evolution {
+                generation_id: EntityId::new(),
+                ancestry: vec![ActionAncestorKind::Ordinary],
+                execution: EvolutionExecution::OrdinarySession,
+            },
+            delivery: DeliveryPolicy::WhenIdle,
+            priority: ActionPriority::Background,
+            created_at: UtcTimestamp::UNIX_EPOCH,
+            not_before: None,
+            deadline: None,
+            limits: ActionLimits::default(),
+            reply_route: None,
+            payload: ActionPayload::Evolution {
+                operation: EvolutionOperation::EvaluateHypothesis,
+            },
+        }
     }
 
     #[test]
@@ -1042,5 +1132,123 @@ mod tests {
             inbox.mark_running(&second.id, UtcTimestamp::UNIX_EPOCH),
             Err(ActionStoreError::TurnAlreadyRunning | ActionStoreError::IllegalTransition { .. })
         ));
+    }
+
+    #[test]
+    fn evolution_requires_background_when_idle_and_typed_non_recursive_origin() {
+        let inbox = PersistentActionInbox::new(
+            EmbeddedStore::open_in_memory().unwrap(),
+            ActionInboxConfig::default(),
+        )
+        .unwrap();
+        let session_id = SessionId::new();
+
+        let mut foreground = evolution_action(&session_id);
+        foreground.priority = ActionPriority::User;
+        assert!(matches!(
+            inbox.submit(foreground, UtcTimestamp::UNIX_EPOCH),
+            Err(ActionStoreError::EvolutionScheduling)
+        ));
+
+        let mut recursive = evolution_action(&session_id);
+        if let ActionSource::Evolution { ancestry, .. } = &mut recursive.source {
+            ancestry.push(ActionAncestorKind::Evolution);
+        }
+        assert!(matches!(
+            inbox.submit(recursive, UtcTimestamp::UNIX_EPOCH),
+            Err(ActionStoreError::RecursiveEvolution)
+        ));
+
+        let mut child = evolution_action(&session_id);
+        if let ActionSource::Evolution { execution, .. } = &mut child.source {
+            *execution = EvolutionExecution::DedicatedChild;
+        }
+        assert!(matches!(
+            inbox.submit(child, UtcTimestamp::UNIX_EPOCH),
+            Err(ActionStoreError::DedicatedEvolutionChild)
+        ));
+
+        let accepted = evolution_action(&session_id);
+        assert_eq!(
+            inbox
+                .submit(accepted, UtcTimestamp::UNIX_EPOCH)
+                .unwrap()
+                .state,
+            ActionState::Queued
+        );
+    }
+
+    #[test]
+    fn user_channel_and_scheduled_work_precede_evolution() {
+        let inbox = PersistentActionInbox::new(
+            EmbeddedStore::open_in_memory().unwrap(),
+            ActionInboxConfig::default(),
+        )
+        .unwrap();
+        let session_id = SessionId::new();
+        let evolution = evolution_action(&session_id);
+        let mut scheduled = action(
+            &session_id,
+            ActionPriority::Scheduled,
+            DeliveryPolicy::Immediate,
+            "scheduled",
+            0,
+        );
+        scheduled.source = ActionSource::Schedule {
+            job_id: JobId::new(),
+            attempt: 1,
+        };
+        scheduled.payload = ActionPayload::Scheduled {
+            instruction: "scheduled".into(),
+        };
+        let mut channel = action(
+            &session_id,
+            ActionPriority::User,
+            DeliveryPolicy::Immediate,
+            "channel",
+            0,
+        );
+        channel.source = ActionSource::Channel {
+            channel: "test".into(),
+            message_id: "message".into(),
+        };
+        channel.payload = ActionPayload::ChannelMessage {
+            text: "channel".into(),
+            attachments: Vec::new(),
+        };
+        let user = action(
+            &session_id,
+            ActionPriority::User,
+            DeliveryPolicy::Immediate,
+            "user",
+            0,
+        );
+        for candidate in [&evolution, &scheduled, &channel, &user] {
+            inbox
+                .submit(candidate.clone(), UtcTimestamp::UNIX_EPOCH)
+                .unwrap();
+        }
+        let context = PumpContext {
+            session_idle: true,
+            ..PumpContext::default()
+        };
+        let mut selected = Vec::new();
+        for _ in 0..4 {
+            let next = inbox
+                .select_next(&session_id, UtcTimestamp::UNIX_EPOCH, &context)
+                .unwrap()
+                .unwrap();
+            selected.push(next.record.action.id.clone());
+            inbox
+                .mark_running(&next.record.action.id, UtcTimestamp::UNIX_EPOCH)
+                .unwrap();
+            inbox
+                .complete(&next.record.action.id, UtcTimestamp::UNIX_EPOCH)
+                .unwrap();
+        }
+        assert_eq!(
+            selected,
+            vec![channel.id, user.id, scheduled.id, evolution.id]
+        );
     }
 }

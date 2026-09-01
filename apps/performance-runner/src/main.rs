@@ -1391,7 +1391,7 @@ fn qualification_checks(
     );
     let ui = latencies
         .iter()
-        .filter(|(name, _)| name.starts_with("tui_render") || name.starts_with("web_shell_render"));
+        .filter(|(name, _)| name.starts_with("tui_render") || name.starts_with("web_"));
     let ui_responsive = ui
         .clone()
         .all(|(_, summary)| summary.p99_micros <= UI_P99_LIMIT_MICROS)
@@ -1696,7 +1696,7 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
         for name in [
             "tui_render_long_history",
-            "web_shell_render_1000_sessions",
+            "web_bootstrap_render_1000_sessions",
             "browser_route_switch",
             "browser_goal_event_to_render",
             "model_stream_first_delta",

@@ -62,6 +62,37 @@ pub enum ReviewerAccess {
     SelectedFilesReadOnly,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefinementReviewerAuthority {
+    access: ReviewerAccess,
+}
+
+impl RefinementReviewerAuthority {
+    #[must_use]
+    pub const fn selected_files_read_only() -> Self {
+        Self {
+            access: ReviewerAccess::SelectedFilesReadOnly,
+        }
+    }
+    #[must_use]
+    pub const fn shell(self) -> bool {
+        false
+    }
+    #[must_use]
+    pub const fn write(self) -> bool {
+        false
+    }
+    #[must_use]
+    pub const fn network(self) -> bool {
+        false
+    }
+    #[must_use]
+    pub const fn credentials(self) -> bool {
+        false
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewFile {
@@ -75,9 +106,7 @@ pub struct RefinementReviewBundle {
     pub transaction_id: EntityId,
     pub session_id: SessionId,
     pub profile_id: ProfileId,
-    pub access: ReviewerAccess,
-    pub shell_available: bool,
-    pub write_available: bool,
+    pub authority: RefinementReviewerAuthority,
     pub transcript: Vec<String>,
     pub files: Vec<ReviewFile>,
 }
@@ -319,9 +348,7 @@ where
             transaction_id,
             session_id: action.session_id.clone(),
             profile_id,
-            access: ReviewerAccess::SelectedFilesReadOnly,
-            shell_available: false,
-            write_available: false,
+            authority: RefinementReviewerAuthority::selected_files_read_only(),
             transcript,
             files,
         })
@@ -888,6 +915,7 @@ fn validate_action(action: &SessionAction) -> Result<EntityId, RefinementError> 
         | ActionSource::FollowUp
         | ActionSource::Waiting { .. }
         | ActionSource::Awareness { .. }
+        | ActionSource::Evolution { .. }
         | ActionSource::AutonomousContinuation { .. } => false,
     };
     if valid {
@@ -1187,9 +1215,14 @@ mod tests {
                 UtcTimestamp::from_unix_millis(1),
             )
             .unwrap();
-        assert_eq!(bundle.access, ReviewerAccess::SelectedFilesReadOnly);
-        assert!(!bundle.shell_available);
-        assert!(!bundle.write_available);
+        assert_eq!(
+            bundle.authority,
+            RefinementReviewerAuthority::selected_files_read_only()
+        );
+        assert!(!bundle.authority.shell());
+        assert!(!bundle.authority.write());
+        assert!(!bundle.authority.network());
+        assert!(!bundle.authority.credentials());
         assert_eq!(bundle.files[0].content, "# AGENT\n");
 
         let pending = service

@@ -1030,83 +1030,10 @@ fn prepare_events(
         u64::try_from(state.events.len()).map_err(|_| ObservatoryError::InvalidEvidence)?;
     let mut events = Vec::new();
     for mutation in mutations {
-        let mutation = match mutation {
-            ObservatoryMutation::Observe(evidence) => {
-                validate_evidence(profile_id, &evidence, limits)?;
-                if let Some(existing) = sources.get(&evidence.source_identity) {
-                    if projected.get(existing).is_some_and(|record| {
-                        record.content_digest == evidence.content_digest
-                            && record.validity == evidence.validity
-                    }) {
-                        continue;
-                    }
-                    return Err(ObservatoryError::InvalidEvidence);
-                }
-                if projected.len() >= limits.max_evidence_records {
-                    return Err(ObservatoryError::InvalidEvidence);
-                }
-                VaultMutation::Observed { evidence }
-            }
-            ObservatoryMutation::Supersede {
-                prior_id,
-                replacement,
-            } => {
-                validate_evidence(profile_id, &replacement, limits)?;
-                let prior = projected
-                    .get(&prior_id)
-                    .ok_or(ObservatoryError::MissingEvidence)?;
-                if !matches!(
-                    prior.validity,
-                    EvidenceValidity::Active | EvidenceValidity::Disputed
-                ) {
-                    return Err(ObservatoryError::MissingEvidence);
-                }
-                VaultMutation::Superseded {
-                    prior_id,
-                    replacement,
-                }
-            }
-            ObservatoryMutation::Dispute {
-                evidence_id,
-                reason,
-                source_entries,
-            } => {
-                if reason.trim().is_empty()
-                    || reason.len() > limits.max_record_bytes
-                    || source_entries.len() > limits.max_source_entries
-                {
-                    return Err(ObservatoryError::InvalidEvidence);
-                }
-                VaultMutation::Disputed {
-                    evidence_id,
-                    reason,
-                    source_entries,
-                }
-            }
-            ObservatoryMutation::Delete {
-                evidence_id,
-                source_entries,
-                source_digests,
-            } => {
-                if source_entries.len() != source_digests.len()
-                    || source_entries.len() > limits.max_source_entries
-                    || source_digests.iter().any(String::is_empty)
-                {
-                    return Err(ObservatoryError::InvalidEvidence);
-                }
-                VaultMutation::Deleted {
-                    evidence_id,
-                    source_entries,
-                    source_digests,
-                }
-            }
-            ObservatoryMutation::ChangeSensitivity {
-                evidence_id,
-                sensitivity,
-            } => VaultMutation::SensitivityChanged {
-                evidence_id,
-                sensitivity,
-            },
+        let Some(mutation) =
+            normalize_mutation(profile_id, &projected, &sources, mutation, limits)?
+        else {
+            continue;
         };
         sequence = sequence
             .checked_add(1)
@@ -1127,6 +1054,93 @@ fn prepare_events(
         events.push(event);
     }
     Ok(events)
+}
+
+fn normalize_mutation(
+    profile_id: &ProfileId,
+    projected: &EvidenceMap,
+    sources: &BTreeMap<String, EntityId>,
+    mutation: ObservatoryMutation,
+    limits: ObservatoryLimits,
+) -> Result<Option<VaultMutation>, ObservatoryError> {
+    Ok(Some(match mutation {
+        ObservatoryMutation::Observe(evidence) => {
+            validate_evidence(profile_id, &evidence, limits)?;
+            if let Some(existing) = sources.get(&evidence.source_identity) {
+                if projected.get(existing).is_some_and(|record| {
+                    record.content_digest == evidence.content_digest
+                        && record.validity == evidence.validity
+                }) {
+                    return Ok(None);
+                }
+                return Err(ObservatoryError::InvalidEvidence);
+            }
+            if projected.len() >= limits.max_evidence_records {
+                return Err(ObservatoryError::InvalidEvidence);
+            }
+            VaultMutation::Observed { evidence }
+        }
+        ObservatoryMutation::Supersede {
+            prior_id,
+            replacement,
+        } => {
+            validate_evidence(profile_id, &replacement, limits)?;
+            let prior = projected
+                .get(&prior_id)
+                .ok_or(ObservatoryError::MissingEvidence)?;
+            if !matches!(
+                prior.validity,
+                EvidenceValidity::Active | EvidenceValidity::Disputed
+            ) {
+                return Err(ObservatoryError::MissingEvidence);
+            }
+            VaultMutation::Superseded {
+                prior_id,
+                replacement,
+            }
+        }
+        ObservatoryMutation::Dispute {
+            evidence_id,
+            reason,
+            source_entries,
+        } => {
+            if reason.trim().is_empty()
+                || reason.len() > limits.max_record_bytes
+                || source_entries.len() > limits.max_source_entries
+            {
+                return Err(ObservatoryError::InvalidEvidence);
+            }
+            VaultMutation::Disputed {
+                evidence_id,
+                reason,
+                source_entries,
+            }
+        }
+        ObservatoryMutation::Delete {
+            evidence_id,
+            source_entries,
+            source_digests,
+        } => {
+            if source_entries.len() != source_digests.len()
+                || source_entries.len() > limits.max_source_entries
+                || source_digests.iter().any(String::is_empty)
+            {
+                return Err(ObservatoryError::InvalidEvidence);
+            }
+            VaultMutation::Deleted {
+                evidence_id,
+                source_entries,
+                source_digests,
+            }
+        }
+        ObservatoryMutation::ChangeSensitivity {
+            evidence_id,
+            sensitivity,
+        } => VaultMutation::SensitivityChanged {
+            evidence_id,
+            sensitivity,
+        },
+    }))
 }
 
 fn validate_evidence(

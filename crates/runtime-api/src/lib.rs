@@ -32,6 +32,51 @@ pub struct AcceptedPrompt {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateCanaryRequest {
+    pub corpus_version: u32,
+    pub corpus_sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateCanaryOutcome {
+    Completed,
+    ToolUse,
+    Rejected,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateCanaryVerdict {
+    Improved,
+    Equivalent,
+    Regressed,
+    Inconclusive,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateCanaryMeasurement {
+    pub journey_id: String,
+    pub outcome: CandidateCanaryOutcome,
+    pub output_sha256: String,
+    pub tokens: u64,
+    pub latency_ms: u64,
+    pub operations: u64,
+    pub verdict: CandidateCanaryVerdict,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateCanaryReport {
+    pub corpus_version: u32,
+    pub corpus_sha256: String,
+    pub measurements: Vec<CandidateCanaryMeasurement>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "operation", content = "parameters")]
 pub enum RuntimeRequest {
     Profiles,
@@ -67,6 +112,7 @@ pub enum RuntimeRequest {
         generation: Generation,
     },
     Maintain,
+    CandidateCanary(CandidateCanaryRequest),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -78,6 +124,7 @@ pub enum RuntimeResponse {
     Snapshot(Box<SessionSnapshot>),
     Command(Box<CommandResult>),
     Complete,
+    CandidateCanary(CandidateCanaryReport),
     Failed(String),
 }
 
@@ -215,6 +262,9 @@ impl RuntimeRequest {
                 .execute_feature(client_id, scope_session_id.as_ref(), command, *generation)
                 .map(|result| RuntimeResponse::Command(Box::new(result))),
             Self::Maintain => runtime.maintain().map(|()| RuntimeResponse::Complete),
+            Self::CandidateCanary(request) => runtime
+                .candidate_canary(request)
+                .map(RuntimeResponse::CandidateCanary),
         };
         response.unwrap_or_else(RuntimeResponse::Failed)
     }
@@ -276,4 +326,10 @@ pub trait CommandRuntime: Send + Sync {
         generation: Generation,
     ) -> Result<CommandResult, String>;
     fn maintain(&self) -> Result<(), String>;
+    fn candidate_canary(
+        &self,
+        _request: &CandidateCanaryRequest,
+    ) -> Result<CandidateCanaryReport, String> {
+        Err("candidate canary evaluation is unavailable".into())
+    }
 }

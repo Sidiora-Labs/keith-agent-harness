@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "codify":{"command":"cg","args":["mcp"]}
+  }
+}

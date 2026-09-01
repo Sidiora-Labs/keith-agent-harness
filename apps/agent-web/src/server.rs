@@ -30,8 +30,8 @@ use keith_framing::FrameError;
 use keith_platform::PlatformPaths;
 use keith_protocol::{
     AttachSession, ClientCommand, ClientHello, CommandEnvelope, CommandResult,
-    CommandResultEnvelope, Feature, ProfileSummary, ResponsePayload, ResumeCursor, SessionFilter,
-    SessionSummary, WireFormat, WireMessage,
+    CommandResultEnvelope, EvolutionCommand, Feature, ProfileSummary, ResponsePayload,
+    ResumeCursor, SessionFilter, SessionSummary, WireFormat, WireMessage,
 };
 use keith_provider_catalog::provider as provider_spec;
 use serde::Deserialize;
@@ -207,6 +207,7 @@ impl WebServer {
             .route("/favicon.ico", get(favicon))
             .route("/auth/session", post(create_session))
             .route("/api/bootstrap", get(bootstrap))
+            .route("/api/evolution/commands", post(evolution_command))
             .route("/assets/ui/{*path}", get(ui_asset))
             .route("/api/profiles/{profile}/commands", post(command))
             .route(
@@ -496,13 +497,12 @@ async fn bootstrap(
     let catalog = tokio::task::spawn_blocking(move || bridge.catalog()).await;
     match catalog {
         Ok(Ok((profiles, mut sessions))) => {
-            prioritize_session(&mut sessions, selection.session.as_deref());
-            let mut response = Json(serde_json::json!({
-                "protocol": CURRENT_PROTOCOL_VERSION,
-                "csrf": csrf,
-                "profiles": profiles,
-                "sessions": sessions,
-            }))
+            let mut response = Json(bootstrap_payload(
+                &csrf,
+                &profiles,
+                &mut sessions,
+                selection.session.as_deref(),
+            ))
             .into_response();
             response
                 .headers_mut()
@@ -519,6 +519,25 @@ async fn bootstrap(
             "agent connection unavailable",
         ),
     }
+}
+
+/// Builds the client bootstrap projection.
+///
+/// Extracted from the `bootstrap` handler so the same pure path the server
+/// serves can be measured directly by the performance runner.
+pub fn bootstrap_payload(
+    csrf: &str,
+    profiles: &[ProfileSummary],
+    sessions: &mut Vec<SessionSummary>,
+    requested_session: Option<&str>,
+) -> serde_json::Value {
+    prioritize_session(sessions, requested_session);
+    serde_json::json!({
+        "protocol": CURRENT_PROTOCOL_VERSION,
+        "csrf": csrf,
+        "profiles": profiles,
+        "sessions": sessions,
+    })
 }
 
 fn prioritize_session(sessions: &mut Vec<SessionSummary>, requested: Option<&str>) {
@@ -539,10 +558,9 @@ async fn ui_asset(State(state): State<AppState>, Path(path): Path<String>) -> Re
         return safe_error(StatusCode::NOT_FOUND, "asset unavailable");
     };
     let media_type = match path.extension().and_then(|value| value.to_str()) {
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("mjs") => "text/javascript; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
-        Some("json") | Some("map") => "application/json; charset=utf-8",
+        Some("json" | "map") => "application/json; charset=utf-8",
         Some("html") => "text/html; charset=utf-8",
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
@@ -592,6 +610,42 @@ async fn command(
             "agent connection unavailable",
         ),
     }
+}
+
+async fn evolution_command(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(csrf) = headers
+        .get("x-keith-csrf")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return security_response(SecurityError::Csrf);
+    };
+    if let Err(error) = state.security.authorize_mutation(&headers, csrf) {
+        return security_response(error);
+    }
+    let Ok(command) = parse_evolution_command(&body) else {
+        return safe_error(StatusCode::BAD_REQUEST, "invalid evolution command");
+    };
+    let bridge = state.bridge.clone();
+    let result = tokio::task::spawn_blocking(move || bridge.execute_evolution(command)).await;
+    match result {
+        Ok(Ok(result)) => Json(WireMessage::CommandResult(result)).into_response(),
+        Ok(Err(error)) => safe_error(StatusCode::SERVICE_UNAVAILABLE, &error.to_string()),
+        Err(_) => safe_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "agent connection unavailable",
+        ),
+    }
+}
+
+fn parse_evolution_command(body: &[u8]) -> Result<EvolutionCommand, ()> {
+    let supplied: serde_json::Value = serde_json::from_slice(body).map_err(|_| ())?;
+    let command: EvolutionCommand = serde_json::from_value(supplied.clone()).map_err(|_| ())?;
+    let canonical = serde_json::to_value(&command).map_err(|_| ())?;
+    (canonical == supplied).then_some(command).ok_or(())
 }
 
 fn accepts_event_stream(headers: &HeaderMap) -> bool {
@@ -892,6 +946,15 @@ impl DaemonBridge {
         client.execute(envelope)
     }
 
+    fn execute_evolution(
+        &self,
+        command: EvolutionCommand,
+    ) -> Result<CommandResultEnvelope, BridgeError> {
+        let mut client = self.connect()?;
+        let envelope = client.envelope(None, ClientCommand::Evolution(command));
+        client.execute(envelope)
+    }
+
     fn execute_scoped_streaming(
         &self,
         profile: &ProfileId,
@@ -1014,6 +1077,7 @@ impl DaemonBridge {
                 Feature::Replay,
                 Feature::Snapshots,
                 Feature::FramedJson,
+                Feature::SelfEvolution,
             ]),
             resume: None,
         }))?;
@@ -1267,14 +1331,11 @@ fn hex_digit(value: u8) -> Result<u8, String> {
 
 fn next_app_page(root: &FsPath) -> Response {
     let path = root.join(UI_INDEX);
-    let mut html = match std::fs::read_to_string(path) {
-        Ok(html) => html,
-        Err(_) => {
-            return safe_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Keith's Next.js interface is unavailable",
-            );
-        }
+    let Ok(mut html) = std::fs::read_to_string(path) else {
+        return safe_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Keith's Next.js interface is unavailable",
+        );
     };
     let nonce = keith_agent_types::EntityId::new().to_string();
     html = html.replace("<script", &format!("<script nonce=\"{nonce}\""));
@@ -1542,5 +1603,21 @@ mod tests {
         assert!(accepts_event_stream(&headers));
         headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
         assert!(!accepts_event_stream(&headers));
+    }
+
+    #[test]
+    fn installation_evolution_body_cannot_supply_identity_authority_or_profile_scope() {
+        assert_eq!(
+            parse_evolution_command(br#"{"action":"status"}"#).unwrap(),
+            EvolutionCommand::Status
+        );
+        for injected in [
+            br#"{"action":"status","identity":"owner"}"#.as_slice(),
+            br#"{"action":"status","authority":"installation"}"#.as_slice(),
+            br#"{"action":"status","profile_id":"01J00000000000000000000000"}"#.as_slice(),
+            br#"{"action":"revert","parameters":{"promotion_id":"01J00000000000000000000000","reason":"undo","identity":"owner"}}"#.as_slice(),
+        ] {
+            assert!(parse_evolution_command(injected).is_err());
+        }
     }
 }

@@ -1320,6 +1320,139 @@ button:disabled {
   font-weight: 620;
 }
 
+.section-heading,
+.evolution-record > div,
+.baseline-restore {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.status-badge {
+  flex: none;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: var(--neo-layer-control);
+  color: var(--neo-text-secondary);
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.status-badge.enabled {
+  background: color-mix(in srgb, var(--neo-status-success) 18%, transparent);
+  color: var(--neo-status-success);
+}
+
+.owner-boundary,
+.evolution-active,
+.baseline-restore {
+  margin-top: 14px;
+  border-radius: 12px;
+  padding: 14px;
+  background: var(--neo-layer-control);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.evolution-disclosure {
+  display: grid;
+  margin: 14px 0 0;
+  gap: 8px;
+}
+
+.evolution-disclosure div {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.evolution-disclosure dt {
+  color: var(--neo-text-tertiary);
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.evolution-disclosure dd {
+  margin: 0;
+  color: var(--neo-text-secondary);
+  font-size: 11px;
+}
+
+.evolution-disclosure .availability-warning dd {
+  color: var(--warning);
+}
+
+.owner-boundary p,
+.baseline-restore p {
+  margin: 5px 0 11px;
+}
+
+.evolution-active h4,
+.evolution-ledger h4 {
+  margin: 7px 0;
+  font-size: 13px;
+}
+
+.evolution-active ul {
+  margin: 7px 0 12px;
+  padding-left: 18px;
+  color: var(--neo-text-secondary);
+  font-size: 12px;
+}
+
+.evolution-active details {
+  margin: 12px 0;
+}
+
+.evolution-active summary {
+  color: var(--neo-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.evolution-active pre {
+  overflow-x: auto;
+  max-height: 280px;
+  border-radius: 9px;
+  padding: 12px;
+  background: var(--neo-layer-canvas);
+  color: var(--neo-text-secondary);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.evolution-ledger {
+  display: grid;
+  margin-top: 18px;
+  gap: 8px;
+}
+
+.evolution-record {
+  border-radius: 12px;
+  padding: 13px;
+  background: var(--neo-layer-control);
+}
+
+.evolution-record time {
+  color: var(--neo-text-tertiary);
+  font-size: 10px;
+}
+
+.evolution-record p {
+  margin: 6px 0 10px;
+}
+
+.danger-button {
+  flex: none;
+  min-height: 38px;
+  border-radius: 10px;
+  padding: 0 13px;
+  background: color-mix(in srgb, var(--danger) 18%, var(--neo-layer-control));
+  color: var(--danger);
+  font-weight: 620;
+}
+
 .projection-list {
   display: grid;
   gap: 6px;

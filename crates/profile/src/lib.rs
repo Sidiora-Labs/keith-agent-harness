@@ -36,6 +36,13 @@ impl RegisteredProfile {
     pub fn id(&self) -> &ProfileId {
         &self.profile.id
     }
+
+    /// Profile, client, channel, plugin, MCP, skill, kernel, and model state is
+    /// never installation authority for self-evolution.
+    #[must_use]
+    pub const fn can_enable_self_evolution(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Error)]
@@ -348,5 +355,22 @@ mod tests {
             Err(ProfileError::Stale)
         ));
         assert_eq!(registry.list().unwrap(), vec![updated]);
+    }
+
+    #[test]
+    fn profile_capabilities_never_grant_self_evolution_authority() {
+        let root = TempDir::new().unwrap();
+        let mut profile = registered(&root);
+        profile.profile.enabled_skills.push("self-evolution".into());
+        profile
+            .profile
+            .enabled_mcp_servers
+            .push("self-evolution".into());
+        profile
+            .profile
+            .enabled_plugins
+            .push("self-evolution".into());
+        profile.profile.channels.push("self-evolution".into());
+        assert!(!profile.can_enable_self_evolution());
     }
 }

@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use keith_agent_tui::{Accessibility, TuiApp, render};
 use keith_agent_types::{MessageId, Revision, Sequence};
-use keith_agent_web::{WebAssets, shell_page};
+use keith_agent_web::bootstrap_payload;
 use keith_protocol::{
     DaemonEvent, EventEnvelope, MessageProjection, MessageRole, SessionSnapshot, WireMessage,
 };
@@ -80,20 +80,13 @@ pub fn benchmark(snapshot: &SessionSnapshot, iterations: usize) -> Result<Measur
         .collect::<Vec<_>>();
     for _ in 0..iterations {
         let started = Instant::now();
-        let document = shell_page(
-            "performance-csrf",
-            &profiles,
-            &sessions,
-            &WebAssets {
-                script: "/assets/ui/performance.js".into(),
-                styles: vec!["/assets/ui/performance.css".into()],
-            },
-        );
-        if document.is_empty() {
-            return Err("web shell rendering produced an empty document".into());
+        let mut catalog = sessions.clone();
+        let payload = bootstrap_payload("performance-csrf", &profiles, &mut catalog, None);
+        if payload["sessions"].as_array().map_or(0, Vec::len) != sessions.len() {
+            return Err("web bootstrap projection dropped sessions".into());
         }
         measurements.record(
-            "web_shell_render_1000_sessions",
+            "web_bootstrap_render_1000_sessions",
             u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
         );
     }

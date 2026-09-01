@@ -7,8 +7,8 @@ use keith_agent_types::{
     Sequence, SessionId, ToolCallId, TurnId, UtcTimestamp,
 };
 use keith_protocol::{
-    DaemonEvent, EventEnvelope, GoalState, MemoryChangeKind, MemoryChangeProjection,
-    MessageProjection, MessageRole, SessionSnapshot, TurnTerminalStatus,
+    DaemonEvent, EventEnvelope, EvolutionAvailabilityProjection, GoalState, MemoryChangeKind,
+    MemoryChangeProjection, MessageProjection, MessageRole, SessionSnapshot, TurnTerminalStatus,
 };
 pub use keith_protocol::{PresenceProjection, PresenceState};
 use serde::{Deserialize, Serialize};
@@ -38,10 +38,11 @@ pub enum OperatorSurface {
     Refinement,
     Logs,
     Diagnostics,
+    Evolution,
 }
 
 impl OperatorSurface {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Chat,
         Self::Queue,
         Self::Sessions,
@@ -63,6 +64,7 @@ impl OperatorSurface {
         Self::Refinement,
         Self::Logs,
         Self::Diagnostics,
+        Self::Evolution,
     ];
 
     pub const fn route(self) -> &'static str {
@@ -88,6 +90,7 @@ impl OperatorSurface {
             Self::Refinement => "refinement",
             Self::Logs => "logs",
             Self::Diagnostics => "diagnostics",
+            Self::Evolution => "evolution",
         }
     }
 
@@ -114,6 +117,7 @@ impl OperatorSurface {
             Self::Refinement => "Refinement",
             Self::Logs => "Logs",
             Self::Diagnostics => "Diagnostics",
+            Self::Evolution => "Evolution",
         }
     }
 }
@@ -144,10 +148,17 @@ pub enum OperatorCommand {
     QueryMemory,
     Export,
     SetBackgroundControl,
+    EvolutionStatus,
+    EvolutionEnable,
+    EvolutionDisable,
+    EvolutionApprove,
+    EvolutionRevert,
+    EvolutionRestoreBaseline,
+    EvolutionBrowseLedger,
 }
 
 impl OperatorCommand {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 30] = [
         Self::SubmitPrompt,
         Self::Steer,
         Self::Cancel,
@@ -171,6 +182,13 @@ impl OperatorCommand {
         Self::QueryMemory,
         Self::Export,
         Self::SetBackgroundControl,
+        Self::EvolutionStatus,
+        Self::EvolutionEnable,
+        Self::EvolutionDisable,
+        Self::EvolutionApprove,
+        Self::EvolutionRevert,
+        Self::EvolutionRestoreBaseline,
+        Self::EvolutionBrowseLedger,
     ];
 }
 
@@ -190,6 +208,97 @@ impl ClientParity {
 
     pub fn is_full(&self) -> bool {
         self == &Self::full()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EvolutionLedgerItem {
+    pub title: String,
+    pub state: String,
+    pub occurred_at: UtcTimestamp,
+    pub evidence: Vec<String>,
+    pub readable_diff: Option<String>,
+    pub measured_result: Option<String>,
+    pub reversal_promotion_id: Option<EntityId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EvolutionSurfaceProjection {
+    pub status: String,
+    pub availability: String,
+    pub guidance: Option<String>,
+    pub disclosure: Vec<(String, String)>,
+    pub active_title: Option<String>,
+    pub active_state: Option<String>,
+    pub evidence: Vec<String>,
+    pub readable_diff: Option<String>,
+    pub measured_result: Option<String>,
+    pub approval_hypothesis_id: Option<EntityId>,
+    pub ledger: Vec<EvolutionLedgerItem>,
+    pub has_more_ledger: bool,
+}
+
+#[must_use]
+pub fn project_evolution(
+    projection: &keith_protocol::EvolutionProjection,
+) -> EvolutionSurfaceProjection {
+    let availability = match &projection.availability {
+        EvolutionAvailabilityProjection::Available { rustc, cargo } => {
+            format!("Available with {rustc} and {cargo}")
+        }
+        EvolutionAvailabilityProjection::Unavailable { reasons } => {
+            format!("Unavailable: {}", reasons.join("; "))
+        }
+    };
+    let active = projection.active.as_ref();
+    EvolutionSurfaceProjection {
+        status: if projection.enabled {
+            format!(
+                "Self-evolution is enabled — {}",
+                humanize_state(&projection.state)
+            )
+        } else {
+            format!(
+                "Self-evolution is disabled — {}",
+                humanize_state(&projection.state)
+            )
+        },
+        availability,
+        guidance: projection.guidance.clone(),
+        disclosure: vec![
+            (
+                "May change".into(),
+                projection.disclosure.editable_surface.clone(),
+            ),
+            (
+                "Never changes".into(),
+                projection.disclosure.protected_surface.clone(),
+            ),
+            ("Autonomy".into(), projection.disclosure.autonomy.clone()),
+            ("Reversal".into(), projection.disclosure.reversal.clone()),
+        ],
+        active_title: active.map(|item| format!("Improving {}", item.target)),
+        active_state: active.map(|item| humanize_state(&item.state)),
+        evidence: active.map_or_else(Vec::new, |item| item.evidence.clone()),
+        readable_diff: active.and_then(|item| item.readable_diff.clone()),
+        measured_result: active.and_then(|item| item.measured_result.clone()),
+        approval_hypothesis_id: active
+            .filter(|item| item.approval_required)
+            .map(|item| item.hypothesis_id.clone()),
+        ledger: projection
+            .ledger
+            .iter()
+            .map(|item| EvolutionLedgerItem {
+                title: item.summary.clone(),
+                state: humanize_state(&item.state),
+                occurred_at: item.occurred_at,
+                evidence: item.evidence.clone(),
+                readable_diff: item.readable_diff.clone(),
+                measured_result: item.measured_result.clone(),
+                reversal_promotion_id: item.reversible.then(|| item.promotion_id.clone()).flatten(),
+            })
+            .collect(),
+        has_more_ledger: projection.has_more_ledger,
     }
 }
 
@@ -1140,6 +1249,7 @@ fn apply_event_payload(snapshot: &mut SessionSnapshot, event: &DaemonEvent) {
         DaemonEvent::CommandAccepted { .. }
         | DaemonEvent::CommandRejected(_)
         | DaemonEvent::AgentActivity(_)
+        | DaemonEvent::EvolutionChanged(_)
         | DaemonEvent::Warning(_)
         | DaemonEvent::Error(_) => {}
     }
@@ -1493,6 +1603,7 @@ mod tests {
     };
     use keith_protocol::{
         ActionProjection, ChildProjection, CommitmentProjection, DeliveryProjection,
+        EvolutionDisclosureProjection, EvolutionLedgerProjection, EvolutionProjection,
         GoalProjection, GoalState, KernelProjection, MemoryChangeKind, PlanProjection,
         ScheduleExpression, ScheduleProjection, SessionState, SessionSummary, ToolProjection,
         UsageProjection, WaitProjection,
@@ -2101,5 +2212,58 @@ mod tests {
                 Err(PresenceError::Fabricated)
             );
         }
+    }
+
+    #[test]
+    fn evolution_projection_uses_readable_labels_and_keeps_ids_out_of_titles() {
+        let promotion_id = EntityId::new();
+        let projection = EvolutionProjection {
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            enabled: true,
+            state: "observing_candidate".into(),
+            availability: EvolutionAvailabilityProjection::Available {
+                rustc: "rustc 1.90".into(),
+                cargo: "cargo 1.90".into(),
+            },
+            disclosure: EvolutionDisclosureProjection {
+                editable_surface: "the worker harness".into(),
+                protected_surface: "memory and recovery".into(),
+                autonomy: "verified changes only".into(),
+                reversal: "one action".into(),
+            },
+            active: None,
+            ledger: vec![EvolutionLedgerProjection {
+                sequence: 4,
+                occurred_at: UtcTimestamp::UNIX_EPOCH,
+                kind: "promotion".into(),
+                summary: "Reduced repeated tool calls".into(),
+                state: "observing".into(),
+                evidence: vec!["Repeated calls fell from 4 to 1".into()],
+                measured_result: Some("75% fewer repeated calls".into()),
+                readable_diff: Some("Stops after the first matching result".into()),
+                hypothesis_id: None,
+                promotion_id: Some(promotion_id.clone()),
+                reversible: true,
+            }],
+            has_more_ledger: false,
+            guidance: None,
+        };
+        let view = project_evolution(&projection);
+        assert_eq!(view.ledger[0].title, "Reduced repeated tool calls");
+        assert!(!view.ledger[0].title.contains(&promotion_id.to_string()));
+        assert_eq!(view.ledger[0].reversal_promotion_id, Some(promotion_id));
+        assert_eq!(view.ledger[0].state, "Observing");
+        assert_eq!(
+            view.ledger[0].evidence,
+            vec!["Repeated calls fell from 4 to 1"]
+        );
+        assert_eq!(
+            view.ledger[0].readable_diff.as_deref(),
+            Some("Stops after the first matching result")
+        );
+        assert_eq!(
+            view.ledger[0].measured_result.as_deref(),
+            Some("75% fewer repeated calls")
+        );
     }
 }

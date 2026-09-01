@@ -7,6 +7,7 @@ pub use connection::*;
 pub use render::{render, settled_transcript_lines};
 
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Write as _;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use keith_agent_types::{
@@ -15,13 +16,14 @@ use keith_agent_types::{
 use keith_protocol::{
     AttachSession, BackgroundControl, BackgroundMode, CancelTarget, ChildMessageRequest,
     ChildWorkspaceMode, ClientCommand, CommandEnvelope, CommandResult, CreateChild, CreateGoal,
-    CreateSchedule, DaemonEvent, DeliveryPolicy, EventAcknowledgement, ExportFormat, ExportRequest,
-    GoalLimits, MemoryQuery, ResponsePayload, ScheduleExpression, SessionFilter, SessionSummary,
-    SteerAction, SubmitPrompt, UpdateSchedule, WireMessage,
+    CreateSchedule, DaemonEvent, DeliveryPolicy, EventAcknowledgement, EvolutionCommand,
+    EvolutionProjection, ExportFormat, ExportRequest, GoalLimits, MemoryQuery, ResponsePayload,
+    ScheduleExpression, SessionFilter, SessionSummary, SteerAction, SubmitPrompt, UpdateSchedule,
+    WireMessage,
 };
 use keith_ui_model::{
     ClientParity, OperatorCommand, OperatorSurface, ProjectionReducer, ReductionOutcome,
-    VirtualizationConfig, project_personal_intelligence,
+    VirtualizationConfig, project_evolution, project_personal_intelligence,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -31,7 +33,7 @@ pub const MAX_COMPOSER_BYTES: usize = 64 * 1_024;
 pub const MAX_LOG_LINES: usize = 512;
 pub const MAX_PENDING_COMMANDS: usize = 128;
 
-const OVERLAY_COMMANDS: [(&str, &str); 12] = [
+const OVERLAY_COMMANDS: [(&str, &str); 16] = [
     ("Continue this conversation", "/resume"),
     ("Choose a conversation", "/sessions"),
     ("Choose a model", "/models"),
@@ -44,6 +46,10 @@ const OVERLAY_COMMANDS: [(&str, &str); 12] = [
     ("Export this conversation", "/export markdown"),
     ("Stop the current turn", "/stop"),
     ("Open diagnostics", "/diagnostics"),
+    ("Review Keith's evolution", "/evolution"),
+    ("Request self-evolution enablement", "/evolution-enable"),
+    ("Disable self-evolution", "/evolution-disable"),
+    ("Restore the human-approved baseline", "/evolution-restore"),
 ];
 
 pub fn client_parity() -> ClientParity {
@@ -93,10 +99,11 @@ pub enum TuiOverlay {
     Work,
     Memory,
     Diagnostics,
+    Evolution,
 }
 
 impl TuiOverlay {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Sessions,
         Self::Commands,
         Self::Models,
@@ -104,6 +111,7 @@ impl TuiOverlay {
         Self::Work,
         Self::Memory,
         Self::Diagnostics,
+        Self::Evolution,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -115,6 +123,7 @@ impl TuiOverlay {
             Self::Work => "Work",
             Self::Memory => "Saved context",
             Self::Diagnostics => "Diagnostics",
+            Self::Evolution => "Keith evolution",
         }
     }
 }
@@ -130,6 +139,8 @@ pub struct TuiApp {
     pub sessions: Vec<SessionSummary>,
     pub attached_session: Option<SessionId>,
     pub reducer: Option<ProjectionReducer>,
+    pub evolution: Option<EvolutionProjection>,
+    pub evolution_notice: Option<String>,
     pub connected: bool,
     pub reconnecting: bool,
     pub quit: bool,
@@ -154,6 +165,8 @@ impl TuiApp {
             sessions: Vec::new(),
             attached_session: None,
             reducer: None,
+            evolution: None,
+            evolution_notice: None,
             connected: false,
             reconnecting: false,
             quit: false,
@@ -176,6 +189,12 @@ impl TuiApp {
         self.overlay_selection = 0;
         if overlay == TuiOverlay::Sessions {
             self.list_sessions();
+        } else if overlay == TuiOverlay::Evolution {
+            self.enqueue(ClientCommand::Evolution(EvolutionCommand::Status));
+            self.enqueue(ClientCommand::Evolution(EvolutionCommand::BrowseLedger {
+                before_sequence: None,
+                limit: 50,
+            }));
         }
     }
 
@@ -443,6 +462,11 @@ impl TuiApp {
                 .into_iter()
                 .filter(|row| matches(row))
                 .collect(),
+            TuiOverlay::Evolution => self
+                .evolution_rows()
+                .into_iter()
+                .filter(|row| matches(row))
+                .collect(),
         }
     }
 
@@ -460,6 +484,79 @@ impl TuiApp {
             format!("Queued commands {}", self.pending_len()),
             format!("In-flight commands {}", self.in_flight_len()),
         ]
+    }
+
+    fn evolution_rows(&self) -> Vec<String> {
+        let Some(evolution) = &self.evolution else {
+            let mut rows = vec!["Loading self-evolution status…".into()];
+            rows.extend(
+                self.evolution_notice
+                    .as_ref()
+                    .map(|notice| format!("Notice: {notice}")),
+            );
+            return rows;
+        };
+        let view = project_evolution(evolution);
+        let mut rows = vec![view.status, view.availability];
+        rows.extend(
+            self.evolution_notice
+                .as_ref()
+                .map(|notice| format!("Notice: {notice}")),
+        );
+        rows.extend(
+            view.guidance
+                .map(|guidance| format!("Guidance: {guidance}")),
+        );
+        rows.extend(
+            view.disclosure
+                .into_iter()
+                .map(|(label, detail)| format!("{label}: {detail}")),
+        );
+        if evolution.enabled {
+            rows.push("Press Enter to disable self-evolution".into());
+        } else {
+            rows.push("Press Enter to request installation-owner enablement".into());
+        }
+        rows.push("Press Enter to restore the human-approved baseline".into());
+        if let Some(title) = view.active_title {
+            rows.push(format!(
+                "Active: {title} — {}",
+                view.active_state.unwrap_or_else(|| "In progress".into())
+            ));
+            rows.extend(
+                view.evidence
+                    .into_iter()
+                    .map(|item| format!("Evidence: {item}")),
+            );
+            rows.extend(view.readable_diff.map(|item| format!("Change: {item}")));
+            rows.extend(
+                view.measured_result
+                    .map(|item| format!("Measured result: {item}")),
+            );
+            if view.approval_hypothesis_id.is_some() {
+                rows.push("Press Enter to approve this change".into());
+            }
+        }
+        rows.extend(view.ledger.into_iter().map(|item| {
+            let mut row = format!("{} — {}", item.state, item.title);
+            if !item.evidence.is_empty() {
+                let _ = write!(row, "\nEvidence: {}", item.evidence.join("; "));
+            }
+            if let Some(diff) = item.readable_diff {
+                let _ = write!(row, "\nChange: {diff}");
+            }
+            if let Some(result) = item.measured_result {
+                let _ = write!(row, "\nMeasured result: {result}");
+            }
+            if item.reversal_promotion_id.is_some() {
+                row.push_str("\nPress Enter to revert");
+            }
+            row
+        }));
+        if view.has_more_ledger {
+            rows.push("More history is available".into());
+        }
+        rows
     }
 
     fn handle_overlay_key(&mut self, key: KeyEvent) -> AppAction {
@@ -583,6 +680,50 @@ impl TuiApp {
                 | TuiOverlay::Diagnostics,
             )
             | None => {}
+            Some(TuiOverlay::Evolution) => self.activate_evolution_selection(),
+        }
+    }
+
+    fn activate_evolution_selection(&mut self) {
+        let Some(evolution) = &self.evolution else {
+            return;
+        };
+        let view = project_evolution(evolution);
+        let selected = self.overlay_rows().get(self.overlay_selection).cloned();
+        match selected.as_deref() {
+            Some("Press Enter to request installation-owner enablement") => {
+                self.request_evolution_enable();
+                return;
+            }
+            Some("Press Enter to disable self-evolution") => {
+                self.request_evolution_disable();
+                return;
+            }
+            Some("Press Enter to restore the human-approved baseline") => {
+                self.request_evolution_restore();
+                return;
+            }
+            _ => {}
+        }
+        if selected.as_deref() == Some("Press Enter to approve this change") {
+            if let Some(hypothesis_id) = view.approval_hypothesis_id {
+                self.enqueue(ClientCommand::Evolution(EvolutionCommand::Approve {
+                    hypothesis_id,
+                }));
+            }
+            return;
+        }
+        let Some(selected) = selected else { return };
+        let promotion_id = view
+            .ledger
+            .into_iter()
+            .find(|item| selected.contains(&item.title) && item.reversal_promotion_id.is_some())
+            .and_then(|item| item.reversal_promotion_id);
+        if let Some(promotion_id) = promotion_id {
+            self.enqueue(ClientCommand::Evolution(EvolutionCommand::Revert {
+                promotion_id,
+                reason: "Requested from the terminal evolution history".into(),
+            }));
         }
     }
 
@@ -593,6 +734,10 @@ impl TuiApp {
             "/approvals" => self.open_overlay(TuiOverlay::Approvals),
             "/work" => self.open_overlay(TuiOverlay::Work),
             "/diagnostics" => self.open_overlay(TuiOverlay::Diagnostics),
+            "/evolution" => self.open_overlay(TuiOverlay::Evolution),
+            "/evolution-enable" => self.request_evolution_enable(),
+            "/evolution-disable" => self.request_evolution_disable(),
+            "/evolution-restore" => self.request_evolution_restore(),
             "/stop" => {
                 if let Some(session_id) = self.attached_session.clone() {
                     self.enqueue(ClientCommand::Cancel(CancelTarget::Session(session_id)));
@@ -661,14 +806,21 @@ impl TuiApp {
                         }
                     }
                     ResponsePayload::Snapshot(snapshot) => self.apply_snapshot(*snapshot),
+                    ResponsePayload::Evolution(evolution) => self.evolution = Some(*evolution),
                     other => self.log(format!("Received {} projection", payload_label(&other))),
                 },
                 CommandResult::Accepted { .. } => self.log("Command accepted"),
                 CommandResult::Rejected(error) => {
+                    if self.overlay == Some(TuiOverlay::Evolution) {
+                        self.evolution_notice = Some(error.error.message.clone());
+                    }
                     self.log(format!("Command rejected: {}", error.error.message));
                 }
             },
             WireMessage::Event(envelope) => {
+                if let DaemonEvent::EvolutionChanged(evolution) = &envelope.event {
+                    self.evolution = Some((**evolution).clone());
+                }
                 let acknowledgement = EventAcknowledgement {
                     root_tree_id: envelope.root_tree_id.clone(),
                     generation: envelope.generation,
@@ -708,12 +860,17 @@ impl TuiApp {
     }
 
     pub fn command_envelope(&self, command: ClientCommand) -> CommandEnvelope {
+        let installation_scoped = matches!(command, ClientCommand::Evolution(_));
         CommandEnvelope {
             protocol: keith_agent_types::CURRENT_PROTOCOL_VERSION,
             command_id: CommandId::new(),
             client_id: self.client_id.clone(),
             sent_at: UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
-            session_id: self.attached_session.clone(),
+            session_id: if installation_scoped {
+                None
+            } else {
+                self.attached_session.clone()
+            },
             command,
         }
     }
@@ -852,6 +1009,10 @@ impl TuiApp {
             "/work" => self.open_overlay(TuiOverlay::Work),
             "/memory" if argument.is_empty() => self.open_overlay(TuiOverlay::Memory),
             "/diagnostics" => self.open_overlay(TuiOverlay::Diagnostics),
+            "/evolution" => self.open_overlay(TuiOverlay::Evolution),
+            "/evolution-enable" => self.request_evolution_enable(),
+            "/evolution-disable" => self.request_evolution_disable(),
+            "/evolution-restore" => self.request_evolution_restore(),
             "/stop" => self.enqueue(ClientCommand::Cancel(CancelTarget::Session(
                 session_id.clone(),
             ))),
@@ -1031,6 +1192,27 @@ impl TuiApp {
         true
     }
 
+    fn request_evolution_enable(&mut self) {
+        self.enqueue(ClientCommand::Evolution(EvolutionCommand::Enable {
+            disclosure_acknowledged: true,
+        }));
+        self.log("Enablement is installation-owner only. This client carries no authority or identity; the installation control surface will provide guidance if required.");
+    }
+
+    fn request_evolution_disable(&mut self) {
+        self.enqueue(ClientCommand::Evolution(EvolutionCommand::Disable {
+            reason: "Requested from the terminal evolution surface".into(),
+        }));
+    }
+
+    fn request_evolution_restore(&mut self) {
+        self.enqueue(ClientCommand::Evolution(
+            EvolutionCommand::RestoreBaseline {
+                reason: "Requested from the terminal evolution surface".into(),
+            },
+        ));
+    }
+
     fn steer(&mut self) {
         let text = self.composer.trim().to_owned();
         let Some(session_id) = self.attached_session.clone() else {
@@ -1173,6 +1355,7 @@ fn payload_label(payload: &ResponsePayload) -> &'static str {
         ResponsePayload::Background(_) => "background",
         ResponsePayload::Artifact(_) => "artifact",
         ResponsePayload::DeliveryClaim(_) => "delivery",
+        ResponsePayload::Evolution(_) => "evolution",
     }
 }
 
@@ -1428,5 +1611,78 @@ mod tests {
         assert!(app.overlay.is_none());
         app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.overlay, Some(TuiOverlay::Commands));
+    }
+
+    #[test]
+    fn evolution_parity_has_real_installation_scoped_emit_paths() {
+        let mut app = TuiApp::new(Accessibility::default());
+        app.attach(SessionId::new());
+        app.next_command();
+
+        for input in [
+            "/evolution-enable",
+            "/evolution-disable",
+            "/evolution-restore",
+        ] {
+            app.replace_composer(input.into());
+            app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        }
+        let commands = [
+            app.next_command().unwrap(),
+            app.next_command().unwrap(),
+            app.next_command().unwrap(),
+        ];
+        assert!(matches!(
+            commands[0],
+            ClientCommand::Evolution(EvolutionCommand::Enable { .. })
+        ));
+        assert!(matches!(
+            commands[1],
+            ClientCommand::Evolution(EvolutionCommand::Disable { .. })
+        ));
+        assert!(matches!(
+            commands[2],
+            ClientCommand::Evolution(EvolutionCommand::RestoreBaseline { .. })
+        ));
+        for command in commands {
+            assert!(app.command_envelope(command).session_id.is_none());
+        }
+
+        app.open_overlay(TuiOverlay::Evolution);
+        assert!(matches!(
+            app.next_command(),
+            Some(ClientCommand::Evolution(EvolutionCommand::Status))
+        ));
+        assert!(matches!(
+            app.next_command(),
+            Some(ClientCommand::Evolution(
+                EvolutionCommand::BrowseLedger { .. }
+            ))
+        ));
+        assert!(
+            app.logs()
+                .iter()
+                .any(|line| line.contains("installation-owner only")
+                    && line.contains("no authority or identity"))
+        );
+
+        let refusal =
+            "Only the installation owner can enable self-evolution. Open installation settings.";
+        app.apply_wire_message(WireMessage::CommandResult(
+            keith_protocol::CommandResultEnvelope {
+                protocol: keith_agent_types::CURRENT_PROTOCOL_VERSION,
+                command_id: CommandId::new(),
+                completed_at: UtcTimestamp::UNIX_EPOCH,
+                result: CommandResult::Rejected(keith_protocol::CommandError {
+                    error: keith_agent_types::CommonError::new(
+                        keith_agent_types::ErrorCode::Unauthorized,
+                        refusal,
+                        false,
+                    ),
+                    unsupported_feature: None,
+                }),
+            },
+        ));
+        assert!(app.overlay_rows().iter().any(|row| row.contains(refusal)));
     }
 }

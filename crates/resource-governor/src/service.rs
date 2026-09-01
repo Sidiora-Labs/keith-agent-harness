@@ -1311,6 +1311,7 @@ mod tests {
             ResourceKind::Tokens,
             ResourceKind::ModelCostMicros,
             ResourceKind::WallTimeMs,
+            ResourceKind::CpuTimeMs,
             ResourceKind::ToolCalls,
             ResourceKind::MemoryBytes,
             ResourceKind::StorageBytes,
@@ -1353,6 +1354,20 @@ mod tests {
                     && projection.consumed == 1
             }));
         }
+    }
+
+    #[test]
+    fn evolution_concurrency_and_cpu_are_independently_classified() {
+        for resource in [
+            ResourceKind::EvolutionHypotheses,
+            ResourceKind::EvolutionShadowTrees,
+            ResourceKind::EvolutionBuilds,
+            ResourceKind::EvolutionCanaries,
+        ] {
+            assert!(resource.is_concurrency());
+            assert!(ResourceKind::concurrency_kinds().contains(&resource));
+        }
+        assert!(!ResourceKind::CpuTimeMs.is_concurrency());
     }
 
     #[test]

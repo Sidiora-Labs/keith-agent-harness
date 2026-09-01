@@ -615,6 +615,17 @@ ac_6  = "A real-process fault suite SHALL cover cold start, slow start, startup 
 [tasks]
 heading = "Implementation Plan: Contracts → Rust Foundation → Daemon and Sessions → Providers and Loop → Restricted Execution → Goals and Recursion → Personal State → Life Loop → Channels → Extensions and Refinement → Clients → Reliability and Security → Packaging → Production Acceptance"
 
+[req.57]
+title = "Competitive parity: durable approval, host isolation, turn control, and verification mass"
+story = "As the operator of a supervised agent, I want tool execution gated by a durable human decision, host isolation that never silently degrades, and turn controls that distinguish stopping from redirecting, so that autonomy stays containable and recoverable."
+ac_1  = "TOOL confirmation SHALL suspend the in-flight call rather than block an executor thread, SHALL be keyed by tool call id, and SHALL resume, deny, or time out without discarding completed work."
+ac_2  = "PENDING approvals SHALL be persisted durably before the operator is prompted and SHALL survive daemon restart, client reload, and worker replacement."
+ac_3  = "APPROVAL prompts SHALL redact secret-bearing arguments, and every decision SHALL record decider and timestamp in the session ledger."
+ac_4  = "PRODUCTION code paths SHALL contain no panicking unwrap or expect outside cfg(test)."
+ac_5  = "HOST isolation SHALL use native Landlock on Linux and Seatbelt on macOS, SHALL refuse untrusted execution when no backend is available, and SHALL NEVER silently reduce isolation."
+ac_6  = "TURN control SHALL distinguish interrupt, steer, and redirect, and steering SHALL drain at tool boundaries as well as turn boundaries."
+ac_7  = "VERIFICATION mass SHALL reach parity with production line count for every crate owning a durable boundary."
+
 [task.1]
 section = "Phase 1 — Contracts and Rust Foundation"
 title   = "Workspace, Common Types, Configuration, Storage Traits, and Test Harness"
@@ -1599,3 +1610,70 @@ do_4   = "Publish reference hardware, versions, configuration, measurements, fai
 do_5   = "Reconcile every phase status only after all referenced criteria pass through current release artifacts and real process paths"
 reqs   = ["50.6-50.7"]
 requires = ["14.1", "14.2", "14.3", "14.4", "14.5"]
+
+[task.15]
+section = "Phase 15 — Competitive Parity Remediation"
+title   = "Durable Approval Gate, Panic-Free Production Paths, Native Host Isolation, Turn Control Split, and Verification Parity"
+status  = "pending"
+
+[task.15.1]
+title  = "Durable suspending approval gate"
+status = "pending"
+wave   = 27
+do_1   = "Replace the blocking bool ConfirmationGate with an async decision keyed by ToolCallId that suspends the call instead of occupying an executor thread"
+do_2   = "Persist the pending approval through SessionWriter before the operator is prompted, and reload outstanding approvals on daemon and worker restart"
+do_3   = "Redact secret-bearing arguments in every rendered prompt and record decider and timestamp in the session ledger"
+do_4   = "Bound every wait with a timeout and abort guard so a lost client cannot strand a turn, and prove denial and timeout both leave a paired tool result"
+do_5   = "Ship a real production implementor wired through daemon-core, TUI, and web, and prove approval survives restart end to end"
+reqs   = ["57.1", "57.2", "57.3"]
+requires = ["14.3"]
+
+[task.15.2]
+title  = "Panic-free production paths"
+status = "pending"
+wave   = 27
+do_1   = "Eliminate every unwrap and expect outside cfg(test) in production crates, converting each to a typed error or a documented invariant"
+do_2   = "Deny clippy::unwrap_used and clippy::expect_used at workspace level with cfg(test) exemption"
+do_3   = "Prove the workspace still builds and tests clean under the new lint level"
+reqs   = ["57.4"]
+
+[task.15.3]
+title  = "Native host isolation backends"
+status = "pending"
+wave   = 28
+do_1   = "Implement native Landlock filesystem confinement on Linux without shelling out to bubblewrap"
+do_2   = "Implement Seatbelt confinement on macOS with an explicit profile"
+do_3   = "Refuse untrusted execution when no backend is available instead of reducing isolation, and surface the refusal as a typed error"
+do_4   = "Prove containment with escape tests covering traversal, symlink swap, and network egress"
+reqs   = ["57.5", "14.2"]
+
+[task.15.4]
+title  = "Turn control split and boundary steering"
+status = "pending"
+wave   = 28
+do_1   = "Split cancellation into interrupt, steer, and redirect with distinct semantics and distinct events"
+do_2   = "Make redirect cancel only the in-flight model request while preserving completed tool results"
+do_3   = "Drain steering at tool boundaries as well as turn boundaries without losing committed work"
+do_4   = "Prove every control leaves the session ledger paired and replayable"
+reqs   = ["57.6"]
+requires = ["15.1"]
+
+[task.15.5]
+title  = "Verification parity for durable-boundary crates"
+status = "pending"
+wave   = 29
+do_1   = "Raise test line count to at least production line count for agent-loop, session-store, tool-core, sandbox, supervisor, daemon-core, and credentials"
+do_2   = "Add property tests for session replay, approval resume, and compaction pairing"
+do_3   = "Extend CI beyond a single job to a per-OS and per-feature matrix with a machine-enforced coverage ratchet"
+reqs   = ["57.7"]
+requires = ["15.1", "15.3", "15.4"]
+
+[task.15.6]
+title  = "Channel adapter expansion beyond Discord"
+status = "pending"
+wave   = 30
+do_1   = "Decide and record which platforms Keith competes on rather than implementing breadth for its own sake"
+do_2   = "Extract the shared adapter contract from the Discord implementation into channel-core"
+do_3   = "Implement each selected platform against the contract with signature verification and rate-limit handling"
+reqs   = ["57.1"]
+requires = ["15.1"]

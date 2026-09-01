@@ -11,11 +11,12 @@ use keith_agent_types::{CURRENT_SCHEMA_VERSION, EntityId, Revision, SchemaVersio
 use keith_state_store_core::{
     ActionRepository, AtomicStateRepository, AttentionRepository, CatalogRepository,
     ChannelOffsetRepository, ChildMessageRepository, ChildRepository, ClassifiedRepositoryError,
-    Collection, CommitReceipt, CommitmentRepository, DeliveryRepository, GenerationRepository,
-    GoalRepository, InitiativeRepository, JobAttemptRepository, LeaseRepository,
-    MigrationRepository, PlanRepository, ProfileRepository, RecordMutation, RefinementRepository,
-    ResourceRepository, RouteRepository, ScheduleRepository, ToolExperienceRepository,
-    VersionedRecord, WaitRepository, WritePrecondition,
+    Collection, CommitReceipt, CommitmentRepository, DeliveryRepository,
+    EvolutionLedgerDataControlRepository, EvolutionLedgerErasureReport, EvolutionLedgerRepository,
+    GenerationRepository, GoalRepository, InitiativeRepository, JobAttemptRepository,
+    LeaseRepository, MigrationRepository, PlanRepository, ProfileRepository, RecordMutation,
+    RefinementRepository, ResourceRepository, RouteRepository, ScheduleRepository,
+    ToolExperienceRepository, VersionedRecord, WaitRepository, WritePrecondition,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
@@ -93,6 +94,15 @@ pub enum StoreError {
     Injected(FaultPoint),
     #[error("transaction committed but acknowledgement was interrupted")]
     UnknownOutcome,
+    #[error("collection {0:?} is append-only")]
+    AppendOnlyViolation(Collection),
+    #[error(
+        "evolution ledger erasure left remnants: {remaining_records} records and {remaining_heads} heads"
+    )]
+    EvolutionLedgerErasureIncomplete {
+        remaining_records: usize,
+        remaining_heads: usize,
+    },
 }
 
 impl ClassifiedRepositoryError for StoreError {
@@ -275,6 +285,133 @@ impl AtomicStateRepository for EmbeddedStore {
     }
 }
 
+impl EvolutionLedgerRepository for EmbeddedStore {
+    type Error = StoreError;
+
+    fn get_evolution_record(&self, id: &EntityId) -> Result<Option<VersionedRecord>, Self::Error> {
+        self.get_record(Collection::EvolutionLedger, id)
+    }
+
+    fn list_evolution_records(&self) -> Result<Vec<VersionedRecord>, Self::Error> {
+        self.list_records(Collection::EvolutionLedger)
+    }
+
+    fn get_evolution_head(&self) -> Result<Option<VersionedRecord>, Self::Error> {
+        self.get_record(Collection::EvolutionLedgerHead, &EntityId::from_u128(0))
+    }
+
+    fn append_evolution_record(
+        &self,
+        record: VersionedRecord,
+        head: VersionedRecord,
+        head_precondition: WritePrecondition,
+    ) -> Result<CommitReceipt, Self::Error> {
+        self.transact_evolution_append(record, head, head_precondition)
+    }
+}
+
+impl EvolutionLedgerDataControlRepository for EmbeddedStore {
+    type Error = StoreError;
+
+    fn erase_evolution_ledger_for_data_control(
+        &self,
+    ) -> Result<EvolutionLedgerErasureReport, Self::Error> {
+        self.transact_evolution_ledger_erasure()
+    }
+}
+
+impl EmbeddedStore {
+    fn transact_evolution_ledger_erasure(
+        &self,
+    ) -> Result<EvolutionLedgerErasureReport, StoreError> {
+        self.fail_if(FaultPoint::BeforeTransaction)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deleted_records = transaction.execute(
+            "DELETE FROM records WHERE collection = ?1",
+            params![Collection::EvolutionLedger.as_str()],
+        )?;
+        let deleted_heads = transaction.execute(
+            "DELETE FROM records WHERE collection = ?1",
+            params![Collection::EvolutionLedgerHead.as_str()],
+        )?;
+        let remaining_records = collection_record_count(&transaction, Collection::EvolutionLedger)?;
+        let remaining_heads =
+            collection_record_count(&transaction, Collection::EvolutionLedgerHead)?;
+        if remaining_records != 0 || remaining_heads != 0 {
+            return Err(StoreError::EvolutionLedgerErasureIncomplete {
+                remaining_records,
+                remaining_heads,
+            });
+        }
+        self.fail_if(FaultPoint::BeforeCommit)?;
+        transaction.commit()?;
+        if self.take_fault(FaultPoint::AfterCommit) {
+            return Err(StoreError::UnknownOutcome);
+        }
+        Ok(EvolutionLedgerErasureReport {
+            deleted_records,
+            deleted_heads,
+            remaining_records,
+            remaining_heads,
+        })
+    }
+
+    fn transact_evolution_append(
+        &self,
+        record: VersionedRecord,
+        head: VersionedRecord,
+        head_precondition: WritePrecondition,
+    ) -> Result<CommitReceipt, StoreError> {
+        if head.id != EntityId::from_u128(0) {
+            return Err(StoreError::AppendOnlyViolation(
+                Collection::EvolutionLedgerHead,
+            ));
+        }
+        self.fail_if(FaultPoint::BeforeTransaction)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        apply_mutation_inner(
+            &transaction,
+            &RecordMutation::Put {
+                collection: Collection::EvolutionLedger,
+                record,
+                precondition: WritePrecondition::Missing,
+            },
+            true,
+        )?;
+        apply_mutation_inner(
+            &transaction,
+            &RecordMutation::Put {
+                collection: Collection::EvolutionLedgerHead,
+                record: head,
+                precondition: head_precondition,
+            },
+            true,
+        )?;
+        self.fail_if(FaultPoint::BeforeCommit)?;
+        transaction.commit()?;
+        if self.take_fault(FaultPoint::AfterCommit) {
+            return Err(StoreError::UnknownOutcome);
+        }
+        Ok(CommitReceipt {
+            applied_mutations: 2,
+        })
+    }
+}
+
+fn collection_record_count(
+    transaction: &Transaction<'_>,
+    collection: Collection,
+) -> Result<usize, StoreError> {
+    let count = transaction.query_row(
+        "SELECT COUNT(*) FROM records WHERE collection = ?1",
+        params![collection.as_str()],
+        |row| row.get::<_, i64>(0),
+    )?;
+    usize::try_from(count).map_err(|_| StoreError::NumericRange)
+}
+
 fn configure(connection: &Connection) -> Result<(), StoreError> {
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.pragma_update(None, "foreign_keys", true)?;
@@ -346,6 +483,36 @@ fn apply_mutation(
     transaction: &Transaction<'_>,
     mutation: &RecordMutation,
 ) -> Result<(), StoreError> {
+    apply_mutation_inner(transaction, mutation, false)
+}
+
+fn apply_mutation_inner(
+    transaction: &Transaction<'_>,
+    mutation: &RecordMutation,
+    evolution_append: bool,
+) -> Result<(), StoreError> {
+    #[allow(clippy::match_same_arms)]
+    match mutation {
+        RecordMutation::Put {
+            collection: Collection::EvolutionLedger,
+            precondition: WritePrecondition::Missing,
+            ..
+        } if evolution_append => {}
+        RecordMutation::Put {
+            collection: Collection::EvolutionLedgerHead,
+            precondition: WritePrecondition::Missing | WritePrecondition::Exact(_),
+            ..
+        } if evolution_append => {}
+        RecordMutation::Put {
+            collection: Collection::EvolutionLedger | Collection::EvolutionLedgerHead,
+            ..
+        }
+        | RecordMutation::Delete {
+            collection: Collection::EvolutionLedger | Collection::EvolutionLedgerHead,
+            ..
+        } => return Err(StoreError::AppendOnlyViolation(Collection::EvolutionLedger)),
+        _ => {}
+    }
     match mutation {
         RecordMutation::Put {
             collection,
@@ -759,6 +926,74 @@ mod tests {
             updated_at: UtcTimestamp::from_unix_millis(i64::try_from(value).unwrap()),
             payload: json!({"value": value}),
         }
+    }
+
+    fn append_evolution_pair(store: &EmbeddedStore, value: usize, head_revision: u64) {
+        store
+            .append_evolution_record(
+                record(EntityId::new(), 0, value),
+                record(EntityId::from_u128(0), head_revision, value),
+                if head_revision == 0 {
+                    WritePrecondition::Missing
+                } else {
+                    WritePrecondition::Exact(Revision::new(head_revision - 1))
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn data_control_erasure_atomically_removes_ledger_and_authenticated_head() {
+        let store = EmbeddedStore::open_in_memory().unwrap();
+        append_evolution_pair(&store, 1, 0);
+        append_evolution_pair(&store, 2, 1);
+
+        let report = store.erase_evolution_ledger_for_data_control().unwrap();
+
+        assert_eq!(
+            report,
+            EvolutionLedgerErasureReport {
+                deleted_records: 2,
+                deleted_heads: 1,
+                remaining_records: 0,
+                remaining_heads: 0,
+            }
+        );
+        assert!(store.list_evolution_records().unwrap().is_empty());
+        assert!(store.get_evolution_head().unwrap().is_none());
+    }
+
+    #[test]
+    fn failed_data_control_erasure_rolls_back_both_append_only_collections() {
+        let store = EmbeddedStore::open_in_memory().unwrap();
+        append_evolution_pair(&store, 1, 0);
+        store.inject_fault_once(FaultPoint::BeforeCommit);
+
+        assert!(matches!(
+            store.erase_evolution_ledger_for_data_control(),
+            Err(StoreError::Injected(FaultPoint::BeforeCommit))
+        ));
+        assert_eq!(store.list_evolution_records().unwrap().len(), 1);
+        assert!(store.get_evolution_head().unwrap().is_some());
+    }
+
+    #[test]
+    fn generic_mutations_cannot_use_the_data_control_erasure_boundary() {
+        let store = EmbeddedStore::open_in_memory().unwrap();
+        append_evolution_pair(&store, 1, 0);
+
+        for collection in [Collection::EvolutionLedger, Collection::EvolutionLedgerHead] {
+            let error = store
+                .transact(&[RecordMutation::Delete {
+                    collection,
+                    id: EntityId::from_u128(0),
+                    precondition: WritePrecondition::Any,
+                }])
+                .unwrap_err();
+            assert!(matches!(error, StoreError::AppendOnlyViolation(_)));
+        }
+        assert_eq!(store.list_evolution_records().unwrap().len(), 1);
+        assert!(store.get_evolution_head().unwrap().is_some());
     }
 
     #[test]

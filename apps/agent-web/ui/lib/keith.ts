@@ -105,7 +105,111 @@ export interface MemoryResult {
   score_micros: number
 }
 
+export interface EvolutionLedgerEntry {
+  sequence: number
+  occurred_at: Timestamp
+  kind: string
+  summary: string
+  state: string
+  evidence: string[]
+  measured_result?: string | null
+  readable_diff?: string | null
+  reversible: boolean
+  hypothesis_id?: string | null
+  promotion_id?: string | null
+}
+
+export interface EvolutionProjection {
+  protocol_version: ProtocolVersion
+  enabled: boolean
+  state: string
+  availability:
+    | { available: { rustc: string; cargo: string } }
+    | { unavailable: { reasons: string[] } }
+  disclosure: {
+    editable_surface: string
+    protected_surface: string
+    autonomy: string
+    reversal: string
+  }
+  active?: {
+    hypothesis_id: string
+    target: string
+    metric: string
+    state: string
+    evidence: string[]
+    measured_result?: string | null
+    readable_diff?: string | null
+    approval_required: boolean
+  } | null
+  ledger: EvolutionLedgerEntry[]
+  has_more_ledger: boolean
+  guidance?: string | null
+}
+
+export interface EvolutionLedgerContent {
+  summary: string
+  state: string
+  evidence: string[]
+  readableDiff: string | null
+  measuredResult: string | null
+  canRevert: boolean
+}
+
+export function evolutionLedgerContent(entry: EvolutionLedgerEntry): EvolutionLedgerContent {
+  return {
+    summary: entry.summary,
+    state: entry.state,
+    evidence: [...entry.evidence],
+    readableDiff: entry.readable_diff ?? null,
+    measuredResult: entry.measured_result ?? null,
+    canRevert: entry.reversible && Boolean(entry.promotion_id),
+  }
+}
+
 export type Command = { command: string; parameters?: unknown }
+
+export type EvolutionIntent =
+  | { action: 'status' }
+  | { action: 'enable'; parameters: { disclosure_acknowledged: boolean } }
+  | { action: 'disable'; parameters: { reason: string } }
+  | { action: 'approve'; parameters: { hypothesis_id: string } }
+  | { action: 'revert'; parameters: { promotion_id: string; reason: string } }
+  | { action: 'restore_baseline'; parameters: { reason: string } }
+  | { action: 'browse_ledger'; parameters: { before_sequence: number | null; limit: number } }
+
+export function evolutionCommand(intent: EvolutionIntent): Command {
+  return { command: 'evolution', parameters: intent }
+}
+
+export async function executeEvolution(
+  bootstrap: BootstrapData,
+  intent: EvolutionIntent,
+): Promise<CommandResult> {
+  const response = await fetch('/api/evolution/commands', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/json',
+      'x-keith-csrf': bootstrap.csrf,
+    },
+    body: JSON.stringify(intent),
+  })
+  if (!response.ok) throw new KeithApiError(response.status, await safeError(response))
+  const wire = (await response.json()) as { message?: string; payload?: CommandResult }
+  if (wire.message !== 'command_result' || !wire.payload) {
+    throw new KeithApiError(502, 'Keith returned an invalid evolution response.')
+  }
+  if (wire.payload.result.status === 'rejected') {
+    const error = wire.payload.result.payload.error
+    throw new KeithApiError(409, error?.safe_message || error?.message || 'Keith rejected the request.')
+  }
+  return wire.payload
+}
+
+export const EVOLUTION_ENABLEMENT_GUIDANCE =
+  'Self-evolution can only be enabled by the installation owner at the installation boundary. This browser cannot enable it, widen its editable surface, or change its autonomy class.'
 
 export interface CommandResult {
   protocol: ProtocolVersion
@@ -208,6 +312,9 @@ export async function executeCommand(
   envelope: CommandEnvelope,
   onWireMessage?: (encoded: string) => void,
 ): Promise<CommandResult> {
+  if (envelope.command.command === 'evolution') {
+    return executeEvolution(bootstrap, envelope.command.parameters as EvolutionIntent)
+  }
   const encoded = JSON.stringify(envelope)
   let response: Response | undefined
   for (let attempt = 0; attempt < 3; attempt += 1) {

@@ -162,6 +162,9 @@ impl MemoryService {
 
     /// Drains queued ingestion as optional maintenance. Failed items are restored for a later
     /// attempt and never become turn, finalization, outbox, or delivery failures.
+    ///
+    /// # Errors
+    /// Returns [`MemoryError`] if the pending-ingestion queue lock is poisoned. Individual failed items are restored rather than reported here.
     pub fn flush_pending_ingestion(&self, now: UtcTimestamp) -> Result<u64, MemoryError> {
         let mut items = self
             .pending_ingestion
@@ -190,6 +193,9 @@ impl MemoryService {
 
     /// Creates source-cited durable memory. The host validates exact evidence and schema while the
     /// agent remains responsible for interpreting what the source means.
+    ///
+    /// # Errors
+    /// Returns [`MemoryError`] if the evidence is malformed or the record cannot be committed to the atlas.
     pub fn memory_create(
         &self,
         request: MemoryCreateRequest,
@@ -266,6 +272,9 @@ impl MemoryService {
     }
 
     /// Supersedes one exact evidence record with a newly source-cited correction.
+    ///
+    /// # Errors
+    /// Returns [`MemoryError`] if the target record is missing or the correction cannot be committed to the atlas.
     pub fn memory_correct(
         &self,
         request: MemoryCorrectRequest,
@@ -277,7 +286,10 @@ impl MemoryService {
         }
         let prior = self
             .observatory
-            .evidence(&[request.evidence_id.clone()], Sensitivity::Secret)?
+            .evidence(
+                std::slice::from_ref(&request.evidence_id),
+                Sensitivity::Secret,
+            )?
             .into_iter()
             .next()
             .ok_or(MemoryError::MissingRecord)?;
@@ -345,6 +357,9 @@ impl MemoryService {
     }
 
     /// Removes one record from all future activation while retaining a source-cited tombstone.
+    ///
+    /// # Errors
+    /// Returns [`MemoryError`] if the target record is missing or the forget transition cannot be committed.
     pub fn memory_forget(
         &self,
         request: MemoryForgetRequest,
@@ -353,7 +368,10 @@ impl MemoryService {
         self.flush_pending_ingestion(now)?;
         let prior = self
             .observatory
-            .evidence(&[request.evidence_id.clone()], Sensitivity::Secret)?
+            .evidence(
+                std::slice::from_ref(&request.evidence_id),
+                Sensitivity::Secret,
+            )?
             .into_iter()
             .next()
             .ok_or(MemoryError::MissingRecord)?;
@@ -389,6 +407,8 @@ impl MemoryService {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns [`MemoryError`] if the atlas index cannot be read or the query is malformed.
     pub fn memory_search(
         &self,
         query: &str,
@@ -405,6 +425,8 @@ impl MemoryService {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    /// Returns [`MemoryError`] if the atlas cannot be read.
     pub fn memory_get(
         &self,
         evidence_ids: &[EntityId],
@@ -415,6 +437,8 @@ impl MemoryService {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    /// Returns [`MemoryError`] if the atlas cannot be read or the turn context cannot be assembled.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn memory_context(
         &self,
@@ -707,8 +731,8 @@ impl MemoryService {
                                 )
                         })
                 })
-                .cloned()
                 .take(MAX_HOT_ANCHORS)
+                .cloned()
                 .collect();
             cache.revision = revision;
         }
@@ -776,8 +800,11 @@ const fn sensitivity_rank(sensitivity: Sensitivity) -> u8 {
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
     Sha256::digest(bytes)
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .fold(String::new(), |mut digest, byte| {
+            let _ = write!(digest, "{byte:02x}");
+            digest
+        })
 }

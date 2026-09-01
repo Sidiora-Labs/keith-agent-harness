@@ -15,6 +15,9 @@ fn main() {
         return;
     }
     if let Err(error) = keith_worker_runtime::run_from_environment_with_runtime(|arguments| {
+        if arguments.canary {
+            return Ok(Box::new(keith_local_runtime::CandidateCanaryRuntime::new()));
+        }
         let path = arguments
             .runtime_config
             .as_deref()

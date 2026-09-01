@@ -603,9 +603,10 @@ pub enum RunError {
 pub struct RestrictedProcessRunner {
     workspace_root: PathBuf,
     workspace_handle: Dir,
-    allowed_programs: BTreeSet<PathBuf>,
+    allowed_programs: BTreeMap<PathBuf, PathBuf>,
     allowed_environment: BTreeSet<String>,
     minimal_environment: BTreeMap<String, String>,
+    read_only_paths: BTreeSet<PathBuf>,
     sandbox: SandboxStatus,
 }
 
@@ -619,18 +620,62 @@ impl RestrictedProcessRunner {
         allowed_environment: BTreeSet<String>,
         minimal_environment: BTreeMap<String, String>,
     ) -> Result<Self, RunError> {
+        Self::new_with_read_only_paths(
+            workspace_root,
+            allowed_programs,
+            allowed_environment,
+            minimal_environment,
+            Vec::new(),
+        )
+    }
+
+    /// Creates a runner with additional canonical host paths mounted read-only in a strong
+    /// sandbox. This is intended for immutable toolchains and dependency caches, not data roots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a workspace, executable, or read-only path cannot be resolved, or
+    /// when a read-only path would expose the filesystem root or overlap the writable workspace.
+    pub fn new_with_read_only_paths(
+        workspace_root: impl AsRef<Path>,
+        allowed_programs: impl IntoIterator<Item = PathBuf>,
+        allowed_environment: BTreeSet<String>,
+        minimal_environment: BTreeMap<String, String>,
+        read_only_paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self, RunError> {
         let workspace_root = std::fs::canonicalize(workspace_root.as_ref())?;
         let workspace_handle = Dir::open_ambient_dir(&workspace_root, ambient_authority())?;
         let allowed_programs = allowed_programs
             .into_iter()
+            .map(|requested| {
+                if !requested.is_absolute() {
+                    return Err(std::io::Error::other(
+                        "allowlisted programs must use absolute paths",
+                    ));
+                }
+                let canonical = std::fs::canonicalize(&requested)?;
+                Ok((requested, canonical))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let read_only_paths = read_only_paths
+            .into_iter()
             .map(std::fs::canonicalize)
             .collect::<Result<BTreeSet<_>, _>>()?;
+        if read_only_paths.iter().any(|path| {
+            path.parent().is_none()
+                || path == &workspace_root
+                || workspace_root.starts_with(path)
+                || path.starts_with(&workspace_root)
+        }) {
+            return Err(RunError::WorkingDirectory);
+        }
         Ok(Self {
             workspace_root,
             workspace_handle,
             allowed_programs,
             allowed_environment,
             minimal_environment,
+            read_only_paths,
             sandbox: SandboxStatus::detect(),
         })
     }
@@ -650,9 +695,13 @@ impl RestrictedProcessRunner {
         sink: &mut dyn OutputSink,
     ) -> Result<RunResult, RunError> {
         validate_process_limits(&request.limits)?;
-        let program =
+        let expected = self
+            .allowed_programs
+            .get(&request.program)
+            .ok_or(RunError::ProgramDenied)?;
+        let actual =
             std::fs::canonicalize(&request.program).map_err(|_| RunError::ProgramDenied)?;
-        if !self.allowed_programs.contains(&program) {
+        if &actual != expected {
             return Err(RunError::ProgramDenied);
         }
         let working =
@@ -668,7 +717,7 @@ impl RestrictedProcessRunner {
             return Err(RunError::StrongIsolationUnavailable);
         }
         validate_available_limits(&request.limits, request.isolation, &self.sandbox)?;
-        let (launcher, arguments) = self.launch_command(&program, request)?;
+        let (launcher, arguments) = self.launch_command(&request.program, request)?;
         let mut command = Command::new(launcher);
         command
             .args(arguments)
@@ -781,65 +830,110 @@ impl RestrictedProcessRunner {
             .collect::<Vec<_>>();
         #[cfg(target_os = "linux")]
         {
-            if request.limits.cpu_seconds.is_some() || request.limits.memory_bytes.is_some() {
-                let prlimit = find_executable(&["/usr/bin/prlimit", "/bin/prlimit"])
-                    .ok_or_else(|| RunError::LimitUnavailable("prlimit is unavailable".into()))?;
-                let mut wrapped = Vec::new();
-                if let Some(seconds) = request.limits.cpu_seconds {
-                    wrapped.push(format!("--cpu={seconds}:{seconds}").into());
-                }
-                if let Some(bytes) = request.limits.memory_bytes {
-                    wrapped.push(format!("--as={bytes}:{bytes}").into());
-                }
-                wrapped.push("--".into());
-                wrapped.push(executable.into_os_string());
-                wrapped.append(&mut arguments);
-                executable = prlimit;
-                arguments = wrapped;
-            }
-            if request.isolation == IsolationRequest::UntrustedWorkspace {
-                let launcher = self
-                    .sandbox
-                    .launcher
-                    .clone()
-                    .ok_or(RunError::StrongIsolationUnavailable)?;
-                let root = self.workspace_root.as_os_str().to_owned();
-                let work = self
-                    .workspace_root
-                    .join(&request.working_directory)
-                    .into_os_string();
-                let mut wrapped = vec![
-                    "--die-with-parent".into(),
-                    "--new-session".into(),
-                    "--unshare-all".into(),
-                ];
-                if !request.limits.deny_network {
-                    wrapped.push("--share-net".into());
-                }
-                for system in ["/usr", "/bin", "/lib", "/lib64"] {
-                    if Path::new(system).exists() {
-                        wrapped.extend(["--ro-bind".into(), system.into(), system.into()]);
-                    }
-                }
-                wrapped.extend([
-                    "--dev".into(),
-                    "/dev".into(),
-                    "--proc".into(),
-                    "/proc".into(),
-                    "--bind".into(),
-                    root.clone(),
-                    root,
-                    "--chdir".into(),
-                    work,
-                    "--".into(),
-                    executable.into_os_string(),
-                ]);
-                wrapped.append(&mut arguments);
-                executable = launcher;
-                arguments = wrapped;
-            }
+            (executable, arguments) = Self::apply_linux_limits(executable, arguments, request)?;
+            (executable, arguments) = self.apply_linux_isolation(executable, arguments, request)?;
         }
         #[cfg(target_os = "macos")]
+        {
+            (executable, arguments) = self.apply_macos_isolation(executable, arguments, request)?;
+        }
+        Ok((executable, arguments))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn apply_linux_limits(
+        mut executable: PathBuf,
+        mut arguments: Vec<OsString>,
+        request: &RunRequest,
+    ) -> Result<(PathBuf, Vec<OsString>), RunError> {
+        if request.limits.cpu_seconds.is_some() || request.limits.memory_bytes.is_some() {
+            let prlimit = find_executable(&["/usr/bin/prlimit", "/bin/prlimit"])
+                .ok_or_else(|| RunError::LimitUnavailable("prlimit is unavailable".into()))?;
+            let mut wrapped = Vec::new();
+            if let Some(seconds) = request.limits.cpu_seconds {
+                wrapped.push(format!("--cpu={seconds}:{seconds}").into());
+            }
+            if let Some(bytes) = request.limits.memory_bytes {
+                wrapped.push(format!("--as={bytes}:{bytes}").into());
+            }
+            wrapped.push("--".into());
+            wrapped.push(executable.into_os_string());
+            wrapped.append(&mut arguments);
+            executable = prlimit;
+            arguments = wrapped;
+        }
+        Ok((executable, arguments))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn apply_linux_isolation(
+        &self,
+        mut executable: PathBuf,
+        mut arguments: Vec<OsString>,
+        request: &RunRequest,
+    ) -> Result<(PathBuf, Vec<OsString>), RunError> {
+        if request.isolation == IsolationRequest::UntrustedWorkspace {
+            let launcher = self
+                .sandbox
+                .launcher
+                .clone()
+                .ok_or(RunError::StrongIsolationUnavailable)?;
+            let root = self.workspace_root.as_os_str().to_owned();
+            let work = self
+                .workspace_root
+                .join(&request.working_directory)
+                .into_os_string();
+            let mut wrapped = vec![
+                "--die-with-parent".into(),
+                "--new-session".into(),
+                "--unshare-all".into(),
+            ];
+            if !request.limits.deny_network {
+                wrapped.push("--share-net".into());
+            }
+            if Path::new("/usr").is_dir() {
+                wrapped.extend(["--ro-bind".into(), "/usr".into(), "/usr".into()]);
+            }
+            for (target, source) in [
+                ("/bin", "usr/bin"),
+                ("/lib", "usr/lib"),
+                ("/lib64", "usr/lib64"),
+            ] {
+                if Path::new(target).exists() {
+                    wrapped.extend(["--symlink".into(), source.into(), target.into()]);
+                }
+            }
+            for path in &self.read_only_paths {
+                let path = path.as_os_str().to_owned();
+                wrapped.extend(["--ro-bind".into(), path.clone(), path]);
+            }
+            wrapped.extend([
+                "--dev".into(),
+                "/dev".into(),
+                "--proc".into(),
+                "/proc".into(),
+                "--bind".into(),
+                root.clone(),
+                root,
+                "--chdir".into(),
+                work,
+                "--".into(),
+                executable.into_os_string(),
+            ]);
+            wrapped.append(&mut arguments);
+            executable = launcher;
+            arguments = wrapped;
+        }
+        Ok((executable, arguments))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn apply_macos_isolation(
+        &self,
+        mut executable: PathBuf,
+        mut arguments: Vec<OsString>,
+        request: &RunRequest,
+    ) -> Result<(PathBuf, Vec<OsString>), RunError> {
         if request.isolation == IsolationRequest::UntrustedWorkspace {
             let launcher = self
                 .sandbox

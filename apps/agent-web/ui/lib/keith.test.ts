@@ -5,6 +5,9 @@ import {
   commandEnvelope,
   createUlid,
   emptyProjection,
+  evolutionCommand,
+  evolutionLedgerContent,
+  EVOLUTION_ENABLEMENT_GUIDANCE,
   eventSocketUrl,
   mergeSessions,
   takeSseData,
@@ -269,5 +272,58 @@ describe('Keith browser protocol', () => {
       '</openai_compatible_conversation>',
     ].join('')
     expect(visibleUserText(wrapped)).toBe('Visible request')
+  })
+
+  it('encodes evolution mutations without client identity or authority fields', () => {
+    expect(evolutionCommand({
+      action: 'revert',
+      parameters: {
+        promotion_id: 'promotion-1',
+        reason: 'Owner selected one-action reversal',
+      },
+    })).toEqual({
+      command: 'evolution',
+      parameters: {
+        action: 'revert',
+        parameters: {
+          promotion_id: 'promotion-1',
+          reason: 'Owner selected one-action reversal',
+        },
+      },
+    })
+    expect(JSON.stringify(evolutionCommand({ action: 'status' }))).not.toMatch(
+      /identity|authority|credential/i,
+    )
+  })
+
+  it('keeps browser enablement owner-only and offers no credential workflow', () => {
+    expect(EVOLUTION_ENABLEMENT_GUIDANCE).toContain('installation owner')
+    expect(EVOLUTION_ENABLEMENT_GUIDANCE).toContain('cannot enable')
+    expect(EVOLUTION_ENABLEMENT_GUIDANCE).not.toMatch(/password|token|credential field/i)
+  })
+
+  it('keeps readable ledger evidence and one-action reversal in the web presentation', () => {
+    const content = evolutionLedgerContent({
+      sequence: 7,
+      occurred_at: 1_000,
+      kind: 'promotion',
+      summary: 'Reduced repeated tool calls',
+      state: 'observing',
+      evidence: ['Repeated calls fell from four to one'],
+      readable_diff: 'Stops after the first verified match',
+      measured_result: '75% fewer repeated calls',
+      hypothesis_id: 'internal-hypothesis-id',
+      promotion_id: 'internal-promotion-id',
+      reversible: true,
+    })
+    expect(content).toEqual({
+      summary: 'Reduced repeated tool calls',
+      state: 'observing',
+      evidence: ['Repeated calls fell from four to one'],
+      readableDiff: 'Stops after the first verified match',
+      measuredResult: '75% fewer repeated calls',
+      canRevert: true,
+    })
+    expect(content.summary).not.toMatch(/internal-(hypothesis|promotion)-id/)
   })
 })

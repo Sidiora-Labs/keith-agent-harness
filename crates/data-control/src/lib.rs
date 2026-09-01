@@ -9,16 +9,21 @@ use keith_agent_types::{
     canonical_json_bytes,
 };
 use keith_retrieval::{RetrievalError, RetrievalService};
+use keith_self_evolution::{EvolutionLedgerArchive, corpus_data_inventory, shadow_data_inventory};
 use keith_state_store::{EmbeddedStore, FileBackupHook, StoreError};
 use keith_state_store_core::{
-    AtomicStateRepository, Collection, RecordMutation, VersionedRecord, WritePrecondition,
+    AtomicStateRepository, Collection, EvolutionLedgerDataControlRepository, RecordMutation,
+    VersionedRecord, WritePrecondition,
 };
+use keith_supervisor::worker_image_data_inventory;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const PORTABLE_FORMAT: &str = "keith-portable-export";
 pub const PORTABLE_SCHEMA_VERSION: u16 = 1;
+pub const EVOLUTION_PORTABLE_FORMAT: &str = "keith-evolution-data-export";
+pub const EVOLUTION_PORTABLE_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -144,6 +149,202 @@ impl PortableExport {
     }
 }
 
+/// Evolution data is owned by the installation, never by a profile or session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvolutionDataScope {
+    InstallationGlobal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvolutionDataDomain {
+    Ledger,
+    WorkerImages,
+    ShadowTrees,
+    EvaluationCorpus,
+}
+
+impl EvolutionDataDomain {
+    pub const ALL: [Self; 4] = [
+        Self::Ledger,
+        Self::WorkerImages,
+        Self::ShadowTrees,
+        Self::EvaluationCorpus,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Ledger => "ledger",
+            Self::WorkerImages => "worker-images",
+            Self::ShadowTrees => "shadow-trees",
+            Self::EvaluationCorpus => "evaluation-corpus",
+        }
+    }
+}
+
+/// Human-readable exact scope carried in every export and deletion plan.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvolutionScopeStatement {
+    pub installation_global: bool,
+    pub includes: Vec<String>,
+    pub excludes: Vec<String>,
+    pub deletion_effect: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddedCorpusStatement {
+    pub sha256: String,
+    pub immutable: bool,
+    pub deletable: bool,
+    pub reason: String,
+}
+
+/// Standalone, versioned, readable evolution-data export.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvolutionPortableExport {
+    pub format: String,
+    pub schema_version: u16,
+    pub product_schema: SchemaVersion,
+    pub domain: EvolutionDataDomain,
+    pub scope: EvolutionDataScope,
+    pub scope_statement: EvolutionScopeStatement,
+    pub exported_at: UtcTimestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<EvolutionLedgerArchive>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PortableFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded_corpus: Option<EmbeddedCorpusStatement>,
+}
+
+impl EvolutionPortableExport {
+    /// Serializes the documented JSON document without installation-specific tooling.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DataControlError> {
+        Ok(canonical_json_bytes(self)?)
+    }
+
+    /// Parses and fully verifies one standalone evolution export.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DataControlError> {
+        let export: Self = serde_json::from_slice(bytes)?;
+        export.validate()?;
+        Ok(export)
+    }
+
+    fn validate(&self) -> Result<(), DataControlError> {
+        if self.format != EVOLUTION_PORTABLE_FORMAT
+            || self.schema_version != EVOLUTION_PORTABLE_SCHEMA_VERSION
+            || self.product_schema.major != CURRENT_SCHEMA_VERSION.major
+            || self.product_schema.minor > CURRENT_SCHEMA_VERSION.minor
+            || self.scope != EvolutionDataScope::InstallationGlobal
+            || !self.scope_statement.installation_global
+        {
+            return Err(DataControlError::UnsupportedExport);
+        }
+        let shape_matches = match self.domain {
+            EvolutionDataDomain::Ledger => {
+                self.ledger.is_some() && self.files.is_empty() && self.embedded_corpus.is_none()
+            }
+            EvolutionDataDomain::EvaluationCorpus => {
+                self.ledger.is_none() && self.embedded_corpus.is_some()
+            }
+            EvolutionDataDomain::WorkerImages | EvolutionDataDomain::ShadowTrees => {
+                self.ledger.is_none() && self.embedded_corpus.is_none()
+            }
+        };
+        if !shape_matches {
+            return Err(DataControlError::InvalidExport);
+        }
+        if let Some(ledger) = &self.ledger {
+            ledger
+                .verify()
+                .map_err(|error| DataControlError::Evolution(error.to_string()))?;
+        }
+        let mut prior = None;
+        for file in &self.files {
+            validate_relative(&file.relative_path)?;
+            if prior.is_some_and(|value: &str| value >= file.relative_path.as_str()) {
+                return Err(DataControlError::InvalidExport);
+            }
+            let content = decode_hex(&file.content_hex)?;
+            if digest(&content) != file.sha256 {
+                return Err(DataControlError::DigestMismatch(file.relative_path.clone()));
+            }
+            prior = Some(file.relative_path.as_str());
+        }
+        if self.embedded_corpus.as_ref().is_some_and(|embedded| {
+            !embedded.immutable || embedded.deletable || embedded.sha256.len() != 64
+        }) {
+            return Err(DataControlError::InvalidExport);
+        }
+        Ok(())
+    }
+}
+
+/// Installation-specific authoritative roots. None of these contain profile/session identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvolutionDataRoots {
+    pub worker_image_registry: PathBuf,
+    pub shadow_work_root: PathBuf,
+    pub runtime_corpus_registry: PathBuf,
+    pub derived_root: PathBuf,
+}
+
+impl EvolutionDataRoots {
+    #[must_use]
+    pub fn under(data_root: &Path) -> Self {
+        Self {
+            worker_image_registry: data_root.join("runtime/worker-images"),
+            shadow_work_root: data_root.join("evolution-work"),
+            runtime_corpus_registry: data_root.join("self-evolution/corpus"),
+            derived_root: data_root.join("derived/evolution"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvolutionDeletionTarget {
+    pub domain: EvolutionDataDomain,
+    pub scope: EvolutionDataScope,
+    pub scope_statement: EvolutionScopeStatement,
+    pub files: Vec<String>,
+    pub derived_files: Vec<String>,
+    pub ledger_records: usize,
+    pub ledger_heads: usize,
+    pub embedded_corpus_retained: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvolutionDeletionPlan {
+    pub target: EvolutionDeletionTarget,
+    pub confirmation: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EvolutionDeletionReport {
+    pub deleted_files: usize,
+    pub deleted_derived_files: usize,
+    pub deleted_ledger_records: usize,
+    pub deleted_ledger_heads: usize,
+    pub remaining_paths: Vec<String>,
+    pub remaining_ledger_records: usize,
+    pub remaining_ledger_heads: usize,
+    pub embedded_corpus_retained: bool,
+}
+
+impl EvolutionDeletionReport {
+    #[must_use]
+    pub fn complete(&self) -> bool {
+        self.remaining_paths.is_empty()
+            && self.remaining_ledger_records == 0
+            && self.remaining_ledger_heads == 0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DataLimits {
     pub max_files: usize,
@@ -209,6 +410,7 @@ pub struct DataControl {
     root: PathBuf,
     store: EmbeddedStore,
     limits: DataLimits,
+    evolution_roots: EvolutionDataRoots,
 }
 
 impl DataControl {
@@ -218,6 +420,21 @@ impl DataControl {
     ///
     /// Returns an error for an invalid root, limits, or state database.
     pub fn open(root: impl AsRef<Path>, limits: DataLimits) -> Result<Self, DataControlError> {
+        fs::create_dir_all(root.as_ref())?;
+        let root = fs::canonicalize(root.as_ref())?;
+        let evolution_roots = EvolutionDataRoots::under(&root);
+        Self::open_with_evolution_roots(root, limits, evolution_roots)
+    }
+
+    /// Opens data control with the daemon's exact installation-global registry roots.
+    ///
+    /// # Errors
+    /// Returns an error for invalid bounds, roots, or state storage.
+    pub fn open_with_evolution_roots(
+        root: impl AsRef<Path>,
+        limits: DataLimits,
+        evolution_roots: EvolutionDataRoots,
+    ) -> Result<Self, DataControlError> {
         if limits.max_files == 0
             || limits.max_file_bytes == 0
             || limits.max_total_bytes == 0
@@ -232,6 +449,7 @@ impl DataControl {
             root,
             store,
             limits,
+            evolution_roots,
         })
     }
 
@@ -271,6 +489,223 @@ impl DataControl {
         };
         export.validate()?;
         Ok(export)
+    }
+
+    /// Exports one installation-global evolution domain from its authoritative store/registry.
+    ///
+    /// # Errors
+    /// Returns an error for corrupt signatures/registries, unsafe paths, symlinks, or limits.
+    pub fn export_evolution(
+        &self,
+        domain: EvolutionDataDomain,
+        now: UtcTimestamp,
+    ) -> Result<EvolutionPortableExport, DataControlError> {
+        let statement = self.evolution_scope_statement(domain);
+        let mut export = EvolutionPortableExport {
+            format: EVOLUTION_PORTABLE_FORMAT.into(),
+            schema_version: EVOLUTION_PORTABLE_SCHEMA_VERSION,
+            product_schema: CURRENT_SCHEMA_VERSION,
+            domain,
+            scope: EvolutionDataScope::InstallationGlobal,
+            scope_statement: statement,
+            exported_at: now,
+            ledger: None,
+            files: Vec::new(),
+            embedded_corpus: None,
+        };
+        match domain {
+            EvolutionDataDomain::Ledger => {
+                let ledger = EvolutionLedgerArchive::from_repository(&self.store)
+                    .map_err(|error| DataControlError::Evolution(error.to_string()))?;
+                if ledger.records.len() > self.limits.max_records {
+                    return Err(DataControlError::LimitExceeded);
+                }
+                export.ledger = Some(ledger);
+            }
+            EvolutionDataDomain::WorkerImages => {
+                let inventory =
+                    worker_image_data_inventory(&self.evolution_roots.worker_image_registry)
+                        .map_err(|error| DataControlError::Evolution(error.to_string()))?;
+                export.files = self
+                    .export_inventory_files(&inventory.registry_root, &inventory.relative_files)?;
+            }
+            EvolutionDataDomain::ShadowTrees => {
+                let inventory = shadow_data_inventory(&self.evolution_roots.shadow_work_root)
+                    .map_err(|error| DataControlError::Evolution(error.to_string()))?;
+                export.files = self
+                    .export_inventory_files(&inventory.registry_root, &inventory.relative_files)?;
+            }
+            EvolutionDataDomain::EvaluationCorpus => {
+                let inventory =
+                    corpus_data_inventory(&self.evolution_roots.runtime_corpus_registry)
+                        .map_err(|error| DataControlError::Evolution(error.to_string()))?;
+                export.files = self
+                    .export_inventory_files(&inventory.registry_root, &inventory.relative_files)?;
+                export.embedded_corpus = Some(EmbeddedCorpusStatement {
+                    sha256: inventory.embedded_sha256,
+                    immutable: inventory.embedded_immutable,
+                    deletable: false,
+                    reason: "checked-in corpus bytes are embedded in the executable; only explicitly registered runtime-owned copies are data-control files".into(),
+                });
+            }
+        }
+        export.validate()?;
+        Ok(export)
+    }
+
+    /// Builds a confirmation-sealed deletion plan including derived projections and previews.
+    ///
+    /// # Errors
+    /// Returns an error when any exact scope cannot be safely inventoried.
+    pub fn plan_delete_evolution(
+        &self,
+        domain: EvolutionDataDomain,
+    ) -> Result<EvolutionDeletionPlan, DataControlError> {
+        let export = self.export_evolution(domain, UtcTimestamp::UNIX_EPOCH)?;
+        let (ledger_records, ledger_heads) = export.ledger.as_ref().map_or((0, 0), |ledger| {
+            (
+                ledger.records.len(),
+                usize::from(ledger.authenticated_head.is_some()),
+            )
+        });
+        let derived_base = self.evolution_derived_base(domain);
+        let derived_files = if derived_base.exists() {
+            self.export_directory_files(&derived_base)?
+                .into_iter()
+                .map(|file| file.relative_path)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let target = EvolutionDeletionTarget {
+            domain,
+            scope: EvolutionDataScope::InstallationGlobal,
+            scope_statement: export.scope_statement,
+            files: export
+                .files
+                .into_iter()
+                .map(|file| file.relative_path)
+                .collect(),
+            derived_files,
+            ledger_records,
+            ledger_heads,
+            embedded_corpus_retained: domain == EvolutionDataDomain::EvaluationCorpus,
+        };
+        let confirmation = digest(&canonical_json_bytes(&target)?);
+        Ok(EvolutionDeletionPlan {
+            target,
+            confirmation,
+        })
+    }
+
+    /// Executes an installation-global deletion plan and reports every exact remnant.
+    ///
+    /// Ledger rows and head are erased together by the privileged data-control repository API.
+    /// Registry metadata is deleted only after all registered payload files have been removed.
+    ///
+    /// # Errors
+    /// Returns an error only for invalid confirmation/plan shape or a ledger transaction failure;
+    /// individual filesystem failures are preserved in the returned remnant report.
+    pub fn delete_evolution(
+        &self,
+        plan: &EvolutionDeletionPlan,
+        confirmation: &str,
+    ) -> Result<EvolutionDeletionReport, DataControlError> {
+        let expected = digest(&canonical_json_bytes(&plan.target)?);
+        if confirmation != expected || plan.confirmation != expected {
+            return Err(DataControlError::ConfirmationRequired(expected));
+        }
+        if plan.target.scope != EvolutionDataScope::InstallationGlobal
+            || plan.target.scope_statement != self.evolution_scope_statement(plan.target.domain)
+        {
+            return Err(DataControlError::InvalidExport);
+        }
+        if plan.target.files.len() > self.limits.max_files
+            || plan.target.derived_files.len() > self.limits.max_files
+        {
+            return Err(DataControlError::LimitExceeded);
+        }
+        for relative in plan.target.files.iter().chain(&plan.target.derived_files) {
+            validate_relative(relative)?;
+        }
+        let mut report = EvolutionDeletionReport {
+            embedded_corpus_retained: plan.target.embedded_corpus_retained,
+            ..EvolutionDeletionReport::default()
+        };
+        if plan.target.domain == EvolutionDataDomain::Ledger {
+            let erased = self.store.erase_evolution_ledger_for_data_control()?;
+            report.deleted_ledger_records = erased.deleted_records;
+            report.deleted_ledger_heads = erased.deleted_heads;
+            report.remaining_ledger_records = erased.remaining_records;
+            report.remaining_ledger_heads = erased.remaining_heads;
+        } else {
+            let base = self.evolution_registry_base(plan.target.domain)?;
+            let mut registry_files = Vec::new();
+            for relative in &plan.target.files {
+                if relative == "registry.json" {
+                    registry_files.push(relative);
+                    continue;
+                }
+                self.remove_planned_file(&base, relative, false, &mut report);
+            }
+            if report.remaining_paths.is_empty() {
+                for relative in registry_files {
+                    self.remove_planned_file(&base, relative, false, &mut report);
+                }
+            } else {
+                report.remaining_paths.extend(
+                    registry_files
+                        .into_iter()
+                        .map(|relative| base.join(relative).to_string_lossy().into_owned()),
+                );
+            }
+            remove_empty_directories(&base);
+        }
+        let derived_base = self.evolution_derived_base(plan.target.domain);
+        for relative in &plan.target.derived_files {
+            self.remove_planned_file(&derived_base, relative, true, &mut report);
+        }
+        remove_empty_directories(&derived_base);
+        report.remaining_paths.sort();
+        report.remaining_paths.dedup();
+        Ok(report)
+    }
+
+    /// Re-inventories an evolution domain and returns whether any owned data remains.
+    pub fn scan_evolution_remnants(
+        &self,
+        domain: EvolutionDataDomain,
+    ) -> Result<Vec<String>, DataControlError> {
+        let plan = self.plan_delete_evolution(domain)?;
+        let mut remnants = plan
+            .target
+            .files
+            .iter()
+            .map(|relative| {
+                self.evolution_registry_base(domain)
+                    .map(|base| base.join(relative).to_string_lossy().into_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        remnants.extend(plan.target.derived_files.iter().map(|relative| {
+            self.evolution_derived_base(domain)
+                .join(relative)
+                .to_string_lossy()
+                .into_owned()
+        }));
+        if plan.target.ledger_records > 0 {
+            remnants.push(format!(
+                "state-store:EvolutionLedger:{}",
+                plan.target.ledger_records
+            ));
+        }
+        if plan.target.ledger_heads > 0 {
+            remnants.push(format!(
+                "state-store:EvolutionLedgerHead:{}",
+                plan.target.ledger_heads
+            ));
+        }
+        remnants.sort();
+        Ok(remnants)
     }
 
     /// Restores missing items from one portable export without overwriting current data.
@@ -534,6 +969,203 @@ impl DataControl {
         };
         Ok(self.root.join(relative))
     }
+
+    fn evolution_scope_statement(&self, domain: EvolutionDataDomain) -> EvolutionScopeStatement {
+        let derived = self.evolution_derived_base(domain);
+        match domain {
+            EvolutionDataDomain::Ledger => EvolutionScopeStatement {
+                installation_global: true,
+                includes: vec![
+                    "ordered signed EvolutionLedger rows".into(),
+                    "signed authenticated EvolutionLedgerHead".into(),
+                ],
+                excludes: vec![
+                    "profiles, sessions, prompts, private reasoning, and personal memory".into(),
+                    "state.sqlite data outside the two evolution ledger collections".into(),
+                ],
+                deletion_effect: format!(
+                    "atomically erases both ledger collections and cleans derived projections/previews under {}",
+                    derived.display()
+                ),
+            },
+            EvolutionDataDomain::WorkerImages => EvolutionScopeStatement {
+                installation_global: true,
+                includes: vec![format!(
+                    "registry.json and registered immutable image payloads under {}",
+                    self.evolution_roots.worker_image_registry.display()
+                )],
+                excludes: vec![
+                    "registry.lock coordination state".into(),
+                    "unregistered files and profile/session data".into(),
+                ],
+                deletion_effect: format!(
+                    "removes registered payloads before registry.json and cleans derived projections/previews under {}",
+                    derived.display()
+                ),
+            },
+            EvolutionDataDomain::ShadowTrees => EvolutionScopeStatement {
+                installation_global: true,
+                includes: vec![format!(
+                    "registry.json and every file below registered shadow IDs under {}",
+                    self.evolution_roots.shadow_work_root.join("shadow-trees").display()
+                )],
+                excludes: vec![
+                    "registry.lock coordination state".into(),
+                    "source repositories and profile/session workspaces".into(),
+                ],
+                deletion_effect: format!(
+                    "removes registered shadow files before registry.json and cleans derived projections/previews under {}",
+                    derived.display()
+                ),
+            },
+            EvolutionDataDomain::EvaluationCorpus => EvolutionScopeStatement {
+                installation_global: true,
+                includes: vec![format!(
+                    "registry.json and explicitly registered runtime-owned corpus copies under {}",
+                    self.evolution_roots.runtime_corpus_registry.display()
+                )],
+                excludes: vec![
+                    "checked-in corpus bytes embedded in the executable (immutable and not deletable)"
+                        .into(),
+                    "profile/session data".into(),
+                ],
+                deletion_effect: format!(
+                    "removes runtime-owned copies and registry.json, retains embedded corpus, and cleans derived projections/previews under {}",
+                    derived.display()
+                ),
+            },
+        }
+    }
+
+    fn evolution_registry_base(
+        &self,
+        domain: EvolutionDataDomain,
+    ) -> Result<PathBuf, DataControlError> {
+        let path = match domain {
+            EvolutionDataDomain::Ledger => return Err(DataControlError::InvalidExport),
+            EvolutionDataDomain::WorkerImages => self.evolution_roots.worker_image_registry.clone(),
+            EvolutionDataDomain::ShadowTrees => {
+                self.evolution_roots.shadow_work_root.join("shadow-trees")
+            }
+            EvolutionDataDomain::EvaluationCorpus => {
+                self.evolution_roots.runtime_corpus_registry.clone()
+            }
+        };
+        if path.exists() {
+            Ok(fs::canonicalize(path)?)
+        } else {
+            Ok(path)
+        }
+    }
+
+    fn evolution_derived_base(&self, domain: EvolutionDataDomain) -> PathBuf {
+        self.evolution_roots.derived_root.join(domain.name())
+    }
+
+    fn export_inventory_files(
+        &self,
+        base: &Path,
+        relative_files: &[PathBuf],
+    ) -> Result<Vec<PortableFile>, DataControlError> {
+        if relative_files.len() > self.limits.max_files {
+            return Err(DataControlError::LimitExceeded);
+        }
+        let mut files = Vec::with_capacity(relative_files.len());
+        let mut total = 0_u64;
+        for relative in relative_files {
+            let relative_string = relative.to_string_lossy().replace('\\', "/");
+            let path = resolve_owned_file(base, &relative_string)?;
+            let metadata = fs::symlink_metadata(&path)?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(DataControlError::Symlink(path));
+            }
+            if metadata.len() > self.limits.max_file_bytes {
+                return Err(DataControlError::LimitExceeded);
+            }
+            total = total
+                .checked_add(metadata.len())
+                .ok_or(DataControlError::LimitExceeded)?;
+            if total > self.limits.max_total_bytes {
+                return Err(DataControlError::LimitExceeded);
+            }
+            let content = fs::read(path)?;
+            files.push(PortableFile {
+                relative_path: relative_string,
+                sha256: digest(&content),
+                content_hex: encode_hex(&content),
+            });
+        }
+        files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        Ok(files)
+    }
+
+    fn export_directory_files(&self, base: &Path) -> Result<Vec<PortableFile>, DataControlError> {
+        let mut files = Vec::new();
+        let mut total = 0;
+        collect_files(base, base, &mut files, &mut total, self.limits)?;
+        files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        Ok(files)
+    }
+
+    fn remove_planned_file(
+        &self,
+        base: &Path,
+        relative: &str,
+        derived: bool,
+        report: &mut EvolutionDeletionReport,
+    ) {
+        let path = match resolve_owned_file(base, relative) {
+            Ok(path) => path,
+            Err(_) => {
+                report
+                    .remaining_paths
+                    .push(base.join(relative).to_string_lossy().into_owned());
+                return;
+            }
+        };
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                if derived {
+                    report.deleted_derived_files += 1;
+                } else {
+                    report.deleted_files += 1;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => report
+                .remaining_paths
+                .push(path.to_string_lossy().into_owned()),
+        }
+    }
+}
+
+fn resolve_owned_file(base: &Path, relative: &str) -> Result<PathBuf, DataControlError> {
+    let relative = validate_relative(relative)?;
+    if let Ok(metadata) = fs::symlink_metadata(base)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(DataControlError::Symlink(base.to_path_buf()));
+    }
+    let mut current = base.to_path_buf();
+    let mut missing = false;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(DataControlError::PathEscape);
+        };
+        current.push(name);
+        if missing {
+            continue;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(DataControlError::Symlink(current));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing = true,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(current)
 }
 
 fn collect_files(
@@ -698,6 +1330,8 @@ pub enum DataControlError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Retrieval(#[from] RetrievalError),
+    #[error("evolution data control failed: {0}")]
+    Evolution(String),
     #[error("portable export JSON failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("portable export uses an unsupported format or schema")]
@@ -724,6 +1358,7 @@ pub enum DataControlError {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
     use std::sync::Arc;
 
     use keith_agent_types::Revision;
@@ -731,6 +1366,11 @@ mod tests {
         LocalHashEmbedder, MemoryVectorIndex, RankWeights, RetrievalLimits, SearchSourceKind,
         SourceInput, VectorComponents,
     };
+    use keith_self_evolution::{
+        CORPUS_BYTES, EvolutionEvent, EvolutionLedger, LedgerText, SelfEvolutionEnablement,
+        ShadowTree, register_runtime_corpus_copy,
+    };
+    use keith_supervisor::WorkerImageRegistry;
     use tempfile::tempdir;
 
     use super::*;
@@ -985,6 +1625,235 @@ mod tests {
         export.files[0].relative_path = "../escape".into();
         assert!(matches!(
             export.validate(),
+            Err(DataControlError::PathEscape)
+        ));
+    }
+
+    fn initialize_source_repository(root: &Path) {
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=data-control",
+                "-c",
+                "user.email=data-control@example.invalid",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        ] {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(root)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn evolution_export_delete_covers_every_global_scope_and_preserves_profiles() {
+        let directory = tempdir().unwrap();
+        let control = DataControl::open(directory.path(), DataLimits::default()).unwrap();
+        let profile_scope = scope();
+        let profile_root = control
+            .filesystem_scope(DataDomain::Memory, &profile_scope)
+            .unwrap();
+        fs::create_dir_all(&profile_root).unwrap();
+        fs::write(profile_root.join("profile.md"), b"profile remains isolated").unwrap();
+
+        let ledger_store = Arc::new(
+            EmbeddedStore::open(
+                &directory.path().join("state.sqlite"),
+                Some(&FileBackupHook),
+            )
+            .unwrap(),
+        );
+        let ledger = Arc::new(EvolutionLedger::from_seed(ledger_store, &[71; 32]).unwrap());
+        ledger
+            .append(
+                EntityId::from_u128(700),
+                UtcTimestamp::from_unix_millis(7),
+                EvolutionEvent::Enable {
+                    acting_identity: LedgerText::redacted("installation-owner", 64, &[]).unwrap(),
+                },
+            )
+            .unwrap();
+
+        let image_root = directory.path().join("runtime/worker-images");
+        fs::create_dir_all(image_root.parent().unwrap()).unwrap();
+        let bootstrap = directory.path().join("bootstrap-worker");
+        fs::write(&bootstrap, b"real bootstrap image bytes").unwrap();
+        let image_registry = WorkerImageRegistry::open(&image_root, &bootstrap).unwrap();
+
+        let source = directory.path().join("source-repository");
+        initialize_source_repository(&source);
+        let enablement = SelfEvolutionEnablement::new(
+            directory.path().to_path_buf(),
+            [19; 32],
+            "installation-owner".into(),
+            Arc::clone(&ledger),
+        );
+        let work_root = enablement.work_root().unwrap();
+        let shadow = ShadowTree::stage(&source, "HEAD", &work_root).unwrap();
+        assert!(shadow.root().join("src/lib.rs").exists());
+
+        register_runtime_corpus_copy(
+            directory.path().join("self-evolution/corpus"),
+            "owned-v1",
+            CORPUS_BYTES,
+        )
+        .unwrap();
+
+        for domain in EvolutionDataDomain::ALL {
+            let derived = control.evolution_derived_base(domain);
+            fs::create_dir_all(derived.join("projections")).unwrap();
+            fs::create_dir_all(derived.join("previews")).unwrap();
+            fs::write(derived.join("projections/state.json"), b"projection").unwrap();
+            fs::write(derived.join("previews/diff.txt"), b"preview").unwrap();
+
+            let export = control
+                .export_evolution(domain, UtcTimestamp::from_unix_millis(10))
+                .unwrap();
+            assert_eq!(export.scope, EvolutionDataScope::InstallationGlobal);
+            assert!(export.scope_statement.installation_global);
+            let bytes = export.to_bytes().unwrap();
+            assert_eq!(EvolutionPortableExport::from_bytes(&bytes).unwrap(), export);
+            let readable: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(readable["format"], EVOLUTION_PORTABLE_FORMAT);
+            match domain {
+                EvolutionDataDomain::Ledger => {
+                    assert_eq!(export.ledger.as_ref().unwrap().records.len(), 1);
+                    let mut tampered = export.clone();
+                    tampered.ledger.as_mut().unwrap().records[0].signature[0] ^= 1;
+                    assert!(matches!(
+                        EvolutionPortableExport::from_bytes(&tampered.to_bytes().unwrap()),
+                        Err(DataControlError::Evolution(_))
+                    ));
+                }
+                EvolutionDataDomain::WorkerImages => {
+                    assert!(
+                        export
+                            .files
+                            .iter()
+                            .any(|file| file.relative_path == "registry.json")
+                    );
+                    assert!(
+                        export
+                            .files
+                            .iter()
+                            .any(|file| file.relative_path.ends_with("agent-worker"))
+                    );
+                    assert!(
+                        export
+                            .files
+                            .iter()
+                            .all(|file| file.relative_path != "registry.lock")
+                    );
+                }
+                EvolutionDataDomain::ShadowTrees => {
+                    assert!(
+                        export
+                            .files
+                            .iter()
+                            .any(|file| file.relative_path == "registry.json")
+                    );
+                    assert!(
+                        export
+                            .files
+                            .iter()
+                            .any(|file| file.relative_path.ends_with("src/lib.rs"))
+                    );
+                }
+                EvolutionDataDomain::EvaluationCorpus => {
+                    let embedded = export.embedded_corpus.as_ref().unwrap();
+                    assert!(embedded.immutable);
+                    assert!(!embedded.deletable);
+                    assert!(
+                        export
+                            .files
+                            .iter()
+                            .any(|file| file.relative_path == "copies/owned-v1.json")
+                    );
+                }
+            }
+        }
+
+        for domain in EvolutionDataDomain::ALL {
+            let plan = control.plan_delete_evolution(domain).unwrap();
+            assert_eq!(plan.target.derived_files.len(), 2);
+            let report = control.delete_evolution(&plan, &plan.confirmation).unwrap();
+            assert!(report.complete(), "{domain:?}: {report:?}");
+            assert_eq!(report.deleted_derived_files, 2);
+            assert_eq!(
+                report.embedded_corpus_retained,
+                domain == EvolutionDataDomain::EvaluationCorpus
+            );
+            assert!(control.scan_evolution_remnants(domain).unwrap().is_empty());
+        }
+        assert_eq!(
+            fs::read(profile_root.join("profile.md")).unwrap(),
+            b"profile remains isolated"
+        );
+        assert_eq!(
+            control
+                .export(DataDomain::Memory, profile_scope, UtcTimestamp::UNIX_EPOCH)
+                .unwrap()
+                .files
+                .len(),
+            1
+        );
+        drop(shadow);
+        drop(image_registry);
+    }
+
+    #[test]
+    fn evolution_delete_rejects_tampering_and_reports_exact_filesystem_remnants() {
+        let directory = tempdir().unwrap();
+        let control = DataControl::open(directory.path(), DataLimits::default()).unwrap();
+        let corpus_root = directory.path().join("self-evolution/corpus");
+        register_runtime_corpus_copy(&corpus_root, "owned-v1", CORPUS_BYTES).unwrap();
+        let plan = control
+            .plan_delete_evolution(EvolutionDataDomain::EvaluationCorpus)
+            .unwrap();
+        assert!(matches!(
+            control.delete_evolution(&plan, "wrong"),
+            Err(DataControlError::ConfirmationRequired(_))
+        ));
+
+        let copy = corpus_root.join("copies/owned-v1.json");
+        fs::remove_file(&copy).unwrap();
+        fs::create_dir(&copy).unwrap();
+        fs::write(copy.join("retained"), b"cannot remove as a file").unwrap();
+        let report = control.delete_evolution(&plan, &plan.confirmation).unwrap();
+        assert!(!report.complete());
+        assert!(
+            report
+                .remaining_paths
+                .contains(&copy.to_string_lossy().into_owned())
+        );
+        assert!(
+            report.remaining_paths.contains(
+                &corpus_root
+                    .join("registry.json")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
+        assert!(report.embedded_corpus_retained);
+
+        let mut traversal = plan;
+        traversal.target.files.push("../outside".into());
+        traversal.confirmation = digest(&canonical_json_bytes(&traversal.target).unwrap());
+        assert!(matches!(
+            control.delete_evolution(&traversal, &traversal.confirmation),
             Err(DataControlError::PathEscape)
         ));
     }

@@ -5,19 +5,22 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::{Command, ExitStatus};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::thread;
 use std::time::Duration;
 
 use keith_daemon_core::{DaemonCore, DaemonOptions};
 use keith_local_runtime::{LocalRuntimeLaunchConfig, RuntimeCredentialKeySource};
 use keith_platform::PlatformPaths;
+use keith_self_evolution::DaemonStaging;
 use signal_hook::consts::{SIGINT, SIGTERM};
 
 struct Arguments {
     data_root: PathBuf,
     socket: PathBuf,
-    worker_executable: PathBuf,
+    bootstrap_worker_executable: PathBuf,
     idle_seconds: u64,
     credential_root: PathBuf,
     credential_key_source: CredentialKeySource,
@@ -32,6 +35,12 @@ enum CredentialKeySource {
     Native(String),
     Restricted(PathBuf),
 }
+
+const CHILD_ENV: &str = "KEITH_DAEMON_CHILD";
+const READY_PATH_ENV: &str = "KEITH_DAEMON_READY_PATH";
+const READY_IMAGE_ENV: &str = "KEITH_DAEMON_READY_IMAGE";
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const READY_POLL: Duration = Duration::from_millis(20);
 
 impl Arguments {
     #[allow(clippy::too_many_lines)]
@@ -157,7 +166,7 @@ impl Arguments {
         Ok(Some(Self {
             data_root,
             socket,
-            worker_executable,
+            bootstrap_worker_executable: worker_executable,
             idle_seconds,
             credential_root,
             credential_key_source,
@@ -169,7 +178,7 @@ impl Arguments {
     }
 }
 
-fn run() -> Result<(), String> {
+fn run_child() -> Result<(), String> {
     let Some(arguments) = Arguments::parse(std::env::args_os())? else {
         return Ok(());
     };
@@ -180,6 +189,7 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("failed to register SIGINT: {error}"))?;
     let options = DaemonOptions {
         idle_evict_after: Duration::from_secs(arguments.idle_seconds),
+        evolution_source_root: Some(arguments.workspace_root.clone()),
         ..DaemonOptions::default()
     };
     let runtime = LocalRuntimeLaunchConfig {
@@ -200,14 +210,230 @@ fn run() -> Result<(), String> {
     let runtime_config = write_runtime_config(&arguments.data_root, &runtime)?;
     let mut daemon = DaemonCore::open_with_worker_runtime(
         &arguments.data_root,
-        arguments.worker_executable,
+        arguments.bootstrap_worker_executable,
         options,
         runtime_config,
     )
     .map_err(|error| error.to_string())?;
+    let ready_path = std::env::var_os(READY_PATH_ENV).map(PathBuf::from);
+    let ready_image = std::env::var(READY_IMAGE_ENV).ok();
     daemon
-        .serve_local(&arguments.socket, &shutdown)
+        .serve_local_with_ready(&arguments.socket, &shutdown, || {
+            if let (Some(path), Some(image_id)) = (&ready_path, &ready_image) {
+                write_ready(path, image_id)?;
+            }
+            Ok(())
+        })
         .map_err(|error| error.to_string())
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_launcher() -> Result<(), String> {
+    let original_arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if original_arguments
+        .iter()
+        .any(|argument| argument == "--version" || argument == "-V" || argument == "--build-info")
+    {
+        return run_child();
+    }
+    let data_root = launcher_data_root(&original_arguments)?;
+    let staging_root = data_root.join("self-evolution").join("daemon-images");
+    let bootstrap = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut staging =
+        DaemonStaging::open(&staging_root, &bootstrap).map_err(|error| error.to_string())?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))
+        .map_err(|error| format!("failed to register launcher SIGTERM: {error}"))?;
+    signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))
+        .map_err(|error| format!("failed to register launcher SIGINT: {error}"))?;
+
+    loop {
+        let selection = staging
+            .launch_selection()
+            .map_err(|error| error.to_string())?;
+        let ready_path = staging_root.join(format!(
+            ".ready-{}-{}",
+            std::process::id(),
+            selection.image.image_id
+        ));
+        remove_ready(&ready_path)?;
+        let spawned = Command::new(&selection.image.executable)
+            .args(&original_arguments)
+            .env(CHILD_ENV, "1")
+            .env(READY_PATH_ENV, &ready_path)
+            .env(READY_IMAGE_ENV, &selection.image.image_id)
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(error) if selection.candidate => {
+                let reason = format!(
+                    "failed to launch daemon image {}: {error}",
+                    selection.image.image_id
+                );
+                staging
+                    .fail_and_restore(&selection.image.image_id, &reason)
+                    .map_err(|restore| format!("{reason}; pinned restore failed: {restore}"))?;
+                continue;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to launch daemon image {}: {error}",
+                    selection.image.image_id
+                ));
+            }
+        };
+
+        match await_ready(
+            &mut child,
+            &ready_path,
+            &selection.image.image_id,
+            &shutdown,
+        ) {
+            Ok(()) => {
+                if selection.candidate
+                    && let Err(error) = staging.mark_ready(&selection.image.image_id)
+                {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    remove_ready(&ready_path)?;
+                    let reason = format!("candidate readiness could not be committed: {error}");
+                    staging
+                        .fail_and_restore(&selection.image.image_id, &reason)
+                        .map_err(|restore| format!("{reason}; pinned restore failed: {restore}"))?;
+                    continue;
+                }
+                remove_ready(&ready_path)?;
+                let status = wait_for_exit(&mut child, &shutdown)?;
+                if shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                    return Ok(());
+                }
+                if !selection.candidate {
+                    return exit_status(status);
+                }
+                staging
+                    .fail_and_restore(
+                        &selection.image.image_id,
+                        &format!("candidate daemon exited after readiness with {status}"),
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            Err(reason) if selection.candidate => {
+                let _ = child.kill();
+                let _ = child.wait();
+                remove_ready(&ready_path)?;
+                if shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                    return Ok(());
+                }
+                staging
+                    .fail_and_restore(&selection.image.image_id, &reason)
+                    .map_err(|error| error.to_string())?;
+            }
+            Err(reason) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                remove_ready(&ready_path)?;
+                if shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                    return Ok(());
+                }
+                return Err(reason);
+            }
+        }
+    }
+}
+
+fn launcher_data_root(arguments: &[OsString]) -> Result<PathBuf, String> {
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index] == "--data-root" {
+            return arguments
+                .get(index + 1)
+                .map(PathBuf::from)
+                .ok_or_else(|| "missing value for --data-root".to_owned());
+        }
+        index = index.saturating_add(2);
+    }
+    PlatformPaths::discover()
+        .map(|paths| paths.data_root)
+        .map_err(|error| error.to_string())
+}
+
+fn await_ready(
+    child: &mut std::process::Child,
+    ready_path: &std::path::Path,
+    image_id: &str,
+    shutdown: &AtomicBool,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + READY_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            return Err(format!(
+                "candidate daemon exited before readiness with {status}"
+            ));
+        }
+        if shutdown.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = child.kill();
+            return Err("daemon launcher was asked to shut down".into());
+        }
+        match fs::read_to_string(ready_path) {
+            Ok(value) if value == image_id => return Ok(()),
+            Ok(_) => return Err("daemon readiness identity did not match its image".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to read daemon readiness: {error}")),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("daemon readiness timed out".into());
+        }
+        thread::sleep(READY_POLL);
+    }
+}
+
+fn wait_for_exit(
+    child: &mut std::process::Child,
+    shutdown: &AtomicBool,
+) -> Result<ExitStatus, String> {
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            return Ok(status);
+        }
+        if shutdown.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = child.kill();
+            return child.wait().map_err(|error| error.to_string());
+        }
+        thread::sleep(READY_POLL);
+    }
+}
+
+fn write_ready(path: &std::path::Path, image_id: &str) -> Result<(), std::io::Error> {
+    let mut file = File::options().create_new(true).write(true).open(path)?;
+    file.write_all(image_id.as_bytes())?;
+    file.sync_all()?;
+    File::open(path.parent().unwrap_or_else(|| std::path::Path::new(".")))?.sync_all()
+}
+
+fn remove_ready(path: &std::path::Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => File::open(path.parent().unwrap_or_else(|| std::path::Path::new(".")))
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| error.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn exit_status(status: ExitStatus) -> Result<(), String> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("daemon exited with {status}"))
+    }
+}
+
+fn run() -> Result<(), String> {
+    if std::env::var_os(CHILD_ENV).is_some() {
+        run_child()
+    } else {
+        run_launcher()
+    }
 }
 
 fn write_runtime_config(

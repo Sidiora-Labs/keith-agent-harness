@@ -131,7 +131,21 @@ pub struct RuntimeConfig {
     pub autonomy: AutonomyConfig,
     pub retrieval: RetrievalConfig,
     pub telemetry: TelemetryConfig,
+    pub self_evolution: SelfEvolutionConfig,
     pub profile: Option<AgentProfile>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelfEvolutionConfig {
+    enabled: bool,
+}
+
+impl SelfEvolutionConfig {
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
 }
 
 impl RuntimeConfig {
@@ -164,6 +178,7 @@ impl RuntimeConfig {
                 local_metrics: true,
                 export: false,
             },
+            self_evolution: SelfEvolutionConfig { enabled: false },
             profile: None,
         }
     }
@@ -915,6 +930,10 @@ fn changed_sections(before: &RuntimeConfig, after: &RuntimeConfig) -> BTreeSet<S
         ("autonomy", before.autonomy != after.autonomy),
         ("retrieval", before.retrieval != after.retrieval),
         ("telemetry", before.telemetry != after.telemetry),
+        (
+            "self_evolution",
+            before.self_evolution != after.self_evolution,
+        ),
         ("profile", before.profile != after.profile),
     ] {
         if changed {
@@ -1016,6 +1035,19 @@ mod tests {
         let resolved = first.active().profile.as_ref().unwrap();
         assert_eq!(resolved.enabled_skills, ["coding", "research"]);
         assert_eq!(resolved.channels, ["local"]);
+    }
+
+    #[test]
+    fn self_evolution_is_default_off_and_absent_from_configuration_patches() {
+        let manager = ConfigManager::new(RuntimeConfig::secure_defaults()).unwrap();
+        assert!(!manager.active().self_evolution.enabled());
+        let attempted = r#"
+version = { major = 1, minor = 0 }
+kind = "global"
+[patch.self_evolution]
+enabled = true
+"#;
+        assert!(parse_or_migrate_toml(attempted).is_err());
     }
 
     #[test]
