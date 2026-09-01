@@ -291,18 +291,31 @@ impl BuildSandbox {
             || "/usr/bin:/bin".into(),
             |parent| format!("{}:/usr/bin:/bin", parent.display()),
         );
-        let environment = BTreeMap::from([
+        #[cfg(target_os = "linux")]
+        let temporary_environment = "/tmp".to_owned();
+        #[cfg(not(target_os = "linux"))]
+        let temporary_environment = temporary.display().to_string();
+        let mut environment = BTreeMap::from([
             ("CARGO_HOME".into(), self.cargo_home.display().to_string()),
             ("RUSTUP_HOME".into(), self.rustup_home.display().to_string()),
+            ("RUSTC".into(), self.rustc.display().to_string()),
             ("CARGO_TARGET_DIR".into(), target.display().to_string()),
             ("CARGO_NET_OFFLINE".into(), "true".into()),
             ("HOME".into(), home.display().to_string()),
-            ("TMPDIR".into(), temporary.display().to_string()),
+            ("TMPDIR".into(), temporary_environment),
             ("PATH".into(), path),
             ("LANG".into(), "C".into()),
             ("LC_ALL".into(), "C".into()),
             ("KEITH_BUILD_ID".into(), build_id.to_owned()),
         ]);
+        if let Ok(relative) = self.cargo.strip_prefix(self.rustup_home.join("toolchains"))
+            && let Some(toolchain) = relative.components().next()
+        {
+            environment.insert(
+                "RUSTUP_TOOLCHAIN".into(),
+                toolchain.as_os_str().to_string_lossy().into_owned(),
+            );
+        }
         let mut allowed_programs = vec![self.cargo.clone(), self.rustc.clone()];
         allowed_programs.extend_from_slice(additional_programs);
         let runner = RestrictedProcessRunner::new_with_read_only_paths(
