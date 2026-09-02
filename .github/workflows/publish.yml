@@ -39,7 +39,7 @@ jobs:
           toolchain: 1.93.0
           components: clippy,rustfmt
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: . -> /tmp/keith-publish-verify-target
       - name: Install supply-chain tools
@@ -186,10 +186,10 @@ jobs:
         uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
           node-version: 22.22.2
-          cache: pnpm
-          cache-dependency-path: apps/agent-web/ui/pnpm-lock.yaml
       - name: Enable locked pnpm
-        run: corepack enable
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.18.0 --activate
       - name: Build signed release directory
         shell: bash
         run: |

@@ -59,10 +59,36 @@ jobs:
           python3 - <<'PY'
           import json
           import pathlib
+          import re
           import tomllib
 
           json.loads(pathlib.Path('.devcontainer/devcontainer.json').read_text())
           tomllib.loads(pathlib.Path('deploy/fly/fly.toml').read_text())
+
+          dockerfile = pathlib.Path('Dockerfile').read_text()
+          for mount in re.finditer(r'--mount=([^\s\\]+)', dockerfile):
+              options = dict(
+                  option.split('=', 1)
+                  for option in mount.group(1).split(',')
+                  if '=' in option
+              )
+              if options.get('type') == 'cache' and not options.get('id'):
+                  line_number = dockerfile.count('\n', 0, mount.start()) + 1
+                  raise SystemExit(
+                      f'Dockerfile:{line_number}: BuildKit cache mount requires a stable id'
+                  )
+          for line_number, line in enumerate(dockerfile.splitlines(), start=1):
+              if line.lstrip().startswith('VOLUME '):
+                  raise SystemExit(
+                      f'Dockerfile:{line_number}: declare persistence in provider manifests, not VOLUME'
+                  )
+
+          railway_iac = pathlib.Path('.railway/railway.ts').read_text()
+          required_mount = '"/var/lib/keith": volume('
+          if required_mount not in railway_iac:
+              raise SystemExit(
+                  '.railway/railway.ts must mount a Railway volume at /var/lib/keith'
+              )
           PY
       - name: Validate provider plans are non-mutating
         run: |
@@ -86,10 +112,10 @@ jobs:
         uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
           node-version: 22.22.2
-          cache: pnpm
-          cache-dependency-path: apps/agent-web/ui/pnpm-lock.yaml
       - name: Enable locked pnpm
-        run: corepack enable
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.18.0 --activate
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Type-check
@@ -114,7 +140,7 @@ jobs:
           toolchain: 1.93.0
           components: clippy,rustfmt
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: . -> /tmp/keith-ci-target
       - name: Run the repository CI gate
@@ -140,7 +166,7 @@ jobs:
         with:
           toolchain: 1.93.0
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Run platform gate
         run: cargo platform-gate
 
