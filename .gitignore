@@ -5,3 +5,8 @@ tmp/*
 .env
 evidence/
 .codegraph/
+.keith/
+.cursor/rules/spec-workflow.mdc
+.devin/rules/spec-workflow.md
+.devin/workflows/spec.md
+.github/copilot-instructions.md
