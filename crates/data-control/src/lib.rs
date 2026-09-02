@@ -40,10 +40,23 @@ pub enum DataDomain {
     ChannelState,
     ToolExperience,
     Credentials,
+    ChannelAccounts,
+    ChannelEvents,
+    AcpMetadata,
+    Plugins,
+    ConnectedAccounts,
+    ComputerState,
+    ComputerControlLeases,
+    Recordings,
+    Recipes,
+    Traces,
+    Candidates,
+    IntegrationOperations,
+    DerivedIndexes,
 }
 
 impl DataDomain {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 25] = [
         Self::Sessions,
         Self::Workspaces,
         Self::Memory,
@@ -56,6 +69,19 @@ impl DataDomain {
         Self::ChannelState,
         Self::ToolExperience,
         Self::Credentials,
+        Self::ChannelAccounts,
+        Self::ChannelEvents,
+        Self::AcpMetadata,
+        Self::Plugins,
+        Self::ConnectedAccounts,
+        Self::ComputerState,
+        Self::ComputerControlLeases,
+        Self::Recordings,
+        Self::Recipes,
+        Self::Traces,
+        Self::Candidates,
+        Self::IntegrationOperations,
+        Self::DerivedIndexes,
     ];
 
     const fn collection(self) -> Option<Collection> {
@@ -65,6 +91,19 @@ impl DataDomain {
             Self::Routes => Some(Collection::RoutingRules),
             Self::ChannelState => Some(Collection::ChannelOffsets),
             Self::ToolExperience => Some(Collection::ToolExperience),
+            Self::ChannelAccounts => Some(Collection::ChannelAccounts),
+            Self::ChannelEvents => Some(Collection::Deliveries),
+            Self::AcpMetadata => Some(Collection::AcpSessions),
+            Self::Plugins => Some(Collection::PluginRegistry),
+            Self::ConnectedAccounts => Some(Collection::ConnectedApps),
+            Self::ComputerState => Some(Collection::ComputerSessions),
+            Self::ComputerControlLeases => Some(Collection::ControlLeases),
+            Self::Recordings => Some(Collection::Demonstrations),
+            Self::Recipes => Some(Collection::TaskRecipes),
+            Self::Traces => Some(Collection::IntegrationAudit),
+            Self::Candidates => Some(Collection::HarnessRepairs),
+            Self::IntegrationOperations => Some(Collection::IntegrationOperations),
+            Self::DerivedIndexes => Some(Collection::AttentionCandidates),
             Self::Sessions
             | Self::Workspaces
             | Self::Memory
@@ -963,7 +1002,20 @@ impl DataControl {
             | DataDomain::Commitments
             | DataDomain::Routes
             | DataDomain::ChannelState
-            | DataDomain::ToolExperience => {
+            | DataDomain::ToolExperience
+            | DataDomain::ChannelAccounts
+            | DataDomain::ChannelEvents
+            | DataDomain::AcpMetadata
+            | DataDomain::Plugins
+            | DataDomain::ConnectedAccounts
+            | DataDomain::ComputerState
+            | DataDomain::ComputerControlLeases
+            | DataDomain::Recordings
+            | DataDomain::Recipes
+            | DataDomain::Traces
+            | DataDomain::Candidates
+            | DataDomain::IntegrationOperations
+            | DataDomain::DerivedIndexes => {
                 return Err(DataControlError::NotFilesystemDomain(domain));
             }
         };

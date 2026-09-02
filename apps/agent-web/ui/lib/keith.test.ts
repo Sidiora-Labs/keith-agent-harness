@@ -9,10 +9,15 @@ import {
   evolutionLedgerContent,
   EVOLUTION_ENABLEMENT_GUIDANCE,
   eventSocketUrl,
+  integrationListCommand,
+  integrationOperationCommand,
+  integrationsFromResult,
   mergeSessions,
   takeSseData,
   visibleUserText,
   type SessionSnapshot,
+  type CommandResult,
+  type IntegrationResourceProjection,
 } from './keith'
 
 const SESSION_ID = '01J00000000000000000000001'
@@ -67,6 +72,79 @@ describe('Keith browser protocol', () => {
     })
     expect(envelope.command_id).toHaveLength(26)
     expect(envelope.client_id).toHaveLength(26)
+  })
+
+  it('parses profile-scoped integration state and emits only exact non-consequential controls', () => {
+    const resource: IntegrationResourceProjection = {
+      id: '01J00000000000000000000011',
+      profile_id: PROFILE_ID,
+      owning_session_id: SESSION_ID,
+      service: 'connected_app',
+      native_resource_key: 'github/primary',
+      display_label: 'GitHub',
+      lifecycle: 'active',
+      cancellation_id: '01J00000000000000000000012',
+      audit_correlation: '01J00000000000000000000013',
+      controls: ['cancel', 'export', 'delete'],
+      safe_error: null,
+      revision: 4,
+      created_at: 1_000,
+      updated_at: 2_000,
+    }
+    const result: CommandResult = {
+      protocol: { major: 1, minor: 0 },
+      command_id: '01J00000000000000000000014',
+      completed_at: 2_000,
+      result: {
+        status: 'data',
+        payload: {
+          kind: 'profile_integrations',
+          value: {
+            profile_id: PROFILE_ID,
+            through_sequence: 7,
+            services: [{ service: 'connected_app', availability: { state: 'available' } }],
+            resources: [resource],
+          },
+        },
+      },
+    }
+    expect(integrationsFromResult(result)?.resources).toEqual([resource])
+    expect(integrationListCommand(PROFILE_ID, 'connected_app')).toEqual({
+      command: 'integration',
+      parameters: {
+        action: 'list',
+        parameters: { profile_id: PROFILE_ID, service: 'connected_app' },
+      },
+    })
+    const cancel = integrationOperationCommand(PROFILE_ID, SESSION_ID, resource, 'cancel')
+    expect(cancel).toMatchObject({
+      command: 'integration',
+      parameters: {
+        action: 'mutate',
+        parameters: {
+          profile_id: PROFILE_ID,
+          service: 'connected_app',
+          resource_id: resource.id,
+          expected_revision: 4,
+          operation: 'cancel',
+          authority: {
+            requested_capability: 'local_write',
+            risk: 'reversible_local_write',
+            approval: {
+              risk: 'reversible_local_write',
+              state: { state: 'not_required' },
+            },
+            cancellation_id: resource.cancellation_id,
+          },
+        },
+      },
+    })
+    const unsafe = structuredClone(result)
+    if (unsafe.result.status === 'data') {
+      const projection = unsafe.result.payload.value as { resources: IntegrationResourceProjection[] }
+      projection.resources[0] = { ...resource, safe_error: 'Authorization: Bearer reusable-secret' }
+    }
+    expect(integrationsFromResult(unsafe)).toBeNull()
   })
 
   it('builds an authenticated resumable websocket URL without leaking prior query data', () => {

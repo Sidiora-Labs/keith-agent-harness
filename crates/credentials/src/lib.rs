@@ -9,7 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
-use keith_agent_types::{CURRENT_SCHEMA_VERSION, EntityId, SchemaVersion, UtcTimestamp};
+use keith_agent_types::{CURRENT_SCHEMA_VERSION, EntityId, ProfileId, SchemaVersion, UtcTimestamp};
 use keith_model_registry::CredentialResolver;
 use keith_provider_core::{ProviderCredential, ProviderError, ProviderErrorKind};
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
@@ -29,6 +29,22 @@ pub enum CredentialOwner {
     Channel(String),
     Mcp(String),
     Tool(String),
+    ProfileService {
+        profile_id: ProfileId,
+        service: CredentialService,
+        resource: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialService {
+    Channel,
+    Acp,
+    Plugin,
+    ConnectedApp,
+    Computer,
+    Teaching,
 }
 
 impl CredentialOwner {
@@ -38,12 +54,14 @@ impl CredentialOwner {
             Self::Channel(_) => "channel",
             Self::Mcp(_) => "mcp",
             Self::Tool(_) => "tool",
+            Self::ProfileService { .. } => "profile_service",
         }
     }
 
     fn id(&self) -> &str {
         match self {
             Self::Provider(id) | Self::Channel(id) | Self::Mcp(id) | Self::Tool(id) => id,
+            Self::ProfileService { resource, .. } => resource,
         }
     }
 }
@@ -477,6 +495,42 @@ impl EncryptedCredentialStore {
             return Err(CredentialError::Corrupt);
         }
         self.decrypt(&record)
+    }
+
+    /// Permanently removes an encrypted credential owned by the exact requesting boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reference is missing, belongs to another owner, is corrupt, or
+    /// cannot be durably removed.
+    pub fn delete(
+        &self,
+        reference: &CredentialRef,
+        requester: &CredentialOwner,
+    ) -> Result<(), CredentialError> {
+        reference.validate()?;
+        if &reference.owner != requester {
+            return Err(CredentialError::ScopeDenied);
+        }
+        let _guard = self.lock()?;
+        let filename = reference.filename()?;
+        let metadata = match self.directory.symlink_metadata(&filename) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CredentialError::NotFound);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(CredentialError::Corrupt);
+        }
+        let record = self.read_record(Path::new(&filename))?;
+        if &record.metadata.reference != reference {
+            return Err(CredentialError::Corrupt);
+        }
+        self.directory.remove_file(&filename)?;
+        std::fs::File::open(&self.ambient_root)?.sync_all()?;
+        Ok(())
     }
 
     /// # Errors
@@ -930,6 +984,44 @@ mod tests {
                 format!("secret-value-{index}").as_bytes()
             ));
         }
+    }
+
+    #[test]
+    fn profile_service_credentials_are_exactly_scoped_and_durably_deleted() {
+        let (directory, store) = store();
+        let owner = CredentialOwner::ProfileService {
+            profile_id: ProfileId::new(),
+            service: CredentialService::ConnectedApp,
+            resource: "github-primary".into(),
+        };
+        let other_profile = CredentialOwner::ProfileService {
+            profile_id: ProfileId::new(),
+            service: CredentialService::ConnectedApp,
+            resource: "github-primary".into(),
+        };
+        let reference = CredentialRef::new("oauth-access", owner.clone()).unwrap();
+        store
+            .put(
+                reference.clone(),
+                SecretValue::new(SEEDED_SECRET).unwrap(),
+                UtcTimestamp::UNIX_EPOCH,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.resolve(&reference, &other_profile),
+            Err(CredentialError::ScopeDenied)
+        ));
+        assert!(matches!(
+            store.delete(&reference, &other_profile),
+            Err(CredentialError::ScopeDenied)
+        ));
+        store.delete(&reference, &owner).unwrap();
+        assert!(matches!(
+            store.resolve(&reference, &owner),
+            Err(CredentialError::NotFound)
+        ));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     #[test]

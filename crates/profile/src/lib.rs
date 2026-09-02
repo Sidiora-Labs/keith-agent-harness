@@ -7,7 +7,7 @@ use std::{fs, io};
 use keith_agent_types::{CURRENT_SCHEMA_VERSION, ProfileId, Revision, UtcTimestamp};
 pub use keith_configuration::{
     AgentProfile, AutonomyMode, ModelRoute, ModelSelection, NotificationSettings, ProfileAutonomy,
-    RefinementSettings, ThinkingLevel, ToolPermission,
+    ProfileServicePolicy, RefinementSettings, ThinkingLevel, ToolPermission,
 };
 use keith_state_store_core::{ProfileRepository, VersionedRecord, WritePrecondition};
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,46 @@ impl RegisteredProfile {
     #[must_use]
     pub const fn can_enable_self_evolution(&self) -> bool {
         false
+    }
+
+    #[must_use]
+    pub fn authorizes_channel(&self, channel: &str) -> bool {
+        self.enabled && self.profile.channels.iter().any(|value| value == channel)
+    }
+
+    #[must_use]
+    pub fn authorizes_plugin(&self, plugin: &str) -> bool {
+        self.enabled
+            && self
+                .profile
+                .enabled_plugins
+                .iter()
+                .any(|value| value == plugin)
+    }
+
+    #[must_use]
+    pub fn authorizes_connected_app_toolkit(&self, toolkit: &str) -> bool {
+        self.enabled
+            && self
+                .profile
+                .service_policy
+                .allowed_connected_app_toolkits
+                .contains(toolkit)
+    }
+
+    #[must_use]
+    pub const fn authorizes_computer(&self) -> bool {
+        self.enabled && self.profile.service_policy.allow_computers
+    }
+
+    #[must_use]
+    pub const fn authorizes_recording(&self) -> bool {
+        self.enabled && self.profile.service_policy.allow_recording
+    }
+
+    #[must_use]
+    pub const fn authorizes_recipe_publication(&self) -> bool {
+        self.enabled && self.profile.service_policy.allow_recipe_publication
     }
 }
 
@@ -143,6 +183,35 @@ where
             .collect::<Result<Vec<_>, _>>()?;
         profiles.sort_by(|left, right| left.profile.id.cmp(&right.profile.id));
         Ok(profiles)
+    }
+
+    /// Deletes one already-disabled profile at an exact observed revision.
+    ///
+    /// Cross-service data deletion must complete before this final catalog removal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing, enabled, stale, or uncommitted profile state.
+    pub fn delete(
+        &self,
+        id: &ProfileId,
+        expected: Revision,
+    ) -> Result<RegisteredProfile, ProfileError> {
+        let current = self
+            .get(id)?
+            .ok_or_else(|| ProfileError::Missing(id.clone()))?;
+        if current.enabled {
+            return Err(ProfileError::Invalid(
+                "profile must be disabled before service data deletion".into(),
+            ));
+        }
+        if current.revision != expected {
+            return Err(ProfileError::Stale);
+        }
+        self.repository
+            .delete_profile(id.as_entity_id(), WritePrecondition::Exact(expected))
+            .map_err(repository_error)?;
+        Ok(current)
     }
 }
 
@@ -309,6 +378,7 @@ mod tests {
                 enabled_mcp_servers: vec!["codegraph".into()],
                 enabled_plugins: vec!["source".into()],
                 channels: vec!["terminal".into()],
+                service_policy: keith_configuration::ProfileServicePolicy::default(),
                 autonomy: ProfileAutonomy {
                     mode: AutonomyMode::Bounded,
                     max_children: 2,
@@ -372,5 +442,28 @@ mod tests {
             .push("self-evolution".into());
         profile.profile.channels.push("self-evolution".into());
         assert!(!profile.can_enable_self_evolution());
+    }
+
+    #[test]
+    fn profile_deletion_requires_disabled_exact_revision_state() {
+        let root = TempDir::new().unwrap();
+        let registry = ProfileRegistry::new(EmbeddedStore::open_in_memory().unwrap());
+        let profile = registry.register(registered(&root)).unwrap();
+        assert!(matches!(
+            registry.delete(&profile.profile.id, profile.revision),
+            Err(ProfileError::Invalid(_))
+        ));
+        let mut disabled = profile.clone();
+        disabled.enabled = false;
+        disabled.updated_at = UtcTimestamp::from_unix_millis(1);
+        let disabled = registry.update(disabled, profile.revision).unwrap();
+        assert!(matches!(
+            registry.delete(&disabled.profile.id, profile.revision),
+            Err(ProfileError::Stale)
+        ));
+        registry
+            .delete(&disabled.profile.id, disabled.revision)
+            .unwrap();
+        assert!(registry.get(&disabled.profile.id).unwrap().is_none());
     }
 }

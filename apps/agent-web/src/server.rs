@@ -1178,6 +1178,9 @@ fn validate_command_scope(
     {
         return Err(BridgeError::Scope);
     }
+    if !command_scope_is_internally_consistent(&envelope.command) {
+        return Err(BridgeError::Scope);
+    }
     let embedded_session = command_session(&envelope.command);
     if let (Some(outer), Some(inner)) = (&envelope.session_id, embedded_session)
         && outer != inner
@@ -1206,7 +1209,44 @@ fn command_profile(command: &ClientCommand) -> Option<&ProfileId> {
         ClientCommand::CreateSchedule(request) => Some(&request.profile_id),
         ClientCommand::QueryMemory(request) => Some(&request.profile_id),
         ClientCommand::SetBackgroundControl(request) => Some(&request.profile_id),
+        ClientCommand::ChannelAccount(command) => Some(match command {
+            keith_protocol::ChannelAccountCommand::List { profile_id }
+            | keith_protocol::ChannelAccountCommand::Inspect { profile_id, .. }
+            | keith_protocol::ChannelAccountCommand::Test { profile_id, .. }
+            | keith_protocol::ChannelAccountCommand::Pause { profile_id, .. }
+            | keith_protocol::ChannelAccountCommand::Resume { profile_id, .. }
+            | keith_protocol::ChannelAccountCommand::RotateCredentials { profile_id, .. }
+            | keith_protocol::ChannelAccountCommand::Remove { profile_id, .. } => profile_id,
+            keith_protocol::ChannelAccountCommand::Connect(configuration)
+            | keith_protocol::ChannelAccountCommand::Configure(configuration) => {
+                &configuration.profile_id
+            }
+        }),
+        ClientCommand::Integration(command) => Some(match command {
+            keith_protocol::IntegrationCommand::List { profile_id, .. }
+            | keith_protocol::IntegrationCommand::Inspect { profile_id, .. } => profile_id,
+            keith_protocol::IntegrationCommand::Mutate(mutation) => &mutation.profile_id,
+        }),
+        ClientCommand::HarnessRepair(command) => Some(match command {
+            keith_protocol::HarnessRepairCommand::Refresh { profile_id }
+            | keith_protocol::HarnessRepairCommand::SetMode { profile_id, .. }
+            | keith_protocol::HarnessRepairCommand::Approve { profile_id, .. }
+            | keith_protocol::HarnessRepairCommand::Promote { profile_id, .. }
+            | keith_protocol::HarnessRepairCommand::Reverse { profile_id, .. }
+            | keith_protocol::HarnessRepairCommand::RetryCurrentTask { profile_id, .. } => {
+                profile_id
+            }
+        }),
         _ => None,
+    }
+}
+
+fn command_scope_is_internally_consistent(command: &ClientCommand) -> bool {
+    match command {
+        ClientCommand::Integration(keith_protocol::IntegrationCommand::Mutate(mutation)) => {
+            mutation.profile_id == mutation.authority.profile_id
+        }
+        _ => true,
     }
 }
 
@@ -1227,6 +1267,9 @@ fn command_session(command: &ClientCommand) -> Option<&SessionId> {
         ClientCommand::CreateSchedule(request) => request.session_id.as_ref(),
         ClientCommand::Export(request) => Some(&request.session_id),
         ClientCommand::StageAttachment(request) => Some(&request.session_id),
+        ClientCommand::Integration(keith_protocol::IntegrationCommand::Mutate(mutation)) => {
+            Some(&mutation.authority.session_id)
+        }
         ClientCommand::Cancel(keith_protocol::CancelTarget::Session(session_id)) => {
             Some(session_id)
         }
@@ -1498,6 +1541,24 @@ mod tests {
         });
         assert_eq!(command_profile(&query), Some(&other));
         assert_ne!(command_profile(&query), Some(&profile));
+
+        let integration = ClientCommand::Integration(keith_protocol::IntegrationCommand::List {
+            profile_id: other.clone(),
+            service: Some(keith_protocol::IntegrationService::ConnectedApp),
+        });
+        assert_eq!(command_profile(&integration), Some(&other));
+        assert_ne!(command_profile(&integration), Some(&profile));
+        assert!(command_scope_is_internally_consistent(&integration));
+
+        let harness = ClientCommand::HarnessRepair(keith_protocol::HarnessRepairCommand::Refresh {
+            profile_id: other.clone(),
+        });
+        assert_eq!(command_profile(&harness), Some(&other));
+
+        let channel = ClientCommand::ChannelAccount(keith_protocol::ChannelAccountCommand::List {
+            profile_id: other.clone(),
+        });
+        assert_eq!(command_profile(&channel), Some(&other));
     }
 
     #[test]

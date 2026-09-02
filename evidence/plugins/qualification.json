@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "qualification_id": "keith-everywhere-5.3-plugins-2026-09-01",
+  "qualification_result": "passed_local_conformance",
+  "real_wasi_component": true,
+  "secret_values_read": false,
+  "operation_trace": [
+    {
+      "operation": "payload",
+      "implementation": "crates/plugin-host/src/abi.rs::PluginComponent::invoke",
+      "test": "crates/plugin-host/tests/abi.rs::abi_real_component_exchanges_typed_payload_stream_and_event"
+    },
+    {
+      "operation": "stream",
+      "implementation": "crates/plugin-host/src/abi.rs::PluginComponent::invoke",
+      "test": "crates/plugin-host/tests/abi.rs::abi_real_component_exchanges_typed_payload_stream_and_event"
+    },
+    {
+      "operation": "cancellation",
+      "implementation": "crates/plugin-host/src/abi.rs::PluginComponent::invoke",
+      "test": "crates/plugin-host/tests/abi.rs::abi_real_component_observes_cancellation_during_execution"
+    },
+    {
+      "operation": "resource_denial",
+      "implementation": "crates/plugin-host/src/abi.rs::bounded_engine",
+      "test": "crates/plugin-host/tests/abi.rs::abi_resource_exhaustion_and_crash_are_isolated_from_later_invocations"
+    },
+    {
+      "operation": "update",
+      "implementation": "crates/plugin-host/src/authority.rs::PluginAuthorityHost::update",
+      "test": "crates/plugin-host/tests/authority.rs::authority_lifecycle_provenance_grants_updates_and_uninstall_are_durable"
+    },
+    {
+      "operation": "migration",
+      "implementation": "crates/plugin-host/src/authority.rs::PluginAuthorityHost::migrate_candidate",
+      "test": "crates/plugin-host/tests/authority.rs::authority_hostile_packages_are_refused_and_failed_migration_rolls_back"
+    },
+    {
+      "operation": "rollback",
+      "implementation": "crates/plugin-host/src/authority.rs::PluginAuthorityHost::rollback",
+      "test": "crates/plugin-host/tests/authority.rs::incompatible_api_enters_safe_mode_and_verified_rollback_remains_available"
+    },
+    {
+      "operation": "quarantine",
+      "implementation": "crates/plugin-host/src/authority.rs::PluginAuthorityHost::quarantine",
+      "test": "crates/plugin-host/tests/authority.rs::authority_crash_loop_and_corruption_enter_safe_mode_without_blocking_uninstall"
+    },
+    {
+      "operation": "safe_mode",
+      "implementation": "crates/plugin-host/src/authority.rs::PluginAuthorityHost::open",
+      "test": "crates/plugin-host/tests/authority.rs::authority_crash_loop_and_corruption_enter_safe_mode_without_blocking_uninstall"
+    },
+    {
+      "operation": "uninstall",
+      "implementation": "crates/plugin-host/src/authority.rs::PluginAuthorityHost::uninstall",
+      "test": "crates/plugin-host/tests/authority.rs::authority_lifecycle_provenance_grants_updates_and_uninstall_are_durable"
+    },
+    {
+      "operation": "signature_refusal",
+      "implementation": "crates/plugin-host/src/authority.rs::PluginPackage::verify",
+      "test": "crates/plugin-host/tests/authority.rs::authority_hostile_packages_are_refused_and_failed_migration_rolls_back"
+    },
+    {
+      "operation": "traversal_denial",
+      "implementation": "crates/plugin-host/src/authority.rs::PluginPackage::load",
+      "test": "crates/plugin-host/tests/authority.rs::authority_hostile_packages_are_refused_and_failed_migration_rolls_back"
+    },
+    {
+      "operation": "network_denial",
+      "implementation": "crates/plugin-host/src/abi.rs::PluginHostContext::http",
+      "test": "crates/plugin-host/tests/authority.rs::authority_hostile_packages_are_refused_and_failed_migration_rolls_back"
+    },
+    {
+      "operation": "credential_denial",
+      "implementation": "crates/plugin-host/src/abi.rs::PluginHostContext::credential",
+      "test": "crates/plugin-host/tests/abi.rs::abi_real_component_receives_explicit_grant_denial"
+    },
+    {
+      "operation": "crash_isolation",
+      "implementation": "crates/plugin-host/src/authority.rs::PluginAuthorityHost::invoke",
+      "test": "crates/plugin-host/tests/authority.rs::authority_crash_loop_and_corruption_enter_safe_mode_without_blocking_uninstall"
+    },
+    {
+      "operation": "secret_redaction",
+      "implementation": "crates/plugin-host/src/abi.rs::redact",
+      "test": "crates/plugin-host/tests/abi.rs::abi_named_credentials_are_redacted_before_safe_logging"
+    }
+  ],
+  "browser_surface": {
+    "test": "apps/agent-web/ui/tests/apps.test.tsx",
+    "install_and_uninstall_approval_fabricated_by_browser": false,
+    "identity_source": "daemon-owned integration projection"
+  },
+  "gate_results": [
+    {
+      "command": "cargo test -p keith-plugin-sdk -p keith-plugin-host",
+      "status": "passed",
+      "observed": "22 passed, 0 failed, including real WASI component payload, stream, cancellation, resource, lifecycle, hostile-package, rollback, quarantine, safe-mode, and uninstall journeys"
+    },
+    {
+      "command": "cargo clippy -p keith-plugin-sdk -p keith-plugin-host --all-targets --all-features -- -D warnings",
+      "status": "passed"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+# resume: keith-everywhere/2.8
+task 2.8 — Isolated Keith Computer runtime and visual action loop  (in_progress)
+verify: cargo test -p keith-cua && cargo test -p keith-cua-runner
+last handoff: none recorded
+task memories:
+  [decision] Ten-agent ownership is partitioned by subsystem; only the integration captain may edit shared daemon, protocol, persisted-state registration, root UI mounting, and release aggregation surfaces. Worker agents create isolated crates or files and hand additive integration requirements back to the captain.
+  [outcome] done: Shared platform contracts and evidence spine
+  [outcome] implemented: Shared platform contracts and evidence spine - qualification pending
+  [outcome] blocked: Shared platform contracts and evidence spine — 1 graph check(s) failed
+  [constraint] The task 1.1 Codify snapshot is being created over a pre-existing dirty checkout. Files outside crates/platform-contracts and the new keith-everywhere spec are preserved user-owned baseline and must not be attributed to or rewritten by this task.
+uncommitted (2):
+  spec/keith-everywhere/spec.kvx
+  spec/keith-everywhere/tasks.md
+lease: held by keith-8, expires in 240 min
+
+when done: run the verify command, then `cg spec done 2.8`.
+before stopping: `cg handoff --task 2.8 --done ... --next ...` to hand off.

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod events;
+mod integrations;
 mod recovery;
 
 pub use events::*;
@@ -22,6 +23,7 @@ use keith_agent_types::{
     ErrorCode, Generation, ProfileId, Revision, RootTreeId, SchemaVersion, Sequence, SessionId,
     TurnId, UtcTimestamp,
 };
+use keith_configuration::ServiceEnablementConfig;
 use keith_connection::{
     AgentTransport, FramedTransport, LocalStream, accept_local, bind_permissioned_local,
     set_local_listener_nonblocking, set_local_read_timeout,
@@ -31,8 +33,8 @@ use keith_protocol::{
     CommandResult, CommandResultEnvelope, DaemonEvent, EventEnvelope,
     EvolutionAvailabilityProjection, EvolutionCommand, EvolutionDisclosureProjection,
     EvolutionHypothesisProjection, EvolutionLedgerProjection, EvolutionProjection, Feature,
-    MessageProjection, ResponsePayload, SessionFilter, SessionSnapshot, SessionState,
-    SessionSummary, ToolProjection, WireFormat, WireMessage, negotiate,
+    IntegrationCommand, MessageProjection, ResponsePayload, SessionFilter, SessionSnapshot,
+    SessionState, SessionSummary, ToolProjection, WireFormat, WireMessage, negotiate,
 };
 use keith_runtime_api::{
     AcceptedPrompt, RuntimeAgentOutcome, RuntimeEvent, RuntimeEventKind, RuntimeRequest,
@@ -56,6 +58,10 @@ use keith_telemetry::{CandidateObservation, CandidateSignal, MetricName, Telemet
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::integrations::{
+    IntegrationError, IntegrationMutationResult, PlatformServiceCoordinator,
+};
 
 pub const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_PROMPT_BYTES: usize = 256 * 1024;
@@ -137,6 +143,7 @@ struct PromptIngressRecord {
     next_attempt_at: UtcTimestamp,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum PromptRunResult {
     Completed(SessionSnapshot),
     Accepted(ActionId),
@@ -320,6 +327,7 @@ pub struct DaemonOptions {
     pub client_queue_capacity: usize,
     pub command_dedup_capacity: usize,
     pub evolution_source_root: Option<PathBuf>,
+    pub services: ServiceEnablementConfig,
 }
 
 impl Default for DaemonOptions {
@@ -333,6 +341,7 @@ impl Default for DaemonOptions {
             client_queue_capacity: 256,
             command_dedup_capacity: 4_096,
             evolution_source_root: None,
+            services: ServiceEnablementConfig::default(),
         }
     }
 }
@@ -363,6 +372,7 @@ pub struct DaemonCore {
     pending_daemon_restoration: Option<DaemonRestorationNotice>,
     candidate_observations: Vec<CandidateObservation>,
     evolution: EvolutionController,
+    platform_services: PlatformServiceCoordinator,
 }
 
 struct EvolutionController {
@@ -406,6 +416,8 @@ pub enum DaemonError {
     Telemetry(#[from] TelemetryError),
     #[error("self-evolution controller failed: {0}")]
     Evolution(String),
+    #[error("integration coordinator failed: {0}")]
+    Integration(String),
 }
 
 impl DaemonCore {
@@ -479,6 +491,11 @@ impl DaemonCore {
         let command_ledger = CommandLedger::new(options.command_dedup_capacity)?;
         let prompt_ingress =
             EmbeddedStore::open(&data_root.join("state.sqlite"), Some(&FileBackupHook))?;
+        let platform_services = PlatformServiceCoordinator::open(
+            &data_root.join("state.sqlite"),
+            options.services.clone(),
+        )
+        .map_err(|error| DaemonError::Integration(error.to_string()))?;
         let evolution_store = Arc::new(EmbeddedStore::open(
             &data_root.join("state.sqlite"),
             Some(&FileBackupHook),
@@ -539,6 +556,7 @@ impl DaemonCore {
             pending_daemon_restoration,
             candidate_observations: Vec::new(),
             evolution,
+            platform_services,
         })
     }
 
@@ -669,6 +687,10 @@ impl DaemonCore {
 
     /// Rebuilds or replaces one root's event hub for an already active generation without
     /// restarting the daemon.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the root is unknown or its worker snapshot cannot seed the event hub.
     pub fn refresh_event_hub(
         &mut self,
         root_tree_id: &RootTreeId,
@@ -1043,6 +1065,14 @@ impl DaemonCore {
             Feature::DeliveryDispatch,
             Feature::AttachmentStaging,
             Feature::SelfEvolution,
+            Feature::ChannelAccounts,
+            Feature::AcpConnections,
+            Feature::Plugins,
+            Feature::ConnectedApps,
+            Feature::Computers,
+            Feature::Recordings,
+            Feature::Recipes,
+            Feature::HarnessRepairs,
         ]);
         let hello = negotiate(
             &client,
@@ -1234,6 +1264,13 @@ impl DaemonCore {
         }
         match command {
             ClientCommand::Evolution(command) => self.execute_evolution_command(command),
+            ClientCommand::Integration(command) => self.execute_integration_command(command),
+            ClientCommand::ChannelAccount(command) => {
+                self.execute_legacy_channel_account_command(command)
+            }
+            ClientCommand::HarnessRepair(command) => {
+                self.execute_legacy_harness_repair_command(command)
+            }
             ClientCommand::ListProfiles => {
                 let result = if self.worker_runtime_enabled {
                     self.runtime_profiles()
@@ -1265,6 +1302,13 @@ impl DaemonCore {
                 Vec::new(),
             ),
             ClientCommand::CreateSession(request) => match self.create_runtime_session(&request) {
+                Ok(snapshot) => (
+                    CommandResult::Data(Box::new(ResponsePayload::Snapshot(Box::new(snapshot)))),
+                    Vec::new(),
+                ),
+                Err(error) => rejected_daemon(error),
+            },
+            ClientCommand::ForkSession(request) => match self.fork_runtime_session(&request) {
                 Ok(snapshot) => (
                     CommandResult::Data(Box::new(ResponsePayload::Snapshot(Box::new(snapshot)))),
                     Vec::new(),
@@ -1400,6 +1444,169 @@ impl DaemonCore {
         }
     }
 
+    fn execute_integration_command(
+        &mut self,
+        command: IntegrationCommand,
+    ) -> (CommandResult, Vec<keith_protocol::EventEnvelope>) {
+        let result = match command {
+            IntegrationCommand::List {
+                profile_id,
+                service,
+            } => self
+                .platform_services
+                .list(&profile_id, service)
+                .map(|projection| {
+                    CommandResult::Data(Box::new(ResponsePayload::ProfileIntegrations(Box::new(
+                        projection,
+                    ))))
+                }),
+            IntegrationCommand::Inspect {
+                profile_id,
+                service,
+                resource_id,
+            } => self
+                .platform_services
+                .inspect(&profile_id, service, &resource_id)
+                .map(|projection| {
+                    CommandResult::Data(Box::new(ResponsePayload::IntegrationResource(Box::new(
+                        projection,
+                    ))))
+                }),
+            IntegrationCommand::Mutate(mutation) => {
+                let mutation = *mutation;
+                if let Err(error) = self.validate_integration_session(
+                    &mutation.profile_id,
+                    &mutation.authority.session_id,
+                ) {
+                    return rejected_integration(&error);
+                }
+                let now = match UtcTimestamp::now() {
+                    Ok(now) => now,
+                    Err(error) => {
+                        return rejected_daemon(DaemonError::Runtime(error.to_string()));
+                    }
+                };
+                self.platform_services
+                    .mutate(mutation, now)
+                    .map(|result| match result {
+                        IntegrationMutationResult::Resource(projection) => CommandResult::Data(
+                            Box::new(ResponsePayload::IntegrationResource(Box::new(projection))),
+                        ),
+                        IntegrationMutationResult::Deleted(projection) => CommandResult::Data(
+                            Box::new(ResponsePayload::IntegrationDeletion(projection)),
+                        ),
+                    })
+            }
+        };
+        match result {
+            Ok(result) => (result, Vec::new()),
+            Err(error) => rejected_integration(&error),
+        }
+    }
+
+    fn execute_legacy_channel_account_command(
+        &self,
+        command: keith_protocol::ChannelAccountCommand,
+    ) -> (CommandResult, Vec<keith_protocol::EventEnvelope>) {
+        let read = match command {
+            keith_protocol::ChannelAccountCommand::List { profile_id } => self
+                .platform_services
+                .list(
+                    &profile_id,
+                    Some(keith_protocol::IntegrationService::ChannelAccount),
+                )
+                .map(|projection| {
+                    CommandResult::Data(Box::new(ResponsePayload::ProfileIntegrations(Box::new(
+                        projection,
+                    ))))
+                }),
+            keith_protocol::ChannelAccountCommand::Inspect {
+                profile_id,
+                account_id,
+            } => account_id
+                .parse()
+                .map_err(|_| IntegrationError::NotFound)
+                .and_then(|resource_id| {
+                    self.platform_services.inspect(
+                        &profile_id,
+                        keith_protocol::IntegrationService::ChannelAccount,
+                        &resource_id,
+                    )
+                })
+                .map(|projection| {
+                    CommandResult::Data(Box::new(ResponsePayload::IntegrationResource(Box::new(
+                        projection,
+                    ))))
+                }),
+            keith_protocol::ChannelAccountCommand::Connect(_)
+            | keith_protocol::ChannelAccountCommand::Configure(_)
+            | keith_protocol::ChannelAccountCommand::Test { .. }
+            | keith_protocol::ChannelAccountCommand::Pause { .. }
+            | keith_protocol::ChannelAccountCommand::Resume { .. }
+            | keith_protocol::ChannelAccountCommand::RotateCredentials { .. }
+            | keith_protocol::ChannelAccountCommand::Remove { .. } => {
+                return rejected_integration(&IntegrationError::Unauthorized(
+                    "channel mutations require an IntegrationMutation with full external-action authority"
+                        .into(),
+                ));
+            }
+        };
+        match read {
+            Ok(result) => (result, Vec::new()),
+            Err(error) => rejected_integration(&error),
+        }
+    }
+
+    fn execute_legacy_harness_repair_command(
+        &self,
+        command: keith_protocol::HarnessRepairCommand,
+    ) -> (CommandResult, Vec<keith_protocol::EventEnvelope>) {
+        match command {
+            keith_protocol::HarnessRepairCommand::Refresh { profile_id } => {
+                match self.platform_services.list(
+                    &profile_id,
+                    Some(keith_protocol::IntegrationService::HarnessRepair),
+                ) {
+                    Ok(projection) => (
+                        CommandResult::Data(Box::new(ResponsePayload::ProfileIntegrations(
+                            Box::new(projection),
+                        ))),
+                        Vec::new(),
+                    ),
+                    Err(error) => rejected_integration(&error),
+                }
+            }
+            keith_protocol::HarnessRepairCommand::SetMode { .. }
+            | keith_protocol::HarnessRepairCommand::Approve { .. }
+            | keith_protocol::HarnessRepairCommand::Promote { .. }
+            | keith_protocol::HarnessRepairCommand::Reverse { .. }
+            | keith_protocol::HarnessRepairCommand::RetryCurrentTask { .. } => {
+                rejected_integration(&IntegrationError::Unauthorized(
+                    "harness mutations require an IntegrationMutation with full external-action authority"
+                        .into(),
+                ))
+            }
+        }
+    }
+
+    fn validate_integration_session(
+        &self,
+        profile_id: &ProfileId,
+        session_id: &SessionId,
+    ) -> Result<(), IntegrationError> {
+        let root = self
+            .catalog
+            .root_for_session(session_id)
+            .ok_or(IntegrationError::NotFound)?;
+        let manifest = self.catalog.root(root).ok_or(IntegrationError::NotFound)?;
+        if manifest.profile_id != *profile_id {
+            return Err(IntegrationError::Unauthorized(
+                "action session does not belong to the requested profile".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn activate_and_attach(
         &mut self,
         client_id: &keith_agent_types::ClientId,
@@ -1417,7 +1624,7 @@ impl DaemonCore {
                 .event_hubs
                 .get_mut(&root)
                 .ok_or(DaemonError::UnknownRoot(root))?;
-            let recovery = hub.attach(client_id.clone(), attach.resume.as_ref());
+            let mut recovery = hub.attach(client_id.clone(), attach.resume.as_ref());
             if let Some(notice) = &pending {
                 hub.publish(DaemonEvent::Warning(CommonError::new(
                     ErrorCode::Unavailable,
@@ -1427,6 +1634,7 @@ impl DaemonCore {
                     ),
                     false,
                 )))?;
+                recovery.events.extend(hub.poll(client_id, 1)?);
             }
             recovery
         };
@@ -1569,6 +1777,55 @@ impl DaemonCore {
                 let _ = self.supervisor.drain(&root_tree_id);
                 return Err(DaemonError::Runtime(format!(
                     "worker returned {} for session creation",
+                    runtime_response_kind(&response)
+                )));
+            }
+            Err(error) => {
+                let _ = self.supervisor.drain(&root_tree_id);
+                return Err(error);
+            }
+        };
+        self.insert_runtime_session(session, &session_id, &root_tree_id)?;
+        self.ensure_event_hub(&root_tree_id, status.generation)?;
+        self.runtime_snapshot(&session_id)
+    }
+
+    fn fork_runtime_session(
+        &mut self,
+        request: &keith_protocol::ForkSession,
+    ) -> Result<SessionSnapshot, DaemonError> {
+        if !self.worker_runtime_enabled {
+            return Err(runtime_unavailable());
+        }
+        if self
+            .catalog
+            .root_for_session(&request.source_session_id)
+            .is_none()
+        {
+            return Err(DaemonError::UnknownSession(
+                request.source_session_id.clone(),
+            ));
+        }
+        let session_id = SessionId::new();
+        let root_tree_id = RootTreeId::new();
+        let status = self.supervisor.start(root_tree_id.clone())?;
+        let response = self.execute_worker(
+            &root_tree_id,
+            status.generation,
+            RuntimeRequest::ForkSession {
+                source_session_id: request.source_session_id.clone(),
+                session_id: session_id.clone(),
+                root_tree_id: root_tree_id.clone(),
+                title: request.title.clone(),
+                generation: status.generation,
+            },
+        );
+        let session = match response {
+            Ok(RuntimeResponse::Session(session)) => session,
+            Ok(response) => {
+                let _ = self.supervisor.drain(&root_tree_id);
+                return Err(DaemonError::Runtime(format!(
+                    "worker returned {} for session fork",
                     runtime_response_kind(&response)
                 )));
             }
@@ -2097,14 +2354,14 @@ fn runtime_unavailable() -> DaemonError {
     DaemonError::Runtime("worker runtime is disabled".into())
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "test-fault-injection"))]
 pub(crate) fn startup_fault_requested(boundary: &str) -> bool {
     std::env::var("KEITH_DAEMON_STARTUP_FAIL_AT").as_deref() == Ok(boundary)
         && std::env::var("KEITH_DAEMON_STARTUP_FAIL_IMAGE").ok()
             == std::env::var("KEITH_DAEMON_READY_IMAGE").ok()
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(any(debug_assertions, feature = "test-fault-injection")))]
 pub(crate) const fn startup_fault_requested(_boundary: &str) -> bool {
     false
 }
@@ -2131,6 +2388,7 @@ fn command_session_id(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::ListGoals { session_id }
         | ClientCommand::ListChildren { session_id } => Some(session_id),
         ClientCommand::BranchSession(request) => Some(&request.session_id),
+        ClientCommand::ForkSession(request) => Some(&request.source_session_id),
         ClientCommand::SelectBranch(request) => Some(&request.session_id),
         ClientCommand::SubmitPrompt(request) => Some(&request.session_id),
         ClientCommand::Steer(request) => Some(&request.session_id),
@@ -2164,6 +2422,27 @@ fn rejected_runtime(error: String) -> (CommandResult, Vec<keith_protocol::EventE
     rejected_daemon(DaemonError::Runtime(error))
 }
 
+fn rejected_integration(
+    error: &IntegrationError,
+) -> (CommandResult, Vec<keith_protocol::EventEnvelope>) {
+    let code = match error {
+        IntegrationError::Unauthorized(_) => ErrorCode::Unauthorized,
+        IntegrationError::Disabled | IntegrationError::Unavailable(_) => ErrorCode::Unavailable,
+        IntegrationError::NotFound => ErrorCode::NotFound,
+        IntegrationError::Conflict => ErrorCode::Conflict,
+        IntegrationError::Invalid(_) => ErrorCode::InvalidInput,
+        IntegrationError::Corrupt(_) => ErrorCode::CorruptState,
+        IntegrationError::Store(_) => ErrorCode::Internal,
+    };
+    (
+        CommandResult::Rejected(CommandError {
+            error: CommonError::new(code, error.to_string(), false),
+            unsupported_feature: None,
+        }),
+        Vec::new(),
+    )
+}
+
 fn rejected_evolution(
     code: ErrorCode,
     message: &str,
@@ -2177,6 +2456,7 @@ fn rejected_evolution(
     )
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn record_evolution_approval(
     controller: &EvolutionController,
     hypothesis_id: EntityId,
@@ -2449,6 +2729,7 @@ fn enrich_evolution_row(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn active_evolution_hypothesis(
     records: &[keith_self_evolution::EvolutionRecord],
 ) -> Result<Option<EvolutionHypothesisProjection>, String> {
@@ -2573,6 +2854,7 @@ const fn hypothesis_state_label(state: HypothesisState) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn evolution_ledger_projection(
     record: &keith_self_evolution::EvolutionRecord,
 ) -> EvolutionLedgerProjection {

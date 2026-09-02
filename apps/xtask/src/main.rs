@@ -128,21 +128,6 @@ fn release(root: &Path) -> Result<(), String> {
         "cargo",
         &["build", "--workspace", "--bins", "--release", "--locked"],
     )?;
-    run(
-        root,
-        "cargo",
-        &[
-            "build",
-            "-p",
-            "keith-agent-web",
-            "--lib",
-            "--target",
-            "wasm32-unknown-unknown",
-            "--release",
-            "--locked",
-        ],
-    )?;
-
     let parent = destination
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -207,17 +192,6 @@ fn assemble_release(
         }
         fs::copy(&source, bin.join(filename)).map_err(|error| error.to_string())?;
     }
-    let wasm = target_directory(root).join("wasm32-unknown-unknown/release/keith_agent_web.wasm");
-    let status = Command::new("wasm-bindgen")
-        .args(["--target", "web", "--out-name", "agent_web", "--out-dir"])
-        .arg(&web)
-        .arg(&wasm)
-        .current_dir(root)
-        .status()
-        .map_err(|error| format!("failed to run wasm-bindgen: {error}"))?;
-    if !status.success() {
-        return Err(format!("wasm-bindgen failed with {status}"));
-    }
     copy_tree(&root.join("apps/agent-web/static/ui"), &web.join("ui"))?;
     copy_tree(
         &root.join("packaging/builtins"),
@@ -268,6 +242,7 @@ fn assemble_release(
     )
     .map_err(|error| error.to_string())?;
     write_dependency_reports(root, destination)?;
+    harden_release_permissions(destination)?;
 
     let files = release_files(destination)?;
     let daemon = daemon_report();
@@ -400,8 +375,7 @@ fn write_dependency_reports(root: &Path, destination: &Path) -> Result<(), Strin
 fn release_files(root: &Path) -> Result<Vec<ReleaseFile>, String> {
     let mut paths = Vec::new();
     collect_files(root, root, &mut paths)?;
-    paths.sort();
-    paths
+    let mut files = paths
         .into_iter()
         .filter(|path| {
             path != Path::new(MANIFEST_FILE)
@@ -417,7 +391,12 @@ fn release_files(root: &Path) -> Result<Vec<ReleaseFile>, String> {
                 sha256: hex_encode(&Sha256::digest(bytes)),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    if files.windows(2).any(|pair| pair[0].path == pair[1].path) {
+        return Err("release contains duplicate normalized paths".into());
+    }
+    Ok(files)
 }
 
 fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -440,6 +419,49 @@ fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Res
             ));
         }
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_release_permissions(root: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn harden(root: &Path, path: &Path) -> Result<(), String> {
+        let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "release contains a symbolic link: {}",
+                path.display()
+            ));
+        }
+        if metadata.is_dir() {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+                .map_err(|error| error.to_string())?;
+            for entry in fs::read_dir(path).map_err(|error| error.to_string())? {
+                harden(root, &entry.map_err(|error| error.to_string())?.path())?;
+            }
+            return Ok(());
+        }
+        if !metadata.is_file() {
+            return Err(format!(
+                "release contains an unsupported entry: {}",
+                path.display()
+            ));
+        }
+        let mode = if path.starts_with(root.join("bin")) {
+            0o755
+        } else {
+            0o644
+        };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(|error| error.to_string())
+    }
+
+    harden(root, root)
+}
+
+#[cfg(not(unix))]
+const fn harden_release_permissions(_root: &Path) -> Result<(), String> {
     Ok(())
 }
 

@@ -1,0 +1,730 @@
+#![forbid(unsafe_code)]
+
+#[path = "../src/email.rs"]
+mod email;
+#[path = "../src/google_chat.rs"]
+mod google_chat;
+#[path = "../src/matrix.rs"]
+mod matrix;
+#[path = "../src/teams.rs"]
+mod teams;
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::{self, JoinHandle};
+
+use email::{
+    EmailAdapter, EmailConfig, EmailCursor, EmailDeliveryState, EmailEventVerifier,
+    EmailIngestOutcome, EmailUpload, EmailVerifiedEvent,
+};
+use google_chat::{
+    GoogleChatAdapter, GoogleChatConfig, GoogleChatCursor, GoogleChatIngestOutcome,
+    GoogleChatRequestVerifier, GoogleChatVerifiedClaims,
+};
+use keith_agent_types::{ArtifactId, ProfileId, UtcTimestamp};
+use keith_channel_core::{
+    AdapterEvent, ChannelAdapter, ChannelAdapterV2, ChannelCapabilityV2, OutboundMessage,
+    ReplyRoute, RetryClass,
+};
+use keith_credentials::{CredentialOwner, CredentialRef, SecretValue};
+use matrix::{MatrixAdapter, MatrixConfig, MatrixCursor, MatrixNormalizedEvent, MatrixUpload};
+use teams::{
+    TeamsAdapter, TeamsConfig, TeamsCursor, TeamsIngestOutcome, TeamsRequestVerifier,
+    TeamsVerifiedClaims,
+};
+
+const FUTURE: UtcTimestamp = UtcTimestamp::from_unix_millis(4_102_444_800_000);
+
+#[derive(Debug)]
+struct VerificationError(&'static str);
+
+impl std::fmt::Display for VerificationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+struct PinnedTeamsIngress;
+
+impl TeamsRequestVerifier for PinnedTeamsIngress {
+    type Error = VerificationError;
+
+    fn verify(
+        &self,
+        authorization: &str,
+        expected_audience: &str,
+        _now: UtcTimestamp,
+    ) -> Result<TeamsVerifiedClaims, Self::Error> {
+        if authorization != "Bearer signed-teams-fixture" {
+            return Err(VerificationError("invalid signed fixture"));
+        }
+        Ok(TeamsVerifiedClaims {
+            issuer: "https://api.botframework.com".to_owned(),
+            audience: expected_audience.to_owned(),
+            key_id: "fixture-signing-key".to_owned(),
+            expires_at: FUTURE,
+        })
+    }
+}
+
+struct PinnedGoogleChatIngress;
+
+impl GoogleChatRequestVerifier for PinnedGoogleChatIngress {
+    type Error = VerificationError;
+
+    fn verify(
+        &self,
+        authorization: &str,
+        expected_audience: &str,
+        _now: UtcTimestamp,
+    ) -> Result<GoogleChatVerifiedClaims, Self::Error> {
+        if authorization != "Bearer signed-google-fixture" {
+            return Err(VerificationError("invalid signed fixture"));
+        }
+        Ok(GoogleChatVerifiedClaims {
+            issuer: "https://accounts.google.com".to_owned(),
+            audience: expected_audience.to_owned(),
+            subject: "chat-system".to_owned(),
+            email: Some("chat@system.gserviceaccount.com".to_owned()),
+            expires_at: FUTURE,
+        })
+    }
+}
+
+struct PinnedEmailIngress;
+
+impl EmailEventVerifier for PinnedEmailIngress {
+    type Error = VerificationError;
+
+    fn verify(
+        &self,
+        headers: &[(String, String)],
+        _body: &[u8],
+        expected_audience: &str,
+        _now: UtcTimestamp,
+    ) -> Result<EmailVerifiedEvent, Self::Error> {
+        if !headers
+            .iter()
+            .any(|(name, value)| name == "X-Provider-Signature" && value == "signed-email-fixture")
+        {
+            return Err(VerificationError("invalid signed fixture"));
+        }
+        Ok(EmailVerifiedEvent {
+            provider: "mail-provider".to_owned(),
+            audience: expected_audience.to_owned(),
+            event_id: "provider-event-1".to_owned(),
+            expires_at: FUTURE,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct CapturedRequest {
+    request_line: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+struct WireResponse {
+    status: u16,
+    body: &'static str,
+}
+
+fn serve_http(responses: Vec<WireResponse>) -> (String, Receiver<CapturedRequest>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+    let address = listener.local_addr().expect("fixture server address");
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        for response in responses {
+            let (mut stream, _) = listener.accept().expect("accept fixture request");
+            let request = read_request(&stream);
+            sender.send(request).expect("capture fixture request");
+            let reason = match response.status {
+                200 => "OK",
+                201 => "Created",
+                202 => "Accepted",
+                429 => "Too Many Requests",
+                _ => "Error",
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.status,
+                reason,
+                response.body.len(),
+                response.body
+            )
+            .expect("write fixture response");
+            stream.flush().expect("flush fixture response");
+        }
+    });
+    (format!("http://{address}"), receiver, handle)
+}
+
+fn read_request(stream: &TcpStream) -> CapturedRequest {
+    let mut reader = BufReader::new(stream.try_clone().expect("clone fixture socket"));
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .expect("read fixture request line");
+    let mut headers = Vec::new();
+    let mut content_length = 0;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read fixture header");
+        if line == "\r\n" || line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.trim_end().split_once(':') {
+            if name.eq_ignore_ascii_case("Content-Length") {
+                content_length = value.trim().parse().expect("content length");
+            }
+            headers.push((name.to_owned(), value.trim().to_owned()));
+        }
+    }
+    let mut body = vec![0; content_length];
+    reader.read_exact(&mut body).expect("read fixture body");
+    CapturedRequest {
+        request_line: request_line.trim_end().to_owned(),
+        headers,
+        body,
+    }
+}
+
+fn profile() -> ProfileId {
+    ProfileId::new()
+}
+
+fn credential(account: &str) -> CredentialRef {
+    CredentialRef::new(account, CredentialOwner::Channel(account.to_owned()))
+        .expect("channel credential")
+}
+
+fn token() -> SecretValue {
+    SecretValue::new("provider-access-token").expect("secret")
+}
+
+fn route(channel: &str, account: &str, conversation: &str) -> ReplyRoute {
+    ReplyRoute {
+        channel: channel.to_owned(),
+        external_account: account.to_owned(),
+        conversation: conversation.to_owned(),
+        thread: None,
+        reply_to_message: None,
+    }
+}
+
+#[test]
+fn work_channels_verified_ingress_and_real_http_delivery() {
+    let (teams_base, teams_requests, teams_server) = serve_http(vec![WireResponse {
+        status: 200,
+        body: r#"{"id":"teams-out-1"}"#,
+    }]);
+    let mut teams = TeamsAdapter::new(
+        TeamsConfig::production(
+            "bot-app-id",
+            "teams-work",
+            profile(),
+            credential("teams-work"),
+        ),
+        token(),
+        TeamsCursor::default(),
+    )
+    .expect("Teams adapter");
+    let teams_event = format!(
+        r#"{{
+          "type":"message",
+          "id":"teams-in-1",
+          "timestamp":"2026-08-30T10:00:00Z",
+          "serviceUrl":"{teams_base}",
+          "from":{{"id":"29:user"}},
+          "conversation":{{"id":"conversation-1"}},
+          "text":"hello @Keith",
+          "replyToId":"root-activity",
+          "attachments":[{{
+            "contentType":"application/vnd.microsoft.card.adaptive",
+            "name":"status-card",
+            "content":{{"type":"AdaptiveCard","version":"1.5"}}
+          }}]
+        }}"#
+    );
+    assert_eq!(
+        teams
+            .ingest_verified_activity(
+                "Bearer signed-teams-fixture",
+                teams_event.as_bytes(),
+                &PinnedTeamsIngress,
+            )
+            .expect("verified Teams event"),
+        TeamsIngestOutcome::Queued
+    );
+    let AdapterEvent::Inbound(teams_inbound) = teams.receive().expect("Teams inbound") else {
+        panic!("expected Teams message");
+    };
+    assert_eq!(teams_inbound.conversation, "conversation-1");
+    assert_eq!(teams_inbound.thread.as_deref(), Some("root-activity"));
+    assert_eq!(teams_inbound.attachments.len(), 1);
+    assert!(teams.setup_diagnostics().callback_verified);
+    assert_eq!(
+        teams
+            .cursor()
+            .recent_activity_ids
+            .last()
+            .map(String::as_str),
+        Some("teams-in-1")
+    );
+    teams
+        .capabilities_v2()
+        .validate()
+        .expect("Teams v2 capabilities");
+    assert!(
+        teams
+            .capabilities_v2()
+            .supports(ChannelCapabilityV2::Mentions)
+    );
+    let teams_receipt = teams
+        .send(&OutboundMessage {
+            route: route("teams", "teams-work", "conversation-1"),
+            idempotency_key: "teams-intent-1".to_owned(),
+            text: "reply from Keith".to_owned(),
+            artifacts: Vec::new(),
+        })
+        .expect("Teams send");
+    assert_eq!(teams_receipt.platform_message_id, "teams-out-1");
+    assert!(teams_receipt.duplicate_possible);
+    let teams_request = teams_requests.recv().expect("Teams wire request");
+    assert_eq!(
+        teams_request.request_line,
+        "POST /v3/conversations/conversation-1/activities HTTP/1.1"
+    );
+    assert!(teams_request.headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("Authorization") && value == "Bearer provider-access-token"
+    }));
+    assert!(
+        String::from_utf8(teams_request.body)
+            .expect("Teams request JSON")
+            .contains("clientActivityId")
+    );
+    teams_server.join().expect("Teams server");
+
+    let (chat_base, chat_requests, chat_server) = serve_http(vec![WireResponse {
+        status: 200,
+        body: r#"{"name":"spaces/AAA/messages/google-out-1"}"#,
+    }]);
+    let mut chat_config = GoogleChatConfig::production(
+        "https://keith.example/chat",
+        "google-work",
+        profile(),
+        credential("google-work"),
+    );
+    chat_config.api_base = chat_base;
+    let mut chat = GoogleChatAdapter::new(chat_config, token(), GoogleChatCursor::default())
+        .expect("Google Chat adapter");
+    let chat_event = br#"{
+      "type":"MESSAGE",
+      "eventTime":"2026-08-30T10:01:00Z",
+      "space":{"name":"spaces/AAA"},
+      "user":{"name":"users/123"},
+      "message":{
+        "name":"spaces/AAA/messages/google-in-1",
+        "sender":{"name":"users/123"},
+        "text":"hello Keith",
+        "thread":{"name":"spaces/AAA/threads/thread-1"},
+        "attachment":[{
+          "contentName":"brief.pdf",
+          "contentType":"application/pdf",
+          "attachmentDataRef":{"resourceName":"attachments/brief"},
+          "size":2048
+        }]
+      }
+    }"#;
+    assert_eq!(
+        chat.ingest_verified_event(
+            "Bearer signed-google-fixture",
+            chat_event,
+            &PinnedGoogleChatIngress,
+        )
+        .expect("verified Google Chat event"),
+        GoogleChatIngestOutcome::Queued
+    );
+    let AdapterEvent::Inbound(chat_inbound) = chat.receive().expect("Google Chat inbound") else {
+        panic!("expected Google Chat message");
+    };
+    assert_eq!(chat_inbound.conversation, "spaces/AAA");
+    assert_eq!(chat_inbound.attachments[0].byte_length, 2048);
+    assert_eq!(chat.cursor().recent_event_ids.len(), 1);
+    assert!(chat.setup_diagnostics().callback_verified);
+    assert!(chat.capabilities().inbound_cards);
+    chat.capabilities_v2()
+        .validate()
+        .expect("Google Chat v2 capabilities");
+    let mut chat_route = route("google_chat", "google-work", "spaces/AAA");
+    chat_route.thread = Some("spaces/AAA/threads/thread-1".to_owned());
+    let chat_receipt = chat
+        .send(&OutboundMessage {
+            route: chat_route,
+            idempotency_key: "google-intent-1".to_owned(),
+            text: "reply from Keith".to_owned(),
+            artifacts: Vec::new(),
+        })
+        .expect("Google Chat send");
+    assert_eq!(
+        chat_receipt.platform_message_id,
+        "spaces/AAA/messages/google-out-1"
+    );
+    let chat_request = chat_requests.recv().expect("Google Chat wire request");
+    assert!(
+        chat_request
+            .request_line
+            .starts_with("POST /v1/spaces/AAA/messages?")
+    );
+    assert!(
+        String::from_utf8(chat_request.body)
+            .expect("Google Chat request JSON")
+            .contains("spaces/AAA/threads/thread-1")
+    );
+    chat_server.join().expect("Google Chat server");
+    chat.revoke();
+    assert!(chat.setup_diagnostics().revoked);
+}
+
+#[test]
+fn work_channels_email_threading_idempotency_and_restart() {
+    let (provider_base, provider_requests, provider_server) = serve_http(vec![WireResponse {
+        status: 202,
+        body: r#"{"message_id":"email-out-1"}"#,
+    }]);
+    let mut config = EmailConfig::provider(
+        "mail-provider",
+        provider_base,
+        "keith-email-events",
+        "email-work",
+        "keith@example.com",
+        profile(),
+        credential("email-work"),
+    );
+    config.provider_guarantees_idempotency = true;
+    let mut email =
+        EmailAdapter::new(config.clone(), token(), EmailCursor::default()).expect("email adapter");
+    let event = br#"{
+      "message_id":"<email-in-1@example.net>",
+      "from":"person@example.net",
+      "to":["keith@example.com"],
+      "subject":"Quarterly brief",
+      "text_body":"Please review the attachment.",
+      "html_body":null,
+      "in_reply_to":"<thread-root@example.net>",
+      "references":["<thread-root@example.net>"],
+      "received_at":"2026-08-30T10:02:00Z",
+      "attachments":[{
+        "id":"attachment-1",
+        "file_name":"brief.pdf",
+        "media_type":"application/pdf",
+        "byte_length":4096,
+        "download_url":"https://mail.example.net/attachments/1"
+      }]
+    }"#;
+    let signature_headers = vec![(
+        "X-Provider-Signature".to_owned(),
+        "signed-email-fixture".to_owned(),
+    )];
+    assert_eq!(
+        email
+            .ingest_provider_event(&signature_headers, event, &PinnedEmailIngress)
+            .expect("verified email event"),
+        EmailIngestOutcome::Queued
+    );
+    let AdapterEvent::Inbound(inbound) = email.receive().expect("email inbound") else {
+        panic!("expected email message");
+    };
+    assert_eq!(inbound.conversation, "<thread-root@example.net>");
+    assert_eq!(
+        inbound.reply_target.as_deref(),
+        Some("<thread-root@example.net>")
+    );
+    let artifact_id = ArtifactId::new();
+    email
+        .stage_artifact(
+            artifact_id.clone(),
+            EmailUpload {
+                file_name: "answer.txt".to_owned(),
+                media_type: "text/plain".to_owned(),
+                bytes: b"approved".to_vec(),
+            },
+        )
+        .expect("stage email attachment");
+    let receipt = email
+        .send(&OutboundMessage {
+            route: route("email", "email-work", "<thread-root@example.net>"),
+            idempotency_key: "email-intent-1".to_owned(),
+            text: "Approved.".to_owned(),
+            artifacts: vec![artifact_id],
+        })
+        .expect("email provider send");
+    assert_eq!(receipt.platform_message_id, "email-out-1");
+    assert!(!receipt.duplicate_possible);
+    assert_eq!(
+        email.delivery_state("email-intent-1"),
+        Some(&EmailDeliveryState::Accepted {
+            provider_message_id: "email-out-1".to_owned()
+        })
+    );
+    let provider_request = provider_requests.recv().expect("email wire request");
+    assert_eq!(provider_request.request_line, "POST /messages HTTP/1.1");
+    assert!(provider_request.headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("Idempotency-Key") && value == "email-intent-1"
+    }));
+    let provider_body = String::from_utf8(provider_request.body).expect("email provider JSON");
+    assert!(provider_body.contains("In-Reply-To"));
+    assert!(provider_body.contains("YXBwcm92ZWQ="));
+    provider_server.join().expect("email provider server");
+
+    let cursor_json = serde_json::to_vec(email.cursor()).expect("serialize email cursor");
+    let cursor: EmailCursor = serde_json::from_slice(&cursor_json).expect("restore email cursor");
+    let mut restarted = EmailAdapter::new(config, token(), cursor).expect("restart email adapter");
+    assert_eq!(
+        restarted
+            .ingest_provider_event(&signature_headers, event, &PinnedEmailIngress)
+            .expect("deduplicate after restart"),
+        EmailIngestOutcome::Duplicate
+    );
+    assert_eq!(restarted.setup_diagnostics().tracked_threads, 1);
+    restarted
+        .capabilities_v2()
+        .validate()
+        .expect("email v2 capabilities");
+    restarted.revoke();
+    assert!(restarted.setup_diagnostics().revoked);
+}
+
+#[test]
+fn work_channels_matrix_rich_sync_cursor_idempotency_and_revocation() {
+    let sync_body = r#"{
+      "next_batch":"s72595_4483_1934",
+      "rooms":{"join":{"!room:example.org":{
+        "state":{"events":[]},
+        "timeline":{"events":[
+          {
+            "type":"m.room.message",
+            "event_id":"$message-1",
+            "sender":"@alice:example.org",
+            "origin_server_ts":1788084180000,
+            "content":{
+              "msgtype":"m.text",
+              "body":"hello Keith",
+              "m.relates_to":{
+                "rel_type":"m.thread",
+                "event_id":"$thread-root",
+                "m.in_reply_to":{"event_id":"$previous"}
+              }
+            }
+          },
+          {
+            "type":"m.room.message",
+            "event_id":"$edit-1",
+            "sender":"@alice:example.org",
+            "origin_server_ts":1788084181000,
+            "content":{
+              "msgtype":"m.text",
+              "body":"* corrected",
+              "m.new_content":{"msgtype":"m.text","body":"corrected"},
+              "m.relates_to":{"rel_type":"m.replace","event_id":"$message-1"}
+            }
+          },
+          {
+            "type":"m.reaction",
+            "event_id":"$reaction-1",
+            "sender":"@alice:example.org",
+            "origin_server_ts":1788084182000,
+            "content":{"m.relates_to":{
+              "rel_type":"m.annotation",
+              "event_id":"$message-1",
+              "key":"👍"
+            }}
+          }
+        ]}
+      }},"!encrypted:example.org":{
+        "state":{"events":[{
+          "type":"m.room.encryption",
+          "event_id":"$encryption-state",
+          "sender":"@alice:example.org",
+          "origin_server_ts":1788084182500,
+          "content":{"algorithm":"m.megolm.v1.aes-sha2"}
+        }]},
+        "timeline":{"events":[{
+          "type":"m.room.encrypted",
+          "event_id":"$encrypted-1",
+          "sender":"@alice:example.org",
+          "origin_server_ts":1788084183000,
+          "content":{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"opaque"}
+        }]}
+      }}}
+    }"#;
+    let (matrix_base, matrix_requests, matrix_server) = serve_http(vec![
+        WireResponse {
+            status: 200,
+            body: sync_body,
+        },
+        WireResponse {
+            status: 200,
+            body: r#"{"event_id":"$matrix-out-1"}"#,
+        },
+        WireResponse {
+            status: 200,
+            body: r#"{}"#,
+        },
+    ]);
+    let config = MatrixConfig::production(
+        matrix_base,
+        "matrix-work",
+        "@keith:example.org",
+        profile(),
+        credential("matrix-work"),
+    );
+    let mut matrix =
+        MatrixAdapter::new(config, token(), MatrixCursor::default()).expect("Matrix adapter");
+    assert_eq!(matrix.sync_once().expect("Matrix sync"), 4);
+    let MatrixNormalizedEvent::Message(message) = matrix.receive_rich().expect("Matrix message")
+    else {
+        panic!("expected Matrix message");
+    };
+    assert_eq!(message.thread.as_deref(), Some("$thread-root"));
+    assert_eq!(message.reply_target.as_deref(), Some("$previous"));
+    let MatrixNormalizedEvent::Edit {
+        target_event_id,
+        text,
+        ..
+    } = matrix.receive_rich().expect("Matrix edit")
+    else {
+        panic!("expected Matrix edit");
+    };
+    assert_eq!(target_event_id, "$message-1");
+    assert_eq!(text, "corrected");
+    let MatrixNormalizedEvent::Reaction { key, .. } =
+        matrix.receive_rich().expect("Matrix reaction")
+    else {
+        panic!("expected Matrix reaction");
+    };
+    assert_eq!(key, "👍");
+    assert!(matches!(
+        matrix.receive_rich().expect("Matrix encrypted marker"),
+        MatrixNormalizedEvent::UnsupportedEncrypted { .. }
+    ));
+    assert_eq!(
+        matrix.cursor().next_batch.as_deref(),
+        Some("s72595_4483_1934")
+    );
+    assert!(!matrix.capabilities().end_to_end_encryption);
+    assert_eq!(matrix.setup_diagnostics().encrypted_room_count, 1);
+    matrix
+        .capabilities_v2()
+        .validate()
+        .expect("Matrix v2 capabilities");
+
+    let receipt = matrix
+        .send_edit(
+            "!room:example.org",
+            "$message-1",
+            "final wording",
+            "matrix-intent-1",
+        )
+        .expect("Matrix idempotent edit");
+    assert_eq!(receipt.platform_message_id, "$matrix-out-1");
+    assert!(!receipt.duplicate_possible);
+    let sync_request = matrix_requests.recv().expect("Matrix sync wire request");
+    assert!(
+        sync_request
+            .request_line
+            .starts_with("GET /_matrix/client/v3/sync?")
+    );
+    let send_request = matrix_requests.recv().expect("Matrix send wire request");
+    assert!(
+        send_request.request_line.contains(
+            "/_matrix/client/v3/rooms/%21room%3Aexample.org/send/m.reaction/matrix-intent-1"
+        ) || send_request.request_line.contains(
+            "/_matrix/client/v3/rooms/%21room%3Aexample.org/send/m.room.message/matrix-intent-1"
+        )
+    );
+    assert!(
+        String::from_utf8(send_request.body)
+            .expect("Matrix edit JSON")
+            .contains("m.replace")
+    );
+    matrix
+        .send_read_receipt("!room:example.org", "$message-1")
+        .expect("Matrix read receipt");
+    let receipt_request = matrix_requests.recv().expect("Matrix receipt wire request");
+    assert!(
+        receipt_request
+            .request_line
+            .contains("/_matrix/client/v3/rooms/%21room%3Aexample.org/receipt/m.read/%24message-1")
+    );
+    matrix_server.join().expect("Matrix server");
+
+    matrix
+        .stage_artifact(
+            ArtifactId::new(),
+            MatrixUpload {
+                file_name: "before-revoke.txt".to_owned(),
+                media_type: "text/plain".to_owned(),
+                bytes: b"bounded".to_vec(),
+            },
+        )
+        .expect("stage Matrix media");
+    matrix.revoke();
+    let failure = matrix.receive_rich().expect_err("revoked Matrix account");
+    assert_eq!(failure.class, RetryClass::Permanent);
+    assert!(matrix.setup_diagnostics().revoked);
+}
+
+#[test]
+fn work_channels_reject_unverified_cross_account_and_unsupported_paths() {
+    let mut teams = TeamsAdapter::new(
+        TeamsConfig::production(
+            "bot-app-id",
+            "teams-isolated",
+            profile(),
+            credential("teams-isolated"),
+        ),
+        token(),
+        TeamsCursor::default(),
+    )
+    .expect("Teams adapter");
+    let auth_failure = teams
+        .ingest_verified_activity("Bearer wrong", b"not-json", &PinnedTeamsIngress)
+        .expect_err("authentication precedes JSON parsing");
+    assert_eq!(auth_failure.class, RetryClass::Permanent);
+    assert!(auth_failure.safe_message.contains("authentication failed"));
+
+    let cross_account = teams
+        .send(&OutboundMessage {
+            route: route("teams", "another-account", "conversation"),
+            idempotency_key: "cross-account".to_owned(),
+            text: "must not send".to_owned(),
+            artifacts: Vec::new(),
+        })
+        .expect_err("cross-account route denied");
+    assert_eq!(cross_account.class, RetryClass::Permanent);
+
+    let wrong_credential = TeamsAdapter::new(
+        TeamsConfig::production(
+            "bot-app-id",
+            "teams-isolated",
+            profile(),
+            credential("different-account"),
+        ),
+        token(),
+        TeamsCursor::default(),
+    )
+    .err()
+    .expect("credential scope denied");
+    assert_eq!(wrong_credential.class, RetryClass::Permanent);
+
+    teams.revoke();
+    assert!(teams.setup_diagnostics().revoked);
+    assert_eq!(
+        teams.reconnect().expect_err("revoked Teams account").class,
+        RetryClass::Permanent
+    );
+}

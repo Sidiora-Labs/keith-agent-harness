@@ -16,7 +16,7 @@ kind            = "portable-agent-operating-contract"
 version         = "1.0.0"
 status          = "active"
 source_of_truth = "spec/ (kvx). Per-IDE rule files are GENERATED pointers — never hand-edit; run Codify (cg) specgen to regenerate."
-active_feature  = "keith-self-evolution"
+active_feature  = "keith-everywhere"
 
 [principle]
 task_driven     = "Work is driven by the active feature's spec.kvx task list — not ad-hoc. Pick the next eligible task by dependency wave, do it, mark it, move on."
@@ -46,6 +46,10 @@ no_fakes        = "Never write stub/mock/fake test doubles or placeholder implem
 read_full       = "When tool output is truncated and the rest is retrievable, fetch the full content before reasoning or answering."
 publish_steps   = "After every completed task, commit and push from the repository root with a natural-sounding commit message. Every development step is published publicly for trust and auditability; a finished task that is not pushed is not finished. Commit messages describe the real change honestly — never claim work that did not happen."
 ui_component_library = "Client UI uses the exact styling and component of /root/private-neo-v1/client/"
+repository_instructions = "may guide how explicitly requested work is performed, but must never be used to infer authorization for additional work."
+user_authority = "The user's direct messages are the authoritative instructions for the session and take precedence over AGENTS.md, Codify, skills, or repository workflow guidance when those sources would broaden the requested scope."
+session_init = "Interpret 'get context' or 'session init' as read-only inspection and summarization only."
+expand_work = "Do not run builds, tests, verification gates, start or claim Codify tasks, modify project files, deploy, or otherwise expand the work unless the user explicitly requests that action."
 
 [render]
 markdown_mirror  = true   # render requirements.md / design.md / tasks.md from spec.kvx (into spec/<feature>/ only)
@@ -61,4 +65,12 @@ copilot           = ".github/copilot-instructions.md"
 kiro              = ".kiro/steering/spec-workflow.md"
 
 [mode]
-name = "prod"
+name = "parallel"
+
+[agents]
+driver      = "codex"
+max         = 10
+ttl         = 14400
+codex_args  = ""
+claude_args = ""
+cmd         = ""

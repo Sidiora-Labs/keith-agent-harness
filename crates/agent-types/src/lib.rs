@@ -706,7 +706,7 @@ mod tests {
         let decoded: CommonCompatibilityFixture =
             serde_json::from_str(fixture).expect("version-one fixture must remain readable");
         assert_eq!(decoded.schema, CURRENT_SCHEMA_VERSION);
-        assert_eq!(decoded.protocol, CURRENT_PROTOCOL_VERSION);
+        assert_eq!(decoded.protocol, ProtocolVersion::new(1, 0));
         let canonical = canonical_json_bytes(&decoded).expect("canonical fixture");
         let original: serde_json::Value = serde_json::from_str(fixture).expect("fixture JSON");
         let expected = canonical_json_bytes(&original).expect("canonical fixture JSON");

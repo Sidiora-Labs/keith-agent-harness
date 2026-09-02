@@ -1,0 +1,117 @@
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Command, Stdio};
+
+use keith_agent_types::{ProfileId, WorkspaceId};
+use serde_json::{Value, json};
+
+fn run_protocol(lines: &[Value]) -> Vec<Value> {
+    run_protocol_lines(&lines.iter().map(Value::to_string).collect::<Vec<_>>())
+}
+
+fn run_protocol_lines(lines: &[String]) -> Vec<Value> {
+    let directory = tempfile::tempdir().expect("temporary ACP process root");
+    let state_root = directory.path().join("state");
+    let socket = directory.path().join("missing-agentd.sock");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_keith-agent-acp"))
+        .arg("--socket")
+        .arg(socket)
+        .arg("--state-root")
+        .arg(state_root)
+        .arg("--profile")
+        .arg(ProfileId::new().to_string())
+        .arg("--workspace")
+        .arg(WorkspaceId::new().to_string())
+        .arg("--workspace-root")
+        .arg(env!("CARGO_MANIFEST_DIR"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn real ACP agent process");
+    {
+        let mut stdin = child.stdin.take().expect("ACP stdin");
+        for line in lines {
+            stdin
+                .write_all(line.as_bytes())
+                .expect("write protocol fixture");
+            stdin.write_all(b"\n").expect("terminate protocol frame");
+        }
+    }
+    let output = child.wait_with_output().expect("wait for ACP agent process");
+    assert!(
+        output.status.success(),
+        "ACP process failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    BufReader::new(output.stdout.as_slice())
+        .lines()
+        .map(|line| {
+            serde_json::from_str(&line.expect("read ACP response")).expect("valid JSON response")
+        })
+        .collect()
+}
+
+#[test]
+fn real_process_reports_malformed_json_rpc_without_losing_prior_responses() {
+    let responses = run_protocol_lines(&[
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "protocolVersion": 1 }
+        })
+        .to_string(),
+        "{not-json".to_owned(),
+    ]);
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["id"], 1);
+    assert_eq!(responses[0]["result"]["protocolVersion"], 1);
+    assert!(responses[1]["id"].is_null());
+    assert_eq!(responses[1]["error"]["code"], -32700);
+}
+
+#[test]
+fn real_process_negotiates_v1_and_handles_json_rpc_batches() {
+    let responses = run_protocol(&[
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "protocolVersion": 1 }
+        }),
+        json!([
+            {
+                "jsonrpc": "2.0",
+                "method": "session/cancel",
+                "params": { "sessionId": "unknown-session" }
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "keith/unknown",
+                "params": {}
+            }
+        ]),
+    ]);
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["id"], 1);
+    assert_eq!(responses[0]["result"]["protocolVersion"], 1);
+    assert_eq!(responses[0]["result"]["agentInfo"]["name"], "keith");
+    let batch = responses[1].as_array().expect("batch response array");
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0]["id"], 2);
+    assert_eq!(batch[0]["error"]["code"], -32601);
+}
+
+#[test]
+fn real_process_refuses_unsupported_protocol_versions() {
+    let responses = run_protocol(&[json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "initialize",
+        "params": { "protocolVersion": 2 }
+    })]);
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["id"], 7);
+    assert_eq!(responses[0]["error"]["code"], -32602);
+}

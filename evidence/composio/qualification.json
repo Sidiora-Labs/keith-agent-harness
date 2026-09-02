@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "qualification_id": "keith-everywhere-5.3-composio-2026-09-01",
+  "qualification_result": "local_conformance_passed_external_accounts_blocked",
+  "official_sources": [
+    "https://docs.composio.dev/docs/how-composio-works",
+    "https://docs.composio.dev/docs/sessions-via-mcp",
+    "https://docs.composio.dev/docs/configuring-sessions",
+    "https://docs.composio.dev/reference/api-reference/connected-accounts/postConnectedAccountsCompleteAuth"
+  ],
+  "credential_inventory": {
+    "environment_names_inspected": true,
+    "matching_composio_credential_names": [],
+    "required_control_plane_credential_reference": "project-api-key owned by composio-control-plane",
+    "secret_values_read": false,
+    "owner_authorization_present": false,
+    "callback_verifier_configuration_present": false
+  },
+  "local_operation_trace": [
+    {
+      "operation": "stable profile identity",
+      "implementation": "crates/composio/src/lib.rs::provider_user_id",
+      "test": "crates/composio/src/tests.rs::real_http_journey_proves_sessions_accounts_policy_mcp_recovery_and_isolation"
+    },
+    {
+      "operation": "connect and callback identity verification",
+      "implementation": "crates/composio/src/lib.rs::ComposioConnector::begin_connect and ComposioConnector::complete_connect_callback",
+      "test": "crates/composio/src/tests.rs::real_http_journey_proves_sessions_accounts_policy_mcp_recovery_and_isolation"
+    },
+    {
+      "operation": "resume and expiry recovery",
+      "implementation": "crates/composio/src/lib.rs::ComposioConnector::resume_session and ComposioConnector::create_session",
+      "test": "crates/composio/src/tests.rs::real_http_journey_proves_sessions_accounts_policy_mcp_recovery_and_isolation"
+    },
+    {
+      "operation": "bounded discovery and exact account selection",
+      "implementation": "crates/composio/src/lib.rs::ComposioConnector::discover_tools and ComposioConnector::call_tool",
+      "test": "crates/composio/src/tests.rs::real_http_journey_proves_sessions_accounts_policy_mcp_recovery_and_isolation"
+    },
+    {
+      "operation": "read and result redaction",
+      "implementation": "crates/composio/src/lib.rs::ComposioConnector::call_tool and redact_tool_result",
+      "test": "crates/composio/src/tests.rs::real_http_journey_proves_sessions_accounts_policy_mcp_recovery_and_isolation"
+    },
+    {
+      "operation": "approval-gated write",
+      "implementation": "crates/composio/src/lib.rs::ComposioConnector::call_tool",
+      "test": "crates/composio/src/tests.rs::real_http_journey_proves_sessions_accounts_policy_mcp_recovery_and_isolation"
+    },
+    {
+      "operation": "revocation and deletion",
+      "implementation": "crates/composio/src/lib.rs::ComposioConnector::revoke_account and ComposioConnector::delete_account",
+      "test": "crates/composio/src/tests.rs::real_http_journey_proves_sessions_accounts_policy_mcp_recovery_and_isolation"
+    },
+    {
+      "operation": "OAuth and account substitution refusal",
+      "implementation": "crates/composio/src/lib.rs::ComposioConnector::complete_connect_callback and with_exact_account",
+      "test": "crates/composio/src/tests.rs::real_http_journey_proves_sessions_accounts_policy_mcp_recovery_and_isolation"
+    },
+    {
+      "operation": "credential and SSRF denial",
+      "implementation": "crates/composio/src/lib.rs::validate_api_base and validate_mcp_endpoint",
+      "test": "crates/composio/tests/qualification.rs::control_plane_and_mcp_endpoint_policy_blocks_credential_ssrf"
+    },
+    {
+      "operation": "storage isolation",
+      "implementation": "crates/composio/src/lib.rs::ensure_regular_file and ComposioConnector::persist",
+      "test": "crates/composio/tests/qualification.rs::durable_state_and_atomic_temporary_files_refuse_symlinks"
+    },
+    {
+      "operation": "result injection remains untrusted data",
+      "implementation": "crates/composio/src/lib.rs::ComposioConnector::call_tool",
+      "test": "crates/composio/src/tests.rs::real_http_journey_proves_sessions_accounts_policy_mcp_recovery_and_isolation"
+    },
+    {
+      "operation": "cross-profile isolation",
+      "implementation": "crates/composio/src/lib.rs::ComposioConnector::account",
+      "test": "crates/composio/src/tests.rs::durable_state_refuses_profile_or_provider_identity_substitution"
+    }
+  ],
+  "external_applications": [
+    {
+      "application": "gmail",
+      "required_external_inputs": [
+        "Composio project API credential",
+        "Gmail auth configuration",
+        "callback verifier URL",
+        "user OAuth consent",
+        "owner authorization for reads, sends, expiry, revocation, and deletion"
+      ],
+      "real_account_status": "blocked_external_credentials_and_owner_authorization"
+    },
+    {
+      "application": "github",
+      "required_external_inputs": [
+        "Composio project API credential",
+        "GitHub auth configuration",
+        "callback verifier URL",
+        "user OAuth consent",
+        "owner authorization for reads, writes, expiry, revocation, and deletion"
+      ],
+      "real_account_status": "blocked_external_credentials_and_owner_authorization"
+    },
+    {
+      "application": "slack",
+      "required_external_inputs": [
+        "Composio project API credential",
+        "Slack auth configuration",
+        "callback verifier URL",
+        "workspace OAuth consent",
+        "owner authorization for reads, messages, expiry, revocation, and deletion"
+      ],
+      "real_account_status": "blocked_external_credentials_and_owner_authorization"
+    }
+  ],
+  "browser_surface": {
+    "test": "apps/agent-web/ui/tests/apps.test.tsx",
+    "raw_credentials_collected": false,
+    "client_fabricated_consequential_approval": false
+  },
+  "gate_results": [
+    {
+      "command": "cargo test -p keith-composio",
+      "status": "passed",
+      "observed": "6 passed, 0 failed, including real loopback HTTP, hosted MCP, callback identity, approval, cancellation, lifecycle, isolation, SSRF, and hostile-storage journeys"
+    },
+    {
+      "command": "npm --prefix apps/agent-web/ui test",
+      "status": "passed",
+      "observed": "28 passed, 0 failed across 9 files"
+    },
+    {
+      "command": "cargo clippy -p keith-composio --all-targets --all-features -- -D warnings",
+      "status": "passed"
+    }
+  ],
+  "release_claim": "No Composio application is recorded as real-account qualified. Local conformance proves the connector, callback verification, authority, MCP, lifecycle, and hostile-boundary implementation only; the three credentialed owner journeys remain blocked until the listed external inputs are supplied."
+}

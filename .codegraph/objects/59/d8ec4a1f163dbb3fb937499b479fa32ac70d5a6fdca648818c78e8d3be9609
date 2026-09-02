@@ -1,0 +1,16 @@
+#![forbid(unsafe_code)]
+
+mod bridge;
+mod model;
+mod projector;
+mod store;
+
+pub use bridge::{AcpBridgeConfig, AcpSessionBridge};
+pub use model::{
+    AcpBinaryContent, AcpContentBlock, AcpPromptOutcome, AcpSessionRecord, AcpSessionStatus,
+    AcpUpdate, AcpUpdateKind, BridgeError, DurablePrompt, PromptState,
+};
+pub use projector::AcpUpdateProjector;
+pub use store::AcpSessionStore;
+
+pub const ACP_PROTOCOL_VERSION: u16 = 1;

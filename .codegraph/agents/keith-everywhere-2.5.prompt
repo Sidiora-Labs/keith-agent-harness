@@ -1,0 +1,38 @@
+# resume: keith-everywhere/2.5
+task 2.5 — Stable ACP v1 agent and durable session lifecycle  (in_progress)
+verify: cargo test -p keith-acp && cargo test -p keith-agent-acp
+last handoff:
+  done: Implemented the task-owned keith-acp durable session bridge and official-SDK agent-acp stdio adapter source. Added stable-v1 negotiation, process-owner auth metadata, create/load/resume/close, prompt content and attachment mapping, concurrent dispatch, cancellation, durable cursors/idempotent prompt recovery, real event projection, restrictive atomic state, and focused tests. cargo test -p keith-acp --offline passes 4/4; scoped Codify guard, cargo fmt check, and git diff check pass.
+  next: Restore crates.io DNS or pre-cache agent-client-protocol 2.0.0, then compile and fix the agent-acp adapter and run the exact verify command. Integration captain must expose an independent context-preserving Keith session fork before ACP fork can be truthfully advertised. Add deterministic malformed/batch/version/reconnect fixtures plus the required real-process journey, then run cg spec done 2.5 only if every acceptance criterion and both package tests pass.
+  note: Task remains in_progress: full verification is blocked by uncached official SDK plus sandbox DNS, and fork/test-journey acceptance is not yet met.
+  files: apps/agent-acp/src/main.rs,apps/cua-runner/src/lib.rs,apps/cua-runner/tests/process_runtime.rs,crates/acp/src/bridge.rs,crates/channel-adapters/Cargo.toml,crates/channel-adapters/src/email.rs,crates/channel-adapters/src/google_chat.rs,crates/channel-adapters/src/matrix.rs,crates/channel-adapters/src/slack.rs,crates/channel-adapters/src/telegram.rs,crates/channel-adapters/src/whatsapp.rs,crates/channel-adapters/tests/slack.rs,crates/channel-adapters/tests/whatsapp.rs,crates/channel-adapters/tests/work_channels.rs,crates/channel-core/src/lib.rs,crates/cua/src/controller.rs,crates/cua/src/model.rs,crates/plugin-host/src/abi.rs,crates/plugin-host/tests/abi.rs,crates/plugin-sdk/src/lib.rs
+task memories:
+  [outcome] agent exited rc=0 without completing
+  [decision] Stable ACP v1 is served through agent-client-protocol 2.0.0; the adapter advertises create/load/resume/close and supported prompt content, but intentionally does not advertise session/fork until the captain-owned Keith runtime exposes an independent context-preserving session fork.
+  [constraint] Qualification requires an available official agent-client-protocol crate. In this sandbox the dependency is uncached and crates.io resolution fails with Could not resolve host index.crates.io; keith-acp itself passes all four tests offline.
+uncommitted (23):
+  apps/agent-acp/src/main.rs
+  apps/cua-runner/src/lib.rs
+  apps/cua-runner/tests/process_runtime.rs
+  crates/acp/src/bridge.rs
+  crates/channel-adapters/Cargo.toml
+  crates/channel-adapters/src/email.rs
+  crates/channel-adapters/src/google_chat.rs
+  crates/channel-adapters/src/matrix.rs
+  crates/channel-adapters/src/slack.rs
+  crates/channel-adapters/src/telegram.rs
+  crates/channel-adapters/src/whatsapp.rs
+  crates/channel-adapters/tests/slack.rs
+  crates/channel-adapters/tests/whatsapp.rs
+  crates/channel-adapters/tests/work_channels.rs
+  crates/channel-core/src/lib.rs
+  crates/cua/src/controller.rs
+  crates/cua/src/model.rs
+  crates/plugin-host/src/abi.rs
+  crates/plugin-host/tests/abi.rs
+  crates/plugin-sdk/src/lib.rs
+  ... and 3 more
+lease: held by keith-5, expires in 240 min
+
+when done: run the verify command, then `cg spec done 2.5`.
+before stopping: `cg handoff --task 2.5 --done ... --next ...` to hand off.

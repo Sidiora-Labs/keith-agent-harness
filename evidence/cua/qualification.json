@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "qualification_id": "keith-everywhere-5.4-cua-2026-09-01",
+  "qualification_result": "passed_local_process_and_teaching_conformance",
+  "host_capabilities": {
+    "bubblewrap": "/usr/bin/bwrap",
+    "xvfb": "/usr/bin/Xvfb",
+    "chromium": "/snap/bin/chromium",
+    "ffmpeg": "/usr/bin/ffmpeg",
+    "headed_process_attempted": true,
+    "headed_process_result": "passed"
+  },
+  "credential_inventory": {
+    "named_grants_only": true,
+    "secret_values_read": false,
+    "reusable_values_in_observations_recordings_logs_or_recipes": false
+  },
+  "journeys": [
+    {
+      "journey": "isolated headed Linux browser",
+      "implementation": "apps/cua-runner/src/lib.rs::LinuxComputerRuntime::launch",
+      "test": "apps/cua-runner/tests/process_runtime.rs::concrete_headed_linux_runtime_launches_xvfb_and_real_browser"
+    },
+    {
+      "journey": "persistent and ephemeral lifecycle with resource ceilings",
+      "implementation": "crates/cua/src/controller.rs::ComputerController",
+      "test": "crates/cua/src/controller.rs::persistent_lifecycle_snapshot_reset_restore_and_restart_reconcile"
+    },
+    {
+      "journey": "profile storage and deletion isolation",
+      "implementation": "crates/cua/src/controller.rs::ComputerController::delete_profile",
+      "test": "crates/cua/src/controller.rs::ephemeral_termination_erases_state_and_profile_delete_is_isolated"
+    },
+    {
+      "journey": "authenticated short-lived read-only screen stream",
+      "implementation": "crates/cua/src/control.rs::ComputerControlService::negotiate_stream",
+      "test": "apps/cua-runner/tests/process_runtime.rs::real_runner_process_enforces_stream_and_exclusive_control_across_restart"
+    },
+    {
+      "journey": "origin-scoped named credential fill",
+      "implementation": "apps/cua-runner/src/lib.rs::LinuxComputerRuntime::register_credential",
+      "test": "apps/cua-runner/tests/process_runtime.rs::named_credential_is_origin_scoped_and_only_fills_a_protected_field"
+    },
+    {
+      "journey": "screenshot DOM accessibility focus URL viewport cursor and application observation",
+      "implementation": "apps/cua-runner/src/lib.rs::LinuxComputerRuntime::observe",
+      "test": "apps/cua-runner/tests/process_runtime.rs::real_runner_process_observes_and_acts"
+    },
+    {
+      "journey": "complete bounded action vocabulary",
+      "implementation": "crates/cua/src/model.rs::ComputerAction::validate",
+      "test": "crates/cua/tests/qualification.rs::complete_visual_action_vocabulary_is_bounded_before_runtime_execution"
+    },
+    {
+      "journey": "semantic action and stale coordinate refusal",
+      "implementation": "crates/cua/src/controller.rs::ComputerController::execute_action",
+      "test": "apps/cua-runner/tests/process_runtime.rs::real_runner_process_observes_and_acts"
+    },
+    {
+      "journey": "exact consequential approval and target invalidation",
+      "implementation": "crates/cua/src/controller.rs::ComputerController::authorize_attempt",
+      "test": "crates/cua/src/controller.rs::stale_coordinate_is_refused_and_exact_semantic_action_is_audited"
+    },
+    {
+      "journey": "exclusive user takeover manual input and explicit return",
+      "implementation": "crates/cua/src/control.rs::ComputerControlService::take_user_control",
+      "test": "apps/cua-runner/tests/process_runtime.rs::real_runner_process_observes_and_acts"
+    },
+    {
+      "journey": "restart reconnect pauses stale control",
+      "implementation": "crates/cua/src/control.rs::ComputerControlService::open",
+      "test": "apps/cua-runner/tests/process_runtime.rs::real_runner_process_enforces_stream_and_exclusive_control_across_restart"
+    },
+    {
+      "journey": "snapshot restore reset idle reclaim crash recovery and complete deletion",
+      "implementation": "crates/cua/src/controller.rs::ComputerController",
+      "test": "apps/cua-runner/tests/process_runtime.rs::real_runner_process_crash_reconciles_without_cross_profile_access"
+    },
+    {
+      "journey": "synchronized demonstration and secret parameterization",
+      "implementation": "crates/task-recipe/src/teaching.rs::DemonstrationRecorder",
+      "test": "crates/task-recipe/tests/teaching.rs::real_cua_recording_changed_layout_correction_replay_and_skill_invocation"
+    },
+    {
+      "journey": "semantic compile changed-layout correction and checkpoint replay",
+      "implementation": "crates/task-recipe/src/teaching.rs::RecipeCompiler",
+      "test": "crates/task-recipe/tests/teaching.rs::real_cua_recording_changed_layout_correction_replay_and_skill_invocation"
+    },
+    {
+      "journey": "skill publication invocation version rollback and cascading deletion",
+      "implementation": "crates/task-recipe/src/publication.rs::SkillPublication",
+      "test": "crates/task-recipe/tests/domain.rs::publication_requires_real_checks_and_installs_through_the_skill_registry"
+    },
+    {
+      "journey": "latency cancellation reclamation and unsafe-action refusal metrics",
+      "implementation": "apps/cua-runner/src/lib.rs::LinuxComputerRuntime",
+      "test": "apps/cua-runner/tests/process_runtime.rs::real_browser_wait_verifies_no_change_and_cancels_in_flight"
+    }
+  ],
+  "metrics": {
+    "task_success": "1/1",
+    "completed_actions": 3,
+    "unsafe_refusals": 2,
+    "journey_latency_ms": 1282,
+    "stream_auth_latency_ms": 7,
+    "cancellation_latency_ms": 252,
+    "crash_recovery_latency_ms": 284,
+    "idle_resource_reclamation": "passed",
+    "limits": {
+      "journey_latency_ms": 120000,
+      "stream_auth_latency_ms": 2000,
+      "cancellation_latency_ms": 900,
+      "crash_recovery_latency_ms": 10000
+    }
+  },
+  "browser_surface": {
+    "test": "apps/agent-web/ui/tests/computer.test.tsx",
+    "same_origin_stream_path_only": true,
+    "reusable_stream_token_exposed": false,
+    "lease_revision_required_for_input": true,
+    "secret_bearing_teaching_projection_rejected": true
+  },
+  "gate_results": [
+    {
+      "command": "cargo test -p keith-cua -p keith-cua-runner -p keith-task-recipe",
+      "status": "passed",
+      "observed": "29 passed, 0 failed, including 7 real process/browser journeys and the headed Xvfb/Chromium path"
+    },
+    {
+      "command": "npm --prefix apps/agent-web/ui test",
+      "status": "passed",
+      "observed": "30 passed, 0 failed across 10 files"
+    },
+    {
+      "command": "cargo test -p keith-cua-runner --test process_runtime -- --nocapture --test-threads=1",
+      "status": "passed",
+      "observed": "7 passed; cancellation 252 ms, crash recovery 284 ms, stream authentication 7 ms, 3-action journey 1282 ms with 2 unsafe refusals"
+    },
+    {
+      "command": "cargo clippy -p keith-cua -p keith-cua-runner -p keith-task-recipe --all-targets --all-features -- -D warnings",
+      "status": "passed"
+    }
+  ]
+}

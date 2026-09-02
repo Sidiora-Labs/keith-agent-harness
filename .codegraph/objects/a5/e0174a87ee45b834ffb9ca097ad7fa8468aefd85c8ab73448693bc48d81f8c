@@ -1,0 +1,4 @@
+tree 3fb400da4675225c54e8cf5bbb698962c30a57829a4ab4cd8791b2524ff20b61
+parent 2a113399c5a1e545e2eba9d80f37adec62a1c3d1b6c79cc165e62cdb3d71e451
+date 1788276704
+message Harden Meta-Harness restart diagnosis integrity [spec:keith-everywhere/2.1]

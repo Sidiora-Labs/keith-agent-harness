@@ -2,3 +2,4 @@
 *.profraw
 *.tmp
 tmp/*
+.env

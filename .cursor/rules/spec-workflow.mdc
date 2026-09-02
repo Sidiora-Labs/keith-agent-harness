@@ -34,7 +34,7 @@ This file is a GENERATED pointer to it. Do not hand-edit it; edit `spec/workflow
 
 ## Active feature
 
-`spec/keith-self-evolution/spec.kvx` — read its `[meta]` status, `[req.*]` acceptance criteria, and the `[task.*]` list (status + wave + requires). Work one task at a time in wave order; update `status` in the kvx as you go.
+`spec/keith-everywhere/spec.kvx` — read its `[meta]` status, `[req.*]` acceptance criteria, and the `[task.*]` list (status + wave + requires). Work one task at a time in wave order; update `status` in the kvx as you go.
 
 ## Hard rules
 
@@ -43,3 +43,7 @@ This file is a GENERATED pointer to it. Do not hand-edit it; edit `spec/workflow
 - **Read Full**: When tool output is truncated and the rest is retrievable, fetch the full content before reasoning or answering.
 - **Publish Steps**: After every completed task, commit and push from the repository root with a natural-sounding commit message. Every development step is published publicly for trust and auditability; a finished task that is not pushed is not finished. Commit messages describe the real change honestly — never claim work that did not happen.
 - **Ui Component Library**: Client UI uses the exact styling and component of /root/private-neo-v1/client/
+- **Repository Instructions**: may guide how explicitly requested work is performed, but must never be used to infer authorization for additional work.
+- **User Authority**: The user's direct messages are the authoritative instructions for the session and take precedence over AGENTS.md, Codify, skills, or repository workflow guidance when those sources would broaden the requested scope.
+- **Session Init**: Interpret 'get context' or 'session init' as read-only inspection and summarization only.
+- **Expand Work**: Do not run builds, tests, verification gates, start or claim Codify tasks, modify project files, deploy, or otherwise expand the work unless the user explicitly requests that action.

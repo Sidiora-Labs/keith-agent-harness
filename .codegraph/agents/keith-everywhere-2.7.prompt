@@ -1,0 +1,38 @@
+# resume: keith-everywhere/2.7
+task 2.7 — Profile-scoped Composio sessions and MCP connector  (in_progress)
+verify: cargo test -p keith-composio
+last handoff:
+  done: Reconciled the resumed task against the full spec and current shared checkout. Before the concurrent ACP manifest reintroduced its uncached SDK dependency, the exact cargo test -p keith-composio command compiled the current crate and ran all three tests: durable_state_refuses_profile_or_provider_identity_substitution passed, while the two real HTTP journey tests reached only TcpListener::bind and failed with sandbox EPERM. cargo fmt -p keith-composio -- --check passes. Exact-file cg guard --strict passes for all four crates/composio task files. No task-owned source edits, snapshot, or false qualification were made.
+  next: Run from a host that permits loopback sockets and can resolve or has pre-cached agent-client-protocol 2.0.0. Update the shared Cargo.lock, then run cargo test -p keith-composio and cargo clippy -p keith-composio --all-targets -- -D warnings. If all three tests and Clippy pass, rerun cg review after the Composio files are visible to the graph, rerun the exact-file strict guard, then cg commit -m 'Add profile-scoped Composio sessions and MCP connector' --task 2.7, cg spec done 2.7, cg spec trace 2.7, and push the task snapshot. Integration must mount calls only through ComposioConnector, pass the keith-composio-mcp binary path for HTTPS, and remove stale McpManager config when profile or session deletion support lands.
+  blocked: This sandbox denies socket creation with EPERM, so the required controllable real HTTP boundary cannot run. The concurrent task 2.5 manifest also requires uncached agent-client-protocol 2.0.0 while crates.io DNS is unavailable, preventing subsequent Cargo resolution and shared lockfile update.
+  note: Task remains in_progress: implementation is present and scoped checks pass, but the exact verifier is not green in this environment, so no commit, spec done, trace, or push was performed.
+  files: apps/agent-acp/src/main.rs,apps/cua-runner/src/lib.rs,apps/cua-runner/tests/process_runtime.rs,crates/acp/src/bridge.rs,crates/channel-adapters/Cargo.toml,crates/channel-adapters/src/email.rs,crates/channel-adapters/src/google_chat.rs,crates/channel-adapters/src/matrix.rs,crates/channel-adapters/src/slack.rs,crates/channel-adapters/src/telegram.rs,crates/channel-adapters/src/whatsapp.rs,crates/channel-adapters/tests/slack.rs,crates/channel-adapters/tests/whatsapp.rs,crates/channel-adapters/tests/work_channels.rs,crates/channel-core/src/lib.rs,crates/cua/src/controller.rs,crates/cua/src/model.rs,crates/plugin-host/src/abi.rs,crates/plugin-host/tests/abi.rs,crates/plugin-sdk/src/lib.rs
+task memories:
+  [outcome] agent exited rc=0 without completing
+  [decision] Task 2.9 is isolated to crates/task-recipe. Capture sanitizes raw values before persistent DemonstrationEvent construction; TaskRecipe histories append immutable correction and rollback revisions; filesystem deletion cascades derived recipes and unshared media; publication emits packages consumed directly by keith-skills only after declared checks pass and explicit acceptance.
+uncommitted (23):
+  apps/agent-acp/src/main.rs
+  apps/cua-runner/src/lib.rs
+  apps/cua-runner/tests/process_runtime.rs
+  crates/acp/src/bridge.rs
+  crates/channel-adapters/Cargo.toml
+  crates/channel-adapters/src/email.rs
+  crates/channel-adapters/src/google_chat.rs
+  crates/channel-adapters/src/matrix.rs
+  crates/channel-adapters/src/slack.rs
+  crates/channel-adapters/src/telegram.rs
+  crates/channel-adapters/src/whatsapp.rs
+  crates/channel-adapters/tests/slack.rs
+  crates/channel-adapters/tests/whatsapp.rs
+  crates/channel-adapters/tests/work_channels.rs
+  crates/channel-core/src/lib.rs
+  crates/cua/src/controller.rs
+  crates/cua/src/model.rs
+  crates/plugin-host/src/abi.rs
+  crates/plugin-host/tests/abi.rs
+  crates/plugin-sdk/src/lib.rs
+  ... and 3 more
+lease: held by keith-7, expires in 240 min
+
+when done: run the verify command, then `cg spec done 2.7`.
+before stopping: `cg handoff --task 2.7 --done ... --next ...` to hand off.

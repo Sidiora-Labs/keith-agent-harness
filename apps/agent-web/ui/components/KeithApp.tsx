@@ -11,6 +11,20 @@ import {
   useState,
 } from 'react'
 import { Streamdown } from 'streamdown'
+import { ComputerStage, screenProjection } from '@/components/computer/ComputerStage'
+import {
+  TeachTaskPanel,
+  teachingProjection,
+  type TeachingAction,
+  type TeachingActionResult,
+} from '@/components/computer/TeachTaskPanel'
+import {
+  HarnessRepairsPanel,
+  harnessRepairsProjection,
+  type HarnessRepairAction,
+  type HarnessRepairActionResult,
+  type HarnessRepairsProjection,
+} from '@/components/harness/HarnessRepairsPanel'
 import {
   Activity,
   Agent,
@@ -51,6 +65,9 @@ import {
   evolutionCommand,
   EVOLUTION_ENABLEMENT_GUIDANCE,
   getBootstrap,
+  integrationListCommand,
+  integrationOperationCommand,
+  integrationsFromResult,
   mergeSessions,
   visibleUserText,
   type BootstrapData,
@@ -60,12 +77,29 @@ import {
   type MemoryResult,
   type MessageProjection,
   type LiveRunProjection,
+  type IntegrationOperation,
+  type IntegrationResourceProjection,
+  type IntegrationService,
   type ProjectionState,
+  type ProfileIntegrationsProjection,
   type SessionSnapshot,
   type SessionSummary,
 } from '@/lib/keith'
 
-type SheetName = 'sessions' | 'work' | 'memory' | 'schedule' | 'settings' | null
+type SheetName =
+  | 'sessions'
+  | 'work'
+  | 'channels'
+  | 'apps'
+  | 'plugins'
+  | 'acp'
+  | 'recordings'
+  | 'recipes'
+  | 'harness'
+  | 'memory'
+  | 'schedule'
+  | 'settings'
+  | null
 type ConnectionState = 'opening' | 'connected' | 'reconnecting' | 'unavailable'
 
 const RECONNECT_DELAYS = [400, 800, 1_600, 3_200, 6_400, 8_000]
@@ -115,6 +149,7 @@ export function KeithApp() {
   const [memoryResults, setMemoryResults] = useState<MemoryResult[]>([])
   const [lastPrompt, setLastPrompt] = useState<string | null>(null)
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null)
+  const [integrations, setIntegrations] = useState<ProfileIntegrationsProjection | null>(null)
   const projectionRef = useRef(projection)
   const draftBySession = useRef(new Map<string, string>())
   const rootRef = useRef<HTMLElement>(null)
@@ -242,6 +277,8 @@ export function KeithApp() {
   }, [])
 
   const applyCommandResult = useCallback((result: CommandResult) => {
+    const nextIntegrations = integrationsFromResult(result)
+    if (nextIntegrations) setIntegrations(nextIntegrations)
     applyEncodedWireMessage(
       JSON.stringify({ message: 'command_result', payload: result }),
     )
@@ -443,6 +480,14 @@ export function KeithApp() {
     [runCommand, selectedSession],
   )
 
+  useEffect(() => {
+    if (!selectedProfile) {
+      setIntegrations(null)
+      return
+    }
+    void runCommand(null, integrationListCommand(selectedProfile.id))
+  }, [runCommand, selectedProfile])
+
   const resize = (event: ReactPointerEvent<HTMLDivElement>) => {
     const bounds = rootRef.current?.getBoundingClientRect()
     if (!bounds) return
@@ -478,6 +523,10 @@ export function KeithApp() {
         onNew={() => void createConversation()}
         onOpenSheet={(next) => {
           setSheet(next)
+          setSidebarOpen(false)
+        }}
+        onOpenComputer={() => {
+          setWorkspaceOpen(true)
           setSidebarOpen(false)
         }}
       />
@@ -565,6 +614,9 @@ export function KeithApp() {
         open={workspaceOpen}
         fullscreen={fullscreenWork}
         snapshot={snapshot}
+        integrations={integrations}
+        csrf={bootstrap.csrf}
+        onCommand={runSelectedCommand}
         onClose={() => {
           setWorkspaceOpen(false)
           setFullscreenWork(false)
@@ -580,6 +632,8 @@ export function KeithApp() {
         sessionId={selectedSession}
         sessions={projection.sessions}
         memoryResults={memoryResults}
+        integrations={integrations}
+        onIntegrations={setIntegrations}
         onClose={() => setSheet(null)}
         onSelect={selectConversation}
         onNew={() => void createConversation()}
@@ -665,6 +719,7 @@ function Sidebar({
   onSelect,
   onNew,
   onOpenSheet,
+  onOpenComputer,
 }: {
   open: boolean
   sessions: SessionSummary[]
@@ -674,6 +729,7 @@ function Sidebar({
   onSelect: (id: string) => void
   onNew: () => void
   onOpenSheet: (sheet: Exclude<SheetName, null>) => void
+  onOpenComputer: () => void
 }) {
   return (
     <>
@@ -707,6 +763,14 @@ function Sidebar({
         <nav className="secondary-nav" aria-label="Keith controls">
           <button onClick={() => onOpenSheet('sessions')}><Archive /> Sessions</button>
           <button onClick={() => onOpenSheet('work')}><Activity /> Work</button>
+          <button onClick={() => onOpenSheet('channels')}><Chat /> Channels</button>
+          <button onClick={() => onOpenSheet('apps')}><Tools /> Connected Apps</button>
+          <button onClick={() => onOpenSheet('plugins')}><Code /> Plugins</button>
+          <button onClick={() => onOpenSheet('acp')}><Agent /> ACP connections</button>
+          <button onClick={onOpenComputer}><Monitor /> Computer</button>
+          <button onClick={() => onOpenSheet('recordings')}><Activity /> Recordings</button>
+          <button onClick={() => onOpenSheet('recipes')}><Goal /> Recipes</button>
+          <button onClick={() => onOpenSheet('harness')}><Refresh /> Harness repairs</button>
           <button onClick={() => onOpenSheet('memory')}><Memory /> Memory</button>
           <button onClick={() => onOpenSheet('schedule')}><Calendar /> Schedules</button>
           <button onClick={() => onOpenSheet('settings')}><Settings /> Settings</button>
@@ -1042,15 +1106,22 @@ function WorkStage({
   open,
   fullscreen,
   snapshot,
+  integrations,
+  csrf,
+  onCommand,
   onClose,
   onFullscreen,
 }: {
   open: boolean
   fullscreen: boolean
   snapshot: SessionSnapshot | null
+  integrations: ProfileIntegrationsProjection | null
+  csrf: string
+  onCommand: (command: Command) => Promise<CommandResult | null>
   onClose: () => void
   onFullscreen: () => void
 }) {
+  const [stageView, setStageView] = useState<'computer' | 'teach'>('computer')
   if (!open) return null
   const items = [
     ...snapshot?.tools.map((tool) => ({ id: tool.tool_call_id, kind: 'Tool', title: tool.tool || 'Keith tool', state: tool.state })) ?? [],
@@ -1058,6 +1129,55 @@ function WorkStage({
     ...snapshot?.children.map((child, index) => ({ id: String(child.child_id ?? `child-${index}`), kind: 'Agent', title: String(child.objective ?? 'Delegated work'), state: String(child.state ?? '') })) ?? [],
     ...snapshot?.waits.map((wait, index) => ({ id: String(wait.wait_id ?? `wait-${index}`), kind: 'Wait', title: String(wait.reason ?? 'Waiting'), state: String(wait.state ?? '') })) ?? [],
   ]
+  const screen = screenProjection(snapshot?.computer)
+  const teaching = teachingProjection(snapshot?.teaching)
+  const computers = integrations?.resources.filter(
+    (resource) => resource.service === 'computer_session' || resource.service === 'control_lease',
+  ) ?? []
+  const runTeachingAction = async (action: TeachingAction): Promise<TeachingActionResult> => {
+    const result = await onCommand({ command: 'teaching', parameters: action })
+    if (!result) return { ok: false, safe_error: 'Keith could not reach the teaching service.' }
+    if (result.result.status === 'rejected') {
+      return {
+        ok: false,
+        safe_error: result.result.payload.error?.safe_message || 'Keith rejected the teaching action.',
+      }
+    }
+    return { ok: true }
+  }
+  const fallback = (
+    <>
+      {snapshot?.active_action ? (
+        <section className="current-work">
+          <div className="work-kicker"><span className="status-dot running" /> Current work</div>
+          <h2>{snapshot.active_action.source || 'Keith is working'}</h2>
+          <p>Authoritative state: {snapshot.active_action.state}</p>
+        </section>
+      ) : (
+        <section className="computer-empty"><KeithMark /><h2>Keith’s workspace is ready</h2><p>Tool calls, goals, child agents, waits, and durable outputs appear here while the conversation stays mounted.</p></section>
+      )}
+      {items.length ? <div className="work-feed">{items.map((item) => (
+        <article key={item.id}>
+          <span className="work-kind">{item.kind}</span>
+          <strong>{item.title}</strong>
+          <small>{friendlyState(item.state)}</small>
+        </article>
+      ))}</div> : null}
+      {computers.length ? <section className="computer-resource-list" aria-label="Computer lifecycle">
+        <h3>Computer lifecycle</h3>
+        {computers.map((computer) => <article key={computer.id}>
+          <div><strong>{computer.display_label}</strong><small>{friendlyState(computer.lifecycle)}</small></div>
+          <p>{computer.safe_error || 'The live screen appears here only after the isolated runner publishes an authenticated stream.'}</p>
+        </article>)}
+      </section> : null}
+      {snapshot?.terminal ? (
+        <section className={`terminal-card ${snapshot.terminal.status}`}>
+          {snapshot.terminal.status === 'completed' ? <CheckCircle size={18} /> : <Warning size={18} />}
+          <div><strong>Turn {friendlyState(snapshot.terminal.status)}</strong><p>{snapshot.terminal.detail || 'Durable final state recorded.'}</p></div>
+        </section>
+      ) : null}
+    </>
+  )
   return (
     <aside className={`work-stage ${fullscreen ? 'is-fullscreen' : ''}`} aria-label="Keith's Computer">
       <header>
@@ -1068,28 +1188,15 @@ function WorkStage({
         </div>
       </header>
       <div className="work-body">
-        {snapshot?.active_action ? (
-          <section className="current-work">
-            <div className="work-kicker"><span className="status-dot running" /> Current work</div>
-            <h2>{snapshot.active_action.source || 'Keith is working'}</h2>
-            <p>Authoritative state: {snapshot.active_action.state}</p>
-          </section>
+        <nav className="work-stage-switcher" aria-label="Keith Computer views">
+          <button className={stageView === 'computer' ? 'is-active' : ''} aria-pressed={stageView === 'computer'} onClick={() => setStageView('computer')}>Computer</button>
+          <button className={stageView === 'teach' ? 'is-active' : ''} aria-pressed={stageView === 'teach'} onClick={() => setStageView('teach')}>Teach a task</button>
+        </nav>
+        {stageView === 'computer' ? (
+          <ComputerStage screen={screen} csrf={csrf} fallback={fallback} onCommand={onCommand} />
         ) : (
-          <section className="computer-empty"><KeithMark /><h2>Keith’s workspace is ready</h2><p>Tool calls, goals, child agents, waits, and durable outputs appear here while the conversation stays mounted.</p></section>
+          <div className="teach-task-scroll"><TeachTaskPanel teaching={teaching} onAction={runTeachingAction} /></div>
         )}
-        {items.length ? <div className="work-feed">{items.map((item) => (
-          <article key={item.id}>
-            <span className="work-kind">{item.kind}</span>
-            <strong>{item.title}</strong>
-            <small>{friendlyState(item.state)}</small>
-          </article>
-        ))}</div> : null}
-        {snapshot?.terminal ? (
-          <section className={`terminal-card ${snapshot.terminal.status}`}>
-            {snapshot.terminal.status === 'completed' ? <CheckCircle size={18} /> : <Warning size={18} />}
-            <div><strong>Turn {friendlyState(snapshot.terminal.status)}</strong><p>{snapshot.terminal.detail || 'Durable final state recorded.'}</p></div>
-          </section>
-        ) : null}
       </div>
     </aside>
   )
@@ -1103,6 +1210,8 @@ function ControlSheet({
   sessionId,
   sessions,
   memoryResults,
+  integrations,
+  onIntegrations,
   onClose,
   onSelect,
   onNew,
@@ -1116,6 +1225,8 @@ function ControlSheet({
   sessionId: string | null
   sessions: SessionSummary[]
   memoryResults: MemoryResult[]
+  integrations: ProfileIntegrationsProjection | null
+  onIntegrations: (projection: ProfileIntegrationsProjection) => void
   onClose: () => void
   onSelect: (id: string) => void
   onNew: () => void
@@ -1126,10 +1237,18 @@ function ControlSheet({
   const titles: Record<Exclude<SheetName, null>, string> = {
     sessions: 'Sessions',
     work: 'Keith’s work',
+    channels: 'Channels',
+    apps: 'Connected Apps',
+    plugins: 'Plugins',
+    acp: 'ACP connections',
+    recordings: 'Recordings',
+    recipes: 'Task recipes',
+    harness: 'Harness repairs',
     memory: 'Memory',
     schedule: 'Schedules',
     settings: 'Settings',
   }
+  const integrationService = integrationServiceForSheet(sheet)
   return (
     <div className="sheet-layer" role="dialog" aria-modal="true" aria-label={titles[sheet]}>
       <button className="sheet-scrim" onClick={onClose} aria-label="Close" />
@@ -1138,6 +1257,8 @@ function ControlSheet({
         <div className="sheet-body">
           {sheet === 'sessions' ? <SessionsPanel sessions={sessions} selected={sessionId} onSelect={onSelect} onNew={onNew} /> : null}
           {sheet === 'work' ? <WorkPanel snapshot={snapshot} onCommand={onCommand} /> : null}
+          {integrationService ? <IntegrationPanel profileId={profileId} sessionId={sessionId} service={integrationService} projection={integrations} onProjection={onIntegrations} onCommand={onCommand} /> : null}
+          {sheet === 'harness' ? <HarnessSurface profileId={profileId} snapshot={snapshot} onCommand={onCommand} /> : null}
           {sheet === 'memory' ? <MemoryPanel results={memoryResults} onSearch={onQueryMemory} /> : null}
           {sheet === 'schedule' ? <SchedulePanel profileId={profileId} sessionId={sessionId} snapshot={snapshot} onCommand={onCommand} /> : null}
           {sheet === 'settings' ? <SettingsPanel bootstrap={bootstrap} profileId={profileId} sessionId={sessionId} snapshot={snapshot} onCommand={onCommand} /> : null}
@@ -1145,6 +1266,170 @@ function ControlSheet({
       </aside>
     </div>
   )
+}
+
+function integrationServiceForSheet(sheet: SheetName): IntegrationService | null {
+  switch (sheet) {
+    case 'channels': return 'channel_account'
+    case 'apps': return 'connected_app'
+    case 'plugins': return 'plugin'
+    case 'acp': return 'acp_connection'
+    case 'recordings': return 'recording'
+    case 'recipes': return 'recipe'
+    case 'harness': return 'harness_repair'
+    default: return null
+  }
+}
+
+const INTEGRATION_COPY: Record<IntegrationService, { title: string; empty: string }> = {
+  channel_account: { title: 'Channel accounts', empty: 'No channel account has been admitted for this profile.' },
+  acp_connection: { title: 'ACP connections', empty: 'No ACP client connection has been admitted for this profile.' },
+  plugin: { title: 'Plugins', empty: 'No executable plugin has been installed for this profile.' },
+  connected_app: { title: 'Connected Apps', empty: 'No external application account has been connected for this profile.' },
+  computer_session: { title: 'Computers', empty: 'No isolated computer session exists for this profile.' },
+  control_lease: { title: 'Computer control', empty: 'No computer control lease exists for this profile.' },
+  recording: { title: 'Recordings', empty: 'No task demonstration is being recorded for this profile.' },
+  recipe: { title: 'Task recipes', empty: 'No task recipe has been published for this profile.' },
+  harness_repair: { title: 'Harness repair resources', empty: 'No admitted harness repair resource exists for this profile.' },
+}
+
+export function IntegrationPanel({
+  profileId,
+  sessionId,
+  service,
+  projection,
+  onProjection,
+  onCommand,
+}: {
+  profileId: string | null
+  sessionId: string | null
+  service: IntegrationService
+  projection: ProfileIntegrationsProjection | null
+  onProjection: (projection: ProfileIntegrationsProjection) => void
+  onCommand: (command: Command) => Promise<CommandResult | null>
+}) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [safeError, setSafeError] = useState<string | null>(null)
+  const copy = INTEGRATION_COPY[service]
+  const availability = projection?.services.find((item) => item.service === service)?.availability
+  const resources = projection?.resources.filter((item) => item.service === service) ?? []
+
+  const refresh = useCallback(async () => {
+    if (!profileId) return
+    setBusy('refresh')
+    setSafeError(null)
+    const result = await onCommand(integrationListCommand(profileId))
+    const next = result ? integrationsFromResult(result) : null
+    if (next) onProjection(next)
+    else setSafeError('Keith did not return an authoritative service projection.')
+    setBusy(null)
+  }, [onCommand, onProjection, profileId, service])
+
+  useEffect(() => { if (profileId) void refresh() }, [profileId, refresh])
+
+  const mutate = async (resource: IntegrationResourceProjection, operation: IntegrationOperation) => {
+    if (!profileId || !sessionId || busy) return
+    setBusy(`${operation}:${resource.id}`)
+    setSafeError(null)
+    const result = await onCommand(
+      integrationOperationCommand(profileId, sessionId, resource, operation),
+    )
+    if (!result) {
+      setSafeError('Keith safely rejected the service action. Refresh for current lifecycle state.')
+      setBusy(null)
+      return
+    }
+    const refreshed = await onCommand(integrationListCommand(profileId))
+    const next = refreshed ? integrationsFromResult(refreshed) : null
+    if (next) onProjection(next)
+    else setSafeError('The action was accepted, but its refreshed state is unavailable.')
+    setBusy(null)
+  }
+
+  if (!profileId) return <EmptyPanel icon={<Tools size={22} />} title={copy.title} copy="Choose a profile first." />
+  return <section className="integration-panel" aria-label={copy.title}>
+    <div className="integration-heading">
+      <div><h3>{copy.title}</h3><p>Profile-scoped lifecycle from Keith’s daemon. Unsupported or unqualified work remains visibly unavailable.</p></div>
+      <button className="secondary-button" disabled={Boolean(busy)} onClick={() => void refresh()}><Refresh size={15} /> Refresh</button>
+    </div>
+    <ServiceAvailability availability={availability} />
+    {service === 'channel_account' ? <div className="integration-actions" aria-label="Channel account setup controls">
+      <button className="secondary-button" disabled title="Connecting an external account requires a trusted exact approval">Connect account · approval required</button>
+    </div> : null}
+    {service === 'connected_app' ? <div className="integration-actions" aria-label="Connected app setup controls">
+      <button className="secondary-button" disabled title="Connecting an external application requires a verified callback and trusted exact approval">Connect app · verified approval required</button>
+    </div> : null}
+    {service === 'plugin' ? <div className="integration-actions" aria-label="Plugin setup controls">
+      <button className="secondary-button" disabled title="Installing a signed plugin package and any grants requires trusted exact approval">Install signed plugin · approval required</button>
+    </div> : null}
+    {safeError ? <p className="form-error" role="alert"><Warning size={15} /> {safeError}</p> : null}
+    {!resources.length ? <EmptyPanel icon={<Tools size={22} />} title={`No ${copy.title.toLowerCase()}`} copy={copy.empty} /> : null}
+    <div className="integration-resources" aria-live="polite">
+      {resources.map((resource) => <article key={resource.id}>
+        <header><div><strong>{resource.display_label}</strong><small>{resource.native_resource_key}</small></div><span className={`status-badge lifecycle-${resource.lifecycle}`}>{friendlyState(resource.lifecycle)}</span></header>
+        <dl><div><dt>Last transition</dt><dd>{formatTimestamp(resource.updated_at)}</dd></div><div><dt>Revision</dt><dd>{resource.revision}</dd></div><div><dt>Owning conversation</dt><dd>{resource.owning_session_id || 'Profile service'}</dd></div><div><dt>Audit</dt><dd>{resource.audit_correlation}</dd></div></dl>
+        {resource.safe_error ? <p className="integration-safe-error"><Warning size={14} /> {resource.safe_error}</p> : null}
+        <div className="integration-actions">
+          {service === 'channel_account' ? <button className="secondary-button" disabled title="Configuration changes require a trusted exact approval">Configure · approval required</button> : null}
+          {integrationActions(resource).map(([operation, label]) => <button key={operation} className="secondary-button" disabled={Boolean(busy) || !sessionId} onClick={() => void mutate(resource, operation)}>{operation === 'cancel' || operation === 'stop' ? <Stop size={13} /> : <Refresh size={13} />} {label}</button>)}
+          {resource.controls.includes('delete') ? <button className="secondary-button" disabled title="Deletion requires a daemon-issued exact approval">Remove · approval required</button> : null}
+        </div>
+      </article>)}
+    </div>
+  </section>
+}
+
+function ServiceAvailability({
+  availability,
+}: {
+  availability: ProfileIntegrationsProjection['services'][number]['availability'] | undefined
+}) {
+  if (!availability) return <p className="service-availability unavailable"><Warning size={14} /> Keith has not published service availability.</p>
+  if (availability.state === 'available') return <p className="service-availability available"><CheckCircle size={14} /> Service enabled</p>
+  if (availability.state === 'disabled') return <p className="service-availability disabled"><Warning size={14} /> Disabled by installation policy</p>
+  return <p className="service-availability unavailable"><Warning size={14} /> {availability.safe_reason}</p>
+}
+
+function integrationActions(resource: IntegrationResourceProjection): Array<[IntegrationOperation, string]> {
+  const actions: Array<[IntegrationOperation, string]> = []
+  if (resource.service === 'channel_account' && resource.lifecycle === 'active') actions.push(['pause', 'Pause'])
+  if (resource.controls.includes('restart')) actions.push(['resume', 'Restart'])
+  if (resource.controls.includes('cancel')) actions.push(['cancel', 'Cancel'])
+  if (resource.controls.includes('export')) actions.push(['export', 'Export'])
+  if (['channel_account', 'acp_connection', 'plugin', 'connected_app'].includes(resource.service) && !['failed', 'cancelled', 'completed'].includes(resource.lifecycle)) actions.push(['test', 'Test connection'])
+  if (resource.service === 'control_lease' && !['failed', 'cancelled', 'completed'].includes(resource.lifecycle)) actions.push(['release_control', 'Release control'])
+  if (resource.service === 'recording' && !['failed', 'cancelled', 'completed'].includes(resource.lifecycle)) actions.push(['stop_recording', 'Stop recording'])
+  if (resource.service === 'harness_repair' && ['active', 'completed', 'interrupted'].includes(resource.lifecycle)) actions.push(['reverse', 'Restore prior version'])
+  return actions
+}
+
+function HarnessSurface({
+  profileId,
+  snapshot,
+  onCommand,
+}: {
+  profileId: string | null
+  snapshot: SessionSnapshot | null
+  onCommand: (command: Command) => Promise<CommandResult | null>
+}) {
+  const [harness, setHarness] = useState<HarnessRepairsProjection | null>(() => harnessRepairsProjection(snapshot?.harness_repairs))
+  useEffect(() => setHarness(harnessRepairsProjection(snapshot?.harness_repairs)), [snapshot?.harness_repairs])
+  const act = async (action: HarnessRepairAction): Promise<HarnessRepairActionResult> => {
+    if (!profileId) return { ok: false, safe_error: 'Choose a profile before reviewing repairs.' }
+    const { action: name, ...parameters } = action
+    const result = await onCommand({
+      command: 'harness_repair',
+      parameters: { action: name, parameters: { profile_id: profileId, ...parameters } },
+    })
+    if (!result) return { ok: false, safe_error: 'Harness repair control is unavailable.' }
+    const next = dataFromResult<unknown>(result, 'harness_repairs')
+    const projection = harnessRepairsProjection(next)
+    if (projection) setHarness(projection)
+    return projection
+      ? { ok: true }
+      : { ok: false, safe_error: 'Keith did not return an authoritative harness projection.' }
+  }
+  return <HarnessRepairsPanel harness={harness} onAction={act} />
 }
 
 function SessionsPanel({ sessions, selected, onSelect, onNew }: { sessions: SessionSummary[]; selected: string | null; onSelect: (id: string) => void; onNew: () => void }) {

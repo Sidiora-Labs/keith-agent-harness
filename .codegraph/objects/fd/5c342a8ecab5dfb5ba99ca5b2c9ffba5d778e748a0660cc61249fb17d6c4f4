@@ -1,0 +1,651 @@
+# spec.kvx — Keith Everywhere
+# SINGLE SOURCE for the 48-hour ten-agent implementation program spanning
+# Meta-Harness, channels, ACP, plugins and connected apps, and Keith Computer.
+# Generated Markdown is a projection only; edit this file and render again.
+
+[meta]
+feature      = "keith-everywhere"
+title        = "Keith Everywhere — self-repairing harness, universal channels, ACP, connected apps, and a teachable computer"
+status       = "in_progress"
+spec_version = "1.0.0"
+intro        = "Keith Everywhere turns the existing persistent Keith runtime into one agent that can repair defects in its own harness through evidence, meet users across major communication channels, operate as an Agent Client Protocol agent, connect safely to external applications through plugins and Composio, and drive an isolated computer that users can watch, take over, and teach through demonstration. The program reuses the existing channel gateway, MCP manager, WASI plugin host, browser runner, self-evolution pipeline, daemon, sessions, profiles, credentials, and web client. Every surface shares explicit identity, permission, approval, audit, trace, cancellation, and recovery contracts. The ten-agent execution plan is encoded as conflict-aware dependency waves and no feature counts as complete without a real integrated journey."
+
+[design]
+overview = "A shared platform-contracts crate defines external principals, capability grants, action risk, approvals, audit envelopes, trace bundles, connected accounts, computer sessions, and exclusive control leases. Nine conflict-free worker streams build Meta-Harness, channel families, ACP, plugins, Composio, CUA, and teaching against that boundary while an integration owner alone edits central daemon, protocol, state, and application mounting surfaces. Meta-Harness diagnoses harness-caused failures from complete execution traces, proposes bounded shadow candidates, ranks them on a Pareto frontier, and promotes only through the existing signed self-evolution, canary, observation, and reversal path. Channel adapters normalize every platform through the durable gateway. ACP remains a client-to-agent protocol while MCP and plugins remain agent-to-tool protocols. Keith Computer is an isolated Linux workstation with semantic and visual observation, authenticated screen streaming, exclusive user-or-Keith input control, and a demonstration recorder that compiles synchronized screen, input, DOM, accessibility, and narration evidence into editable replayable TaskRecipes."
+include  = "design.body.md"
+
+# ============================== REQUIREMENTS ==============================
+
+# --- SHARED PLATFORM CONTRACTS ---
+
+[req.1]
+title = "Shared identity, authority, approval, audit, and trace spine"
+story = "As the owner, I want every new surface to share the same authority model, so that adding reach never creates a second uncontrolled agent runtime."
+ac_1  = "THE platform SHALL define stable typed identifiers for external principal, profile, connected account, channel route, ACP connection, computer session, demonstration, recipe, and harness candidate."
+ac_2  = "EVERY external action SHALL carry profile, session, acting principal, requested capability, action risk, approval state, cancellation identity, reply route where applicable, and audit correlation."
+ac_3  = "THE most restrictive profile, session, connector, channel, ACP client, plugin, computer, and task policy SHALL win, and no adapter SHALL widen authority during translation."
+ac_4  = "CONSEQUENTIAL actions including external communication, deletion, purchase, account change, credential change, and irreversible computer input SHALL use one approval contract."
+ac_5  = "TRACE bundles SHALL represent model events, tool calls, observations, corrections, retries, completion decisions, costs, latency, failures, and durable state transitions without storing secrets or private reasoning."
+ac_6  = "CONTROL leases SHALL guarantee that at most one of Keith or the user can inject computer input, while observers remain read-only."
+ac_7  = "A contract suite SHALL prove serialization, version negotiation, denial on unknown capabilities, cancellation propagation, profile isolation, approval non-bypass, redaction, and exclusive control."
+
+[req.2]
+title = "Durable lifecycle and truthful observability"
+story = "As an operator, I want every connector and computer to survive ordinary failure honestly, so that broad integration remains dependable."
+ac_1  = "CHANNEL adapters, ACP connections, plugin invocations, Composio sessions, computer sessions, recordings, recipes, and harness experiments SHALL have durable states with validated transitions."
+ac_2  = "RESTART SHALL reconcile committed state, expire stale leases, classify uncertain non-repeatable actions as interrupted, and never blindly replay an external side effect."
+ac_3  = "HEALTH projections SHALL be derived from real lifecycle state and SHALL NOT fabricate connection, screen, tool, delivery, recording, evaluation, or completion activity."
+ac_4  = "EVERY bounded service SHALL enforce explicit concurrency, time, retry, byte, CPU, memory, disk, and event-rate ceilings appropriate to its workload."
+ac_5  = "THE web and TUI SHALL expose safe error, last transition time, restartability, cancellation, and the owning profile or session."
+ac_6  = "A restart and fault suite SHALL prove recovery, terminal-state honesty, uncertain-action handling, lease expiry, resource reclamation, and cross-profile isolation."
+
+# --- META-HARNESS ---
+
+[req.3]
+title = "Complete trace-driven harness fault diagnosis"
+story = "As the owner, I want Keith to recognize when its operating harness caused a task failure, so that it repairs the right layer rather than blaming the model or blindly retrying."
+ac_1  = "THE diagnostic input SHALL include complete bounded execution traces, relevant harness source, task outcome, user corrections, tool schemas, context selection, retries, completion decisions, and deterministic runtime evidence."
+ac_2  = "FAILURES SHALL be classified as model, environment, user-input, external service, task ambiguity, or harness caused with evidence and confidence."
+ac_3  = "HARNESS fault categories SHALL include context selection, tool schema, tool availability, routing, planning, retry, recovery, compaction, memory selection, permission dead end, translation loss, and termination or completion logic."
+ac_4  = "A proposed diagnosis SHALL name the causal harness component, reproduction, expected behavioral change, target metric, baseline, threshold, cost ceiling, and revert threshold before any edit."
+ac_5  = "THE diagnostic agent SHALL have no ability to alter trace evidence, evaluators, hidden corpora, approval policy, protected surfaces, or promotion records."
+ac_6  = "A suite SHALL prove correct attribution for representative harness and non-harness failures, duplicate suppression, injection resistance, redaction, and no diagnosis from score alone when causal evidence is absent."
+
+[req.4]
+title = "Bounded candidate search and full-history inspection"
+story = "As the operator, I want repair proposals compared rather than immediately trusted, so that self-repair is evidence-based."
+ac_1  = "THE proposer SHALL inspect selectively retrieved prior candidate source, scores, diffs, and raw traces through a bounded read-only history view."
+ac_2  = "ONE experiment SHALL support multiple independently identified candidate patches, including a no-change baseline, under file, byte, dependency, token, time, and cost limits."
+ac_3  = "EDITABLE harness areas SHALL be explicitly allowlisted and SHALL exclude evaluator code, hidden tasks, credentials, personal-memory authority, approvals, release verification, rollback, and the self-evolution guard."
+ac_4  = "EACH candidate SHALL be staged in an isolated shadow tree and SHALL never modify the live harness during proposal or evaluation."
+ac_5  = "THE candidate registry SHALL preserve parentage, hypothesis, source digest, diff, trace references, scores, cost, latency, safety result, and terminal disposition."
+ac_6  = "A suite SHALL prove candidate isolation, history bounds, protected-target refusal, evaluator inaccessibility, resource ceilings, crash cleanup, and durable restart."
+
+[req.5]
+title = "Independent evaluation, Pareto selection, promotion, and reversal"
+story = "As the owner, I want a repaired harness to become real only after held-out proof, so that Keith cannot reward-hack its way into production."
+ac_1  = "SEARCH, validation, and held-out evaluation sets SHALL be versioned and separated, and the proposer SHALL never receive held-out inputs, expected outputs, or results."
+ac_2  = "CANDIDATES SHALL be measured against task success, truthful completion, safety, user-correction adherence, cost, latency, retries, and resource use."
+ac_3  = "SELECTION SHALL retain a Pareto frontier and SHALL refuse promotion when improvement is not reproducible, statistically meaningful for the declared slice, or within all regression bounds."
+ac_4  = "PROMOTION SHALL use the existing real build, signed artifact, canary worker, observation window, known-good pin, and one-action reversal path."
+ac_5  = "ADVISORY and shadow modes SHALL be available before autonomous promotion, and the current task SHALL retry only under the promoted or explicitly approved candidate."
+ac_6  = "A real journey SHALL introduce a harness defect, observe the task fail, diagnose it, propose alternatives, fix the reproduction, pass held-out regression, promote the winner, rerun successfully, and restore the original harness."
+
+# --- CHANNELS ---
+
+[req.6]
+title = "Universal versioned channel adapter contract"
+story = "As a user, I want Keith to behave consistently across communication platforms, so that channels are surfaces of one durable agent."
+ac_1  = "THE contract SHALL cover inbound events, outbound sends, identities, conversations, threads, replies, mentions, commands, edits, deletion, reactions, attachments, voice, rich content, typing, receipts, rate limits, reconnect, cancellation, and capability discovery."
+ac_2  = "PLATFORM limitations SHALL be declared through capabilities and SHALL never be represented as successful unsupported behavior."
+ac_3  = "ADAPTER errors SHALL classify authentication, permission, malformed event, rate limit, transient network, permanent destination, unsupported feature, and uncertain acknowledgement."
+ac_4  = "EVERY adapter SHALL submit ordinary SessionActions through AgentConnection and SHALL NOT execute models, arbitrary tools, personal-memory reads, or alternate agent loops."
+ac_5  = "WEBHOOK adapters SHALL verify signatures before parsing untrusted bodies and socket or polling adapters SHALL persist bounded reconnect cursors."
+ac_6  = "A common conformance suite SHALL prove normalization, ordering, deduplication, media bounds, feature declarations, retries, cancellation, malformed input, restart, and isolation."
+
+[req.7]
+title = "Major interactive and delivery channel coverage"
+story = "As a user, I want Keith wherever I already communicate, so that Web, TUI, and Discord are not the only practical surfaces."
+ac_1  = "THE supported interactive matrix SHALL include Discord, Slack, Telegram, WhatsApp Cloud, Microsoft Teams, Google Chat, and Matrix."
+ac_2  = "EMAIL SHALL support inbound IMAP or provider events and outbound SMTP or provider send with threading, bounded attachments, reply identity, retry classification, and explicit possible-duplicate state."
+ac_3  = "EACH platform SHALL implement the subset it advertises for replies, threads, mentions, commands, edits, reactions, media, voice, typing, and receipts."
+ac_4  = "ACCOUNT setup SHALL expose required credentials, callback or webhook state, platform scopes, connection health, reconnect state, and a safe test action."
+ac_5  = "GROUP routes SHALL retain explicit mention, shared-memory, participant, tool, schedule, proactive-post, and profile isolation policies."
+ac_6  = "A real-account matrix SHALL prove inbound, reply, attachment, restart, scheduled return, rate limiting, duplicate handling, deletion or revocation, and cross-profile isolation for every platform called supported."
+
+[req.8]
+title = "Durable multi-adapter operation and account UX"
+story = "As an operator, I want many channel accounts running together, so that expanding reach does not reduce delivery reliability."
+ac_1  = "THE gateway SHALL supervise multiple instances of one adapter and multiple adapter kinds with independent bounded queues, health, restart, and rate limits."
+ac_2  = "ROUTING SHALL bind platform account, conversation, thread, sender, group policy, profile, session selection, and reply route deterministically."
+ac_3  = "THE outbox SHALL preserve stable delivery keys, platform receipts, attempt state, possible duplicate state, cancellation, and proactive return across restart."
+ac_4  = "THE web client SHALL connect, configure, test, pause, resume, inspect, and remove channel accounts without exposing raw secrets."
+ac_5  = "ONE failing or throttled platform SHALL NOT block another platform, interactive Web or TUI work, or daemon health."
+ac_6  = "A stress suite SHALL prove concurrent accounts, queue fairness, notification budgets, credential rotation, webhook replay, process restart, and isolated terminal failure."
+
+# --- ACP ---
+
+[req.9]
+title = "Complete stable ACP v1 agent lifecycle"
+story = "As an ACP client user, I want Keith to operate as a first-class Agent Client Protocol agent, so that editors and clients can use the same persistent runtime."
+ac_1  = "KEITH SHALL implement stable ACP v1 initialization, capability negotiation, authentication metadata, session create, load, resume, fork, prompt, cancel, and terminal closure."
+ac_2  = "ONE ACP connection SHALL support multiple concurrent Keith sessions with independent ordering, cancellation, permissions, and durable resume."
+ac_3  = "PROMPTS and content blocks SHALL map losslessly where possible to Keith attachments and SessionActions, with explicit unsupported errors rather than silent loss."
+ac_4  = "SESSION updates SHALL stream assistant content, plan, safe thought summaries, tool state, terminal output, diffs, usage, failure, and final state from real Keith events."
+ac_5  = "DISCONNECT SHALL leave durable work governed by the action policy and reconnect SHALL resume without duplicate prompts or lost committed events."
+ac_6  = "A protocol suite SHALL prove initialization, concurrency, streaming, cancellation, resume, malformed JSON-RPC, batch handling, disconnect, restart, and version refusal."
+
+[req.10]
+title = "ACP client capabilities, permissions, MCP, transports, and version boundary"
+story = "As an ACP client operator, I want Keith to use client-provided facilities without escaping client authority, so that interoperability remains safe."
+ac_1  = "CLIENT filesystem, terminal, permission, and MCP capabilities SHALL be represented as scoped tools and SHALL never widen the profile workspace, process, network, or credential boundary."
+ac_2  = "TOOL permission requests SHALL use ACP bidirectional requests while remaining subject to Keith mandatory denials and profile ceilings."
+ac_3  = "STDIO SHALL be the required local transport; HTTP or SSE and WebSocket SHALL be supported for managed deployment with equivalent framing, authentication, cancellation, and closure semantics."
+ac_4  = "MCP configuration supplied by the client SHALL remain session scoped and SHALL pass through Keith MCP policy, schema bounds, credential references, and health checks."
+ac_5  = "DRAFT ACP v2 SHALL be implemented behind an explicit unstable feature and runtime flag with separate handlers and no silent downgrade or schema conversion."
+ac_6  = "INTEROPERABILITY SHALL be proven against real ACP clients and protocol fixtures for files, terminal, MCP, permissions, concurrent sessions, cancellation, reconnect, and unsupported-version refusal."
+
+# --- PLUGINS AND CONNECTED APPS ---
+
+[req.11]
+title = "Typed executable plugin ABI"
+story = "As a plugin developer, I want real typed invocation rather than lifecycle-only hooks, so that extensions can safely add useful capabilities."
+ac_1  = "THE plugin ABI SHALL carry versioned typed request and response payloads for command, tool, health, activation, migration, and deactivation."
+ac_2  = "PLUGIN tools and commands SHALL register name, description, input and output schema, risk, timeout, cancellation, streaming, concurrency, and required grants."
+ac_3  = "WASI components SHALL receive only explicit host calls for bounded HTTP, profile-local storage, named credentials, event emission, artifacts, clock, and safe logging."
+ac_4  = "INVOCATION SHALL enforce memory, fuel, input, output, time, process, filesystem, network, credential, and concurrent-call limits."
+ac_5  = "PACKAGE identity SHALL include manifest version, plugin id, version, API range, publisher, digest, signature, grants, hooks, tools, and migration contract."
+ac_6  = "A conformance suite SHALL prove payload exchange, schema validation, cancellation, output streaming, grant denial, resource exhaustion, crash isolation, and secret redaction using real WASI components."
+
+[req.12]
+title = "Plugin lifecycle, provenance, catalog, and safe mode"
+story = "As the owner, I want plugins to remain removable and auditable, so that extensibility cannot wedge or silently own Keith."
+ac_1  = "LIFECYCLE SHALL support discover, inspect, install, activate, health, disable, update, migrate, rollback, uninstall, and quarantine with durable state."
+ac_2  = "UPDATES SHALL verify publisher continuity, compatibility, digest, signature, declared grant changes, migration result, and rollback bytes before activation."
+ac_3  = "NEW or widened grants SHALL require explicit human approval and SHALL NOT be inferred from plugin output or previous unrelated grants."
+ac_4  = "SAFE mode SHALL start Keith with all third-party plugins disabled and SHALL remain available after a corrupt package, failed migration, crash loop, or incompatible API."
+ac_5  = "THE web client SHALL present plugin identity, publisher, version, health, tools, grants, data access, recent calls, update diff, disable, rollback, and uninstall."
+ac_6  = "A hostile-package suite SHALL prove signature refusal, traversal denial, network and credential denial, migration rollback, crash quarantine, safe-mode startup, and complete uninstall."
+
+[req.13]
+title = "Per-profile Composio sessions and connected-account control"
+story = "As a user, I want Keith to connect to many applications without custom-building each API, so that external action breadth arrives quickly and remains controllable."
+ac_1  = "EACH Keith profile SHALL map to a stable Composio user identity and SHALL maintain bounded resumable sessions without exposing provider API keys to the model or browser."
+ac_2  = "CONNECTED accounts SHALL expose toolkit, account identity, auth configuration, granted scopes, connection state, last health, selection precedence, and revocation."
+ac_3  = "THE integration SHALL use session-based hosted MCP for portable tool access and SHALL restrict toolkits and tools rather than enabling the full catalog by default."
+ac_4  = "TOOL discovery SHALL remain within context and schema budgets and SHALL preserve exact account selection when several accounts exist for one toolkit."
+ac_5  = "KEITH SHALL apply its own risk, approval, audit, cancellation, timeout, and result-redaction policy before and after every Composio MCP call."
+ac_6  = "A real-account suite SHALL prove connect, resume, discover, read, approval-gated write, multiple-account selection, expiry recovery, revocation, deletion, and cross-profile isolation."
+
+# --- KEITH COMPUTER AND TEACHING ---
+
+[req.14]
+title = "Isolated durable Keith Computer"
+story = "As a user, I want Keith to have a real computer I can see, so that it can complete visual workflows beyond APIs and semantic fetches."
+ac_1  = "A computer session SHALL run in an isolated Linux workstation with a headed browser, dedicated profile, bounded filesystem, clipboard, process tree, network, CPU, memory, disk, and lifetime."
+ac_2  = "COMPUTERS SHALL support create, start, suspend, resume, snapshot, restore, reset, terminate, idle reclaim, and profile deletion with durable state and safe errors."
+ac_3  = "PERSISTENT and ephemeral modes SHALL be explicit, and profile or credential state SHALL never cross computer ownership boundaries."
+ac_4  = "SCREEN access SHALL use an authenticated short-lived stream and SHALL reveal no backend VNC, browser-debug, bearer, or credential endpoint to an unauthorized viewer."
+ac_5  = "CREDENTIAL injection SHALL use named grants and SHALL avoid exposing reusable secrets to model context, recordings, screenshots, clipboard history, URLs, logs, or recipes."
+ac_6  = "A process suite SHALL prove lifecycle, stream authorization, isolation, snapshot restore, reset, idle reclaim, resource ceilings, crash recovery, and complete deletion."
+
+[req.15]
+title = "Multimodal perception, computer action, verification, and recovery"
+story = "As a user, I want Keith to drive its computer reliably, so that it acts from observed state rather than blind coordinates."
+ac_1  = "OBSERVATIONS SHALL combine current screenshot, browser DOM, accessibility tree, focused window, URL, viewport, cursor, recent actions, downloads, dialogs, and safe application metadata when available."
+ac_2  = "ACTIONS SHALL include move, click, double click, drag, scroll, key, text, shortcut, clipboard, file upload or download, tab, window, navigation, and wait with bounded inputs."
+ac_3  = "SEMANTIC targets SHALL be preferred over coordinates; coordinate actions SHALL include the source frame identity and SHALL be refused against stale geometry."
+ac_4  = "EVERY meaningful action SHALL produce a new observation and progress check before continuation, with bounded retry and alternate-strategy recovery."
+ac_5  = "CONSEQUENTIAL visual actions SHALL pass through the shared approval contract immediately before execution and SHALL invalidate approval when the target changes."
+ac_6  = "A task corpus SHALL measure completion, action count, latency, stale-target recovery, popup and layout handling, download and upload behavior, cancellation, and unsafe-action refusal."
+
+[req.16]
+title = "Live screen, exclusive co-control, and immediate takeover"
+story = "As a user, I want to watch and take over Keith's computer, so that automation remains understandable and interruptible."
+ac_1  = "THE web app SHALL render the live computer screen with current owner, connection quality, active action, intended next action, recording state, and safe error."
+ac_2  = "CONTROL states SHALL be KeithControl, UserControl, and Paused, with one durable exclusive lease and read-only observers."
+ac_3  = "USER takeover SHALL immediately cancel queued and in-flight Keith input, acquire the lease, and prevent new Keith input until control is returned."
+ac_4  = "KEITH SHALL request control rather than stealing it and SHALL stop on stream desynchronization, stale lease, focus ambiguity, or user activity."
+ac_5  = "CLIPBOARD, file transfer, full screen, scaling, keyboard, touch, and reconnect SHALL remain profile scoped and accessible."
+ac_6  = "A live journey SHALL prove concurrent observation, user takeover during a multi-step action, cancellation, manual work, return to Keith, reconnect, and no simultaneous input."
+
+[req.17]
+title = "Teach by demonstration and editable TaskRecipes"
+story = "As a user, I want to demonstrate a task in Keith's computer and have Keith learn it, so that automation can be taught inside the product."
+ac_1  = "A demonstration SHALL synchronously capture screen frames, raw pointer and keyboard events, DOM and accessibility targets, URL, window, application, clipboard and file operations, timing, control owner, pauses, and optional narration."
+ac_2  = "RECORDING SHALL detect secrets and sensitive fields, redact captured values, and replace them with named credential or runtime parameters before persistence."
+ac_3  = "THE compiler SHALL produce a versioned editable TaskRecipe with inputs, preconditions, semantic steps, visual fallbacks, expected observations, checkpoints, approvals, recovery branches, and completion conditions."
+ac_4  = "THE user SHALL be able to label parameters, remove steps, correct targets, add confirmations, replay from a checkpoint, compare results, and discard or publish the recipe."
+ac_5  = "A recipe SHALL replay first in a shadow or explicit test context and SHALL not become a reusable skill until its declared checks pass and the user accepts the readable procedure."
+ac_6  = "A suite SHALL prove synchronized capture, secret redaction, semantic compilation, changed-layout recovery, user correction, checkpoint replay, versioning, rollback, and deletion of recording media and derived recipes."
+
+[req.18]
+title = "Integrated Web, TUI, and API surfaces"
+story = "As a user, I want these capabilities presented as one Keith rather than separate dashboards, so that control stays understandable."
+ac_1  = "THE existing Keith Computer work stage SHALL become the live screen surface while retaining truthful tool, goal, child, wait, terminal, and final-state projections."
+ac_2  = "THE web app SHALL provide Channels, Apps, Plugins, ACP connections, Computers, Recordings, Recipes, and Harness Repairs without duplicating daemon business logic."
+ac_3  = "EVERY mutation SHALL be authenticated, exact-origin and CSRF protected where applicable, profile scoped, approval aware, idempotent where possible, and audited."
+ac_4  = "THE TUI and protocol SHALL expose lifecycle, health, cancellation, control, connection, recipe, candidate, promotion, rollback, and safe-error operations needed without the web client."
+ac_5  = "UI labels SHALL be ordinary language, responsive, keyboard complete, screen-reader labeled, reduced-motion safe, and truthful about unsupported or unqualified platforms."
+ac_6  = "A browser and protocol suite SHALL prove navigation, connection, live updates, cancellation, takeover, recording, app approval, harness review, restart, responsive layout, and cross-profile isolation."
+
+# --- INTEGRATED SECURITY AND RELEASE ---
+
+[req.19]
+title = "Cross-surface security, privacy, data control, and failure containment"
+story = "As the owner, I want integrations to compose without composing their authority, so that one compromised surface cannot pivot through another."
+ac_1  = "CHANNEL content, ACP clients, plugins, Composio tools, websites, computer applications, recordings, recipes, traces, and candidate patches SHALL be treated as mutually untrusted inputs."
+ac_2  = "AN input from one surface SHALL NOT enable self-evolution, install a plugin, connect an account, widen a grant, take computer control, approve an action, expose a credential, or select another profile."
+ac_3  = "EXPORT and deletion SHALL cover channel accounts and events, ACP metadata, plugins, connected accounts, computer state, recordings, recipes, traces, candidates, and derived indexes with exact remnant reporting."
+ac_4  = "AUDIT records SHALL correlate cross-surface actions without storing secrets, full private content, reusable stream URLs, raw credentials, or private reasoning."
+ac_5  = "ONE crashed, compromised, throttled, corrupt, or disconnected surface SHALL be quarantined without preventing daemon startup, ordinary conversation, cancellation, reversal, or data deletion."
+ac_6  = "AN adversarial suite SHALL cover injection, SSRF, webhook forgery, protocol confusion, plugin escape, OAuth substitution, stream hijack, stale input, recording leakage, evaluator tampering, cross-profile access, and crash at every durable boundary."
+
+[req.20]
+title = "Integrated product journey and release truth"
+story = "As the owner, I want one real proof that all five systems work together, so that parallel implementation does not produce disconnected demos."
+ac_1  = "A real user SHALL message Keith through a non-Discord channel, continue the same durable session through Web or ACP, invoke a connected application, and observe or take over Keith Computer."
+ac_2  = "THE user SHALL record a computer task, compile and correct a TaskRecipe, replay it successfully, publish it as a skill, and invoke it from a channel."
+ac_3  = "THE journey SHALL expose a harness-caused failure, execute bounded candidate search and held-out evaluation, promote a repair, rerun successfully, and reverse the repair."
+ac_4  = "THE release gate SHALL run formatting, strict linting, focused crates, protocol fixtures, real process suites, browser journeys, security gate, platform gate, restart recovery, and Codify trace evidence."
+ac_5  = "A platform, application, transport, recipe, computer mode, or harness autonomy level SHALL be called supported only when its real credentialed or process-backed journey passed; unavailable external approval SHALL remain explicit."
+ac_6  = "THE feature SHALL remain in progress until every requirement is traced to code, qualification, evidence, and a published commit with no known authority-widening, data-loss, unrecoverable, or fabricated-success issue."
+
+# ================================ TASKS ==================================
+
+# Agent 1 — integration captain
+
+[task.1.1]
+title  = "Shared platform contracts and evidence spine"
+status = "done"
+wave   = 1
+do_1   = "Create the platform-contracts crate with versioned external identity, capability, action risk, approval, audit, trace, connected account, computer session, demonstration, recipe, candidate, and control lease types"
+do_2   = "Implement validation, redaction, version negotiation, cancellation identity, and most-restrictive authority composition"
+do_3   = "Define additive integration traits consumed by channel, ACP, plugin, Composio, CUA, teaching, Meta-Harness, protocol, and clients"
+do_4   = "Add a contract suite for serialization, unknown-capability denial, approval non-bypass, trace redaction, profile isolation, and exclusive control"
+do_5   = "Record the ten-agent file ownership and central integration rule as a task-linked Codify decision"
+reqs   = ["1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "2.1", "2.2", "2.3", "2.4"]
+symbols = ["contract_ids", "ExternalPrincipal", "CapabilityGrant", "ActionRisk", "ApprovalEnvelope", "ExternalAction", "AuditEnvelope", "ExecutionTraceBundle", "ControlLease"]
+touches = ["crates/platform-contracts/*"]
+verify_cmd = "cargo test -p keith-platform-contracts"
+
+# Agent 2 — Meta-Harness
+
+[task.2.1]
+title  = "Meta-Harness trace intake and causal fault diagnosis"
+status = "in_progress"
+wave   = 2
+do_1   = "Build bounded complete trace bundles from real session, tool, correction, context, retry, completion, cost, latency, and runtime evidence"
+do_2   = "Implement failure attribution and the explicit harness fault taxonomy with evidence, confidence, reproduction, metric, threshold, cost ceiling, and revert threshold"
+do_3   = "Enforce immutable evaluator, hidden corpus, approval, credential, personal-memory authority, rollback, and guard boundaries"
+do_4   = "Persist diagnostic state, duplicate suppression, safe redaction, and restart reconciliation"
+do_5   = "Test representative harness and non-harness failures, injection, causal evidence absence, redaction, and restart"
+reqs   = ["3.1", "3.2", "3.3", "3.4", "3.5", "3.6"]
+requires = ["1.1"]
+symbols = ["HarnessFailureClass", "HarnessDiagnosis", "HarnessTraceBundle"]
+touches = ["crates/meta-harness/*"]
+verify_cmd = "cargo test -p keith-meta-harness diagnosis"
+
+# Agent 3 — channel core and Slack
+
+[task.2.2]
+title  = "Channel contract v2, gateway capabilities, and Slack"
+status = "implemented"
+wave   = 2
+do_1   = "Extend channel-core with versioned events and capabilities for edits, deletion, reactions, mentions, commands, voice, rich content, typing, receipts, cancellation, and platform metadata"
+do_2   = "Extend the conformance harness for signature verification, feature declarations, error taxonomy, rate limits, reconnect, stale cursors, and malformed events"
+do_3   = "Implement Slack socket and webhook ingress, outbound messages, threads, files, reactions, edits, typing, receipts where available, and durable reconnect"
+do_4   = "Keep all platform work behind SessionAction and durable outbox boundaries"
+do_5   = "Prove Slack inbound, reply, thread, attachment, restart, duplicate, rate limit, cancellation, and isolation against real platform types"
+reqs   = ["6.1", "6.2", "6.3", "6.4", "6.5", "6.6", "7.1", "7.2", "7.3", "7.4", "7.5", "7.6"]
+requires = ["1.1"]
+symbols = ["ChannelAdapterV2", "ChannelCapabilityV2", "SlackAdapter"]
+touches = ["crates/channel-core/src/lib.rs", "crates/channel-adapters/src/slack.rs", "crates/channel-adapters/tests/slack.rs"]
+verify_cmd = "cargo test -p keith-channel-core -p keith-channel-adapters slack"
+
+# Agent 4 — mobile channels
+
+[task.2.3]
+title  = "Telegram and WhatsApp Cloud adapters"
+status = "implemented"
+wave   = 2
+do_1   = "Implement Telegram webhook and polling lifecycle, topics, replies, commands, files, voice, edits, typing, rate limits, cursor recovery, and platform errors"
+do_2   = "Implement WhatsApp Cloud verified webhooks, messages, media, replies, templates, statuses, receipts, rate limits, token rotation, and platform errors"
+do_3   = "Declare exact feature capabilities and unsupported behavior for both platforms"
+do_4   = "Use profile-scoped credentials, normalized identities, deterministic routes, SessionActions, and durable outbox sends"
+do_5   = "Add real-type conformance, malformed event, duplicate, reconnect, attachment, revocation, and isolation journeys"
+reqs   = ["6.1", "6.2", "6.3", "6.4", "6.5", "6.6", "7.1", "7.2", "7.3", "7.4", "7.5", "7.6"]
+requires = ["1.1"]
+symbols = ["TelegramAdapter", "WhatsAppCloudAdapter"]
+touches = ["crates/channel-adapters/src/telegram.rs", "crates/channel-adapters/src/whatsapp.rs", "crates/channel-adapters/tests/telegram.rs", "crates/channel-adapters/tests/whatsapp.rs"]
+verify_cmd = "cargo test -p keith-channel-adapters --test telegram -- --include-ignored && cargo test -p keith-channel-adapters --test whatsapp -- --include-ignored"
+
+# Agent 5 — work and open channels
+
+[task.2.4]
+title  = "Teams, Google Chat, email, and Matrix adapters"
+status = "in_progress"
+wave   = 2
+do_1   = "Implement Microsoft Teams verified events, messages, replies, threads, files, mentions, cards where supportable, rate limits, and reconnect"
+do_2   = "Implement Google Chat verified events, spaces, threads, replies, cards where supportable, attachments, rate limits, and reconnect"
+do_3   = "Implement profile-scoped email receive and send with threading, attachments, idempotent intent, retry classification, and explicit possible duplicates"
+do_4   = "Implement Matrix sync, rooms, threads, replies, edits, reactions, media, encryption capability declaration, cursor persistence, and reconnect"
+do_5   = "Add platform setup diagnostics and real-type conformance, restart, revocation, and isolation journeys"
+reqs   = ["6.1", "6.2", "6.3", "6.4", "6.5", "6.6", "7.1", "7.2", "7.3", "7.4", "7.5", "7.6"]
+requires = ["1.1"]
+symbols = ["TeamsAdapter", "GoogleChatAdapter", "EmailAdapter", "MatrixAdapter"]
+touches = ["crates/channel-adapters/src/teams.rs", "crates/channel-adapters/src/google_chat.rs", "crates/channel-adapters/src/email.rs", "crates/channel-adapters/src/matrix.rs", "crates/channel-adapters/tests/work_channels.rs"]
+verify_cmd = "cargo test -p keith-channel-adapters work_channels"
+
+# Agent 6 — ACP
+
+[task.2.5]
+title  = "Stable ACP v1 agent and durable session lifecycle"
+status = "in_progress"
+wave   = 2
+do_1   = "Create the keith-acp crate and agent-acp binary on the official Rust SDK with stable v1 initialization, capability negotiation, authentication metadata, and stdio"
+do_2   = "Map create, load, resume, fork, prompt, cancel, concurrent sessions, content blocks, and attachments to AgentConnection and durable Keith sessions"
+do_3   = "Project real assistant content, plans, safe thought summaries, tool states, diffs, usage, failure, final state, and disconnect recovery as ACP updates"
+do_4   = "Implement strict version, JSON-RPC, ordering, batch, malformed input, cancellation, reconnect, and shutdown behavior"
+do_5   = "Add protocol fixtures and a real-process ACP session journey"
+reqs   = ["9.1", "9.2", "9.3", "9.4", "9.5", "9.6"]
+requires = ["1.1"]
+symbols = ["KeithAcpAgent", "AcpSessionBridge", "AcpUpdateProjector"]
+touches = ["crates/acp/*", "apps/agent-acp/*"]
+verify_cmd = "cargo test -p keith-acp && cargo test -p keith-agent-acp"
+
+# Agent 7 — plugin ABI
+
+[task.2.6]
+title  = "Typed WASI plugin ABI and executable SDK"
+status = "in_progress"
+wave   = 2
+do_1   = "Define WIT interfaces and Rust SDK bindings for versioned lifecycle, command, tool, request, response, streaming, cancellation, schemas, risk, and grants"
+do_2   = "Wire HostRequest and HostResponse payloads into actual plugin invocation instead of zero-argument status hooks"
+do_3   = "Define bounded host calls for HTTP, credentials, storage, events, artifacts, clock, and safe logging"
+do_4   = "Extend manifests with publisher, digest, signature, tools, schemas, migration, and precise grant declarations"
+do_5   = "Build and execute a real reference WASI component proving typed payloads, cancellation, streaming, and denial"
+reqs   = ["11.1", "11.2", "11.3", "11.4", "11.5", "11.6"]
+requires = ["1.1"]
+symbols = ["PluginInvocation", "PluginToolDescriptor", "PluginHostContext"]
+touches = ["crates/plugin-sdk/*", "crates/plugin-host/Cargo.toml", "crates/plugin-host/src/lib.rs", "crates/plugin-host/src/abi.rs", "crates/plugin-host/tests/abi.rs", "crates/migration-suite/src/lib.rs"]
+verify_cmd = "cargo test -p keith-plugin-sdk -p keith-plugin-host abi"
+
+# Agent 8 — Composio
+
+[task.2.7]
+title  = "Profile-scoped Composio sessions and MCP connector"
+status = "pending"
+wave   = 2
+do_1   = "Create a Composio connector mapping stable Keith profiles to resumable session-based hosted MCP endpoints"
+do_2   = "Implement connected-account, toolkit, tool allowlist, account selection, auth link, health, expiry, revocation, and deletion models"
+do_3   = "Integrate with the existing MCP manager using bounded discovery, schema caching, named credential references, timeouts, cancellation, and result limits"
+do_4   = "Apply Keith risk, approval, audit, and redaction before and after every call and disable any provider sandbox unless explicitly granted"
+do_5   = "Test session persistence, multiple accounts, connect, read, gated write, expiry, revocation, deletion, and profile isolation with a controllable real HTTP boundary"
+reqs   = ["13.1", "13.2", "13.3", "13.4", "13.5", "13.6"]
+requires = ["1.1"]
+symbols = ["ComposioConnector", "ComposioSession", "ConnectedAppAccount"]
+touches = ["crates/composio/*"]
+verify_cmd = "cargo test -p keith-composio"
+
+# Agent 9 — CUA runtime
+
+[task.2.8]
+title  = "Isolated Keith Computer runtime and visual action loop"
+status = "pending"
+wave   = 2
+do_1   = "Create the CUA domain and runner for isolated Linux workstation lifecycle, headed Chromium, persistent or ephemeral profiles, snapshots, reset, idle reclaim, and deletion"
+do_2   = "Implement screenshot, DOM, accessibility, focused window, URL, viewport, cursor, dialog, download, and safe application observations"
+do_3   = "Implement bounded mouse, keyboard, text, scroll, drag, clipboard, file, tab, window, navigation, and wait actions with stale-frame refusal"
+do_4   = "Add post-action observation, progress verification, retry, alternate strategy, cancellation, approval, resource limits, credential grants, and audit"
+do_5   = "Prove lifecycle, isolation, semantic and coordinate actions, stale targets, snapshot restore, reset, crash recovery, and resource reclamation with real processes"
+reqs   = ["14.1", "14.2", "14.3", "14.4", "14.5", "14.6", "15.1", "15.2", "15.3", "15.4", "15.5", "15.6"]
+requires = ["1.1"]
+symbols = ["ComputerSession", "ComputerObservation", "ComputerAction", "ComputerController"]
+touches = ["crates/cua/*", "apps/cua-runner/*"]
+verify_cmd = "cargo test -p keith-cua && cargo test -p keith-cua-runner"
+
+# Agent 10 — teaching domain
+
+[task.2.9]
+title  = "Demonstration capture and TaskRecipe domain"
+status = "implemented"
+wave   = 2
+do_1   = "Create synchronized demonstration records for frames, raw input, semantic targets, URL, window, application, clipboard, files, timing, control owner, pauses, and narration"
+do_2   = "Implement sensitive-field detection, value redaction, named credential substitution, retention, export, and deletion"
+do_3   = "Define versioned TaskRecipe inputs, preconditions, semantic steps, visual fallbacks, expected observations, checkpoints, approvals, recovery, and completion"
+do_4   = "Implement editable corrections, versioning, rollback, and publication contract to the existing skill system"
+do_5   = "Test synchronization, redaction, serialization, corrections, versioning, rollback, and data deletion"
+reqs   = ["17.1", "17.2", "17.3", "17.4", "17.5", "17.6"]
+requires = ["1.1"]
+symbols = ["Demonstration", "DemonstrationEvent", "TaskRecipe", "RecipeStep"]
+touches = ["crates/task-recipe/*"]
+verify_cmd = "cargo test -p keith-task-recipe"
+
+# =========================== SECOND IMPLEMENTATION WAVE ===========================
+
+[task.3.1]
+title  = "Meta-Harness candidate population and Pareto evaluator"
+status = "pending"
+wave   = 3
+do_1   = "Implement bounded full-history inspection and multiple candidate generation from one admitted diagnosis"
+do_2   = "Persist candidate parentage, source, diff, digest, hypothesis, traces, scores, cost, latency, safety, and disposition"
+do_3   = "Run baseline, search, validation, and inaccessible held-out evaluation with deterministic replay and leakage checks"
+do_4   = "Maintain the non-dominated frontier and refuse inconclusive, non-reproducible, unsafe, over-budget, or regressing candidates"
+do_5   = "Test population restart, protected edits, evaluator isolation, leakage, reward hacking, crash cleanup, and Pareto selection"
+reqs   = ["4.1", "4.2", "4.3", "4.4", "4.5", "4.6", "5.1", "5.2", "5.3", "5.4", "5.5", "5.6"]
+requires = ["2.1"]
+symbols = ["HarnessCandidate", "CandidatePopulation", "ParetoFrontier", "HarnessEvaluation"]
+touches = ["crates/meta-harness/*"]
+verify_cmd = "cargo test -p keith-meta-harness candidate && cargo test -p keith-meta-harness evaluator"
+
+[task.3.2]
+title  = "Channel adapter registration, supervision, and account control"
+status = "pending"
+wave   = 3
+do_1   = "Register Discord, Slack, Telegram, WhatsApp, Teams, Google Chat, email, and Matrix through one capability-aware adapter catalog"
+do_2   = "Extend channel-gateway for multiple instances, isolated queues, webhook ingress, lifecycle supervision, rate-limit fairness, reconnect, and health"
+do_3   = "Integrate deterministic routing, durable outbox receipts, possible duplicates, proactive returns, credential rotation, and account removal"
+do_4   = "Expose protocol models for connection setup, health, testing, pause, resume, and removal without secrets"
+do_5   = "Run the shared conformance suite against every registered adapter"
+reqs   = ["7.1", "7.2", "7.3", "7.4", "7.5", "7.6", "8.1", "8.2", "8.3", "8.4", "8.5", "8.6"]
+requires = ["2.2", "2.3", "2.4"]
+symbols = ["ChannelAdapterCatalog", "ChannelAccountHealth"]
+touches = ["crates/channel-adapters/src/lib.rs", "crates/channel-adapters/Cargo.toml", "crates/channel-gateway/*"]
+verify_cmd = "cargo test -p keith-channel-adapters -p keith-channel-gateway"
+
+[task.3.3]
+title  = "ACP client capabilities, transports, and draft-v2 boundary"
+status = "pending"
+wave   = 3
+do_1   = "Map ACP filesystem, terminal, permission, and client-provided MCP capabilities into scope-preserving Keith tools"
+do_2   = "Add bidirectional permission requests under mandatory Keith denials and profile ceilings"
+do_3   = "Add authenticated HTTP or SSE and WebSocket transports with parity for framing, batches, cancellation, reconnect, and closure"
+do_4   = "Add separately compiled draft-v2 handlers and runtime gate with no silent conversion, downgrade, or cross-version continuation"
+do_5   = "Test authority non-widening, files, terminal, MCP, permissions, transports, and exact version refusal"
+reqs   = ["10.1", "10.2", "10.3", "10.4", "10.5", "10.6"]
+requires = ["2.5"]
+symbols = ["AcpClientToolBroker", "AcpPermissionBridge", "AcpTransport", "AcpProtocolRouter"]
+touches = ["crates/acp/*", "apps/agent-acp/*"]
+verify_cmd = "cargo test -p keith-acp --all-features && cargo test -p keith-agent-acp --all-features"
+
+[task.3.4]
+title  = "Plugin authority host, lifecycle, provenance, and safe mode"
+status = "pending"
+wave   = 3
+do_1   = "Implement bounded host calls and tool registration through the typed ABI with no ambient authority"
+do_2   = "Implement publisher continuity, digest and signature verification, grant diff approval, install, migration, update, rollback, quarantine, uninstall, and durable state"
+do_3   = "Preserve startup through safe mode and disable third-party plugins after corrupt package, failed migration, crash loop, or incompatible API"
+do_4   = "Expose inspectable plugin health, tools, grants, calls, update diff, and lifecycle commands through protocol models"
+do_5   = "Run real-component conformance and hostile-package tests"
+reqs   = ["12.1", "12.2", "12.3", "12.4", "12.5", "12.6"]
+requires = ["2.6"]
+symbols = ["PluginAuthorityHost", "PluginPackage", "PluginLifecycle", "PluginSafeMode"]
+touches = ["crates/plugin-host/*"]
+verify_cmd = "cargo test -p keith-plugin-host"
+
+[task.3.5]
+title  = "Connected Apps web components and account journeys"
+status = "pending"
+wave   = 3
+do_1   = "Build isolated Apps components for browse, connect, callback state, accounts, scopes, tool allowlists, health, test, select, disable, revoke, and delete"
+do_2   = "Build protocol-safe view models and commands without embedding credentials or provider bearer URLs in the browser"
+do_3   = "Show approval, account, toolkit, tool, session, result, safe error, and audit correlation for real invocations"
+do_4   = "Support keyboard, responsive, loading, reconnect, empty, expired, revoked, and failure states"
+do_5   = "Add component and browser journeys against the real Composio connector boundary"
+reqs   = ["13.1", "13.2", "13.3", "13.4", "13.5", "13.6", "18.1", "18.2", "18.3", "18.4", "18.5", "18.6"]
+requires = ["2.7"]
+touches = ["apps/agent-web/ui/components/apps/*", "apps/agent-web/ui/lib/apps*", "crates/composio/*"]
+verify_cmd = "cargo test -p keith-composio && npm --prefix apps/agent-web/ui test -- --runInBand"
+
+[task.3.6]
+title  = "Authenticated screen streaming and exclusive co-control"
+status = "pending"
+wave   = 3
+do_1   = "Add authenticated short-lived screen stream negotiation without exposing backend VNC or browser-debug endpoints"
+do_2   = "Implement KeithControl, UserControl, and Paused leases, read-only observers, explicit Keith requests, and immediate user takeover cancellation"
+do_3   = "Implement stream reconnect, quality, scaling, full screen, keyboard, touch, clipboard, file transfer, focus, and stale-lease handling"
+do_4   = "Create isolated ComputerStage web components showing real screen, owner, active and intended action, health, recording state, lifecycle, and errors"
+do_5   = "Prove live observation, takeover mid-action, no simultaneous input, manual work, return to Keith, reconnect, and stream isolation"
+reqs   = ["14.1", "14.2", "14.3", "14.4", "14.5", "14.6", "16.1", "16.2", "16.3", "16.4", "16.5", "16.6", "18.1", "18.2", "18.3", "18.4", "18.5", "18.6"]
+requires = ["2.8"]
+symbols = ["ScreenSession", "ComputerControlService"]
+touches = ["crates/cua/*", "apps/cua-runner/*", "apps/agent-web/ui/components/computer/ComputerStage.tsx", "apps/agent-web/ui/components/computer/computer.css"]
+verify_cmd = "cargo test -p keith-cua && cargo test -p keith-cua-runner"
+
+[task.3.7]
+title  = "Teaching recorder, recipe compiler, replay, and skill publication"
+status = "pending"
+wave   = 3
+do_1   = "Build synchronized recorder control over real CUA observation and user input events with narration and control transitions"
+do_2   = "Compile demonstrations into readable TaskRecipes using semantic targets, parameters, visual fallback, checkpoints, approvals, recovery, and completion"
+do_3   = "Implement shadow replay, checkpoint resume, user correction, result comparison, acceptance, and publication into the existing skill system"
+do_4   = "Create isolated TeachTaskPanel components for recording, timeline, parameters, editing, replay, correction, publish, versions, rollback, and deletion"
+do_5   = "Prove a changed-layout correction journey from recording through published skill invocation"
+reqs   = ["17.1", "17.2", "17.3", "17.4", "17.5", "17.6", "18.1", "18.2", "18.3", "18.4", "18.5", "18.6"]
+requires = ["2.8", "2.9"]
+symbols = ["DemonstrationRecorder", "RecipeCompiler", "RecipeReplay", "RecipePublisher"]
+touches = ["crates/task-recipe/*", "apps/agent-web/ui/components/computer/TeachTaskPanel.tsx", "apps/agent-web/ui/components/computer/teach-task.css"]
+verify_cmd = "cargo test -p keith-task-recipe"
+
+# ================================ INTEGRATION ================================
+
+[task.4.1]
+title  = "Meta-Harness promotion through self-evolution and user surfaces"
+status = "pending"
+wave   = 4
+do_1   = "Connect admitted candidates to existing shadow trees, real build gate, signed images, canary workers, observation, known-good pin, promotion, and reversal"
+do_2   = "Implement advisory, shadow, and autonomous modes with explicit availability and no current-task retry before promotion or approval"
+do_3   = "Add protocol projections for diagnosis, candidates, traces, comparisons, frontier, evaluation, diff, promotion, observation, and reversal"
+do_4   = "Create isolated Harness Repairs UI components with ordinary language and no hidden evaluator data"
+do_5   = "Prove the full deliberate-defect repair and reversal journey on real processes"
+reqs   = ["5.1", "5.2", "5.3", "5.4", "5.5", "5.6", "18.1", "18.2", "18.3", "18.4", "18.5", "18.6"]
+requires = ["3.1"]
+symbols = ["MetaHarnessCoordinator", "HarnessRepairProjection"]
+touches = ["crates/meta-harness/*", "crates/self-evolution/src/meta_harness.rs", "apps/agent-web/ui/components/harness/*"]
+verify_cmd = "cargo test -p keith-meta-harness -p keith-self-evolution meta_harness"
+
+[task.4.2]
+title  = "Central daemon, protocol, persistence, and runtime wiring"
+status = "pending"
+wave   = 4
+do_1   = "Register shared contracts and every new service in configuration, profile, credentials, state store, daemon, runtime API, local runtime, protocol, events, and UI model"
+do_2   = "Wire channel accounts, ACP sessions, plugins, connected apps, computer sessions, control leases, recordings, recipes, and harness repairs through one authenticated lifecycle"
+do_3   = "Preserve ordinary AgentConnection and SessionAction admission with no duplicate agent loops or client-side business logic"
+do_4   = "Implement restart reconciliation, cancellation, deletion, export, audit correlation, resource governance, feature flags, and honest unavailable states"
+do_5   = "Add cross-service process tests for startup, restart, crash, cancellation, profile isolation, and safe mode"
+reqs   = ["1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "18.1", "18.2", "18.3", "18.4", "18.5", "18.6", "19.1", "19.2", "19.3", "19.4", "19.5", "19.6"]
+requires = ["3.2", "3.3", "3.4", "3.5", "3.6", "3.7", "4.1"]
+touches = ["crates/configuration/src/lib.rs", "crates/profile/src/lib.rs", "crates/credentials/src/lib.rs", "crates/state-store-core/src/lib.rs", "crates/state-store/src/lib.rs", "crates/daemon-core/src/lib.rs", "crates/daemon-core/src/events.rs", "crates/runtime-api/src/lib.rs", "crates/local-runtime/src/lib.rs", "crates/protocol/src/lib.rs", "crates/ui-model/src/lib.rs", "apps/agentd/src/main.rs"]
+verify_cmd = "cargo test -p keith-daemon-core -p keith-runtime-api -p keith-local-runtime -p keith-protocol -p keith-ui-model"
+
+[task.4.3]
+title  = "Unified Web and TUI product surfaces"
+status = "pending"
+wave   = 5
+do_1   = "Mount Channels, Apps, Plugins, ACP, Computer, Teaching, Recipes, and Harness Repairs into the existing Keith information architecture"
+do_2   = "Replace the status-only Keith Computer body with the authenticated live screen while retaining real work, goal, child, wait, terminal, and final projections"
+do_3   = "Expose equivalent lifecycle, health, cancellation, control, connection, recipe, candidate, promotion, reversal, and safe-error operations through TUI and protocol"
+do_4   = "Enforce authentication, exact origin, CSRF, idempotency, profile isolation, approval, audit, accessibility, responsive layout, and honest capability labels"
+do_5   = "Run browser and protocol journeys covering all primary operations and restart"
+reqs   = ["18.1", "18.2", "18.3", "18.4", "18.5", "18.6"]
+requires = ["4.2"]
+symbols = ["KeithApp", "WorkStage"]
+touches = ["apps/agent-web/src/server.rs", "apps/agent-web/ui/components/KeithApp.tsx", "apps/agent-web/ui/app/globals.css", "apps/agent-web/ui/lib/keith.ts", "apps/agent-web/ui/lib/keith.test.ts", "apps/agent-web/ui/tests/*", "apps/agent-tui/src/connection.rs", "apps/agent-tui/src/lib.rs", "apps/agent-tui/src/render.rs"]
+verify_cmd = "cargo test -p keith-agent-web -p keith-agent-tui && npm --prefix apps/agent-web/ui test -- --runInBand"
+
+# ============================== QUALIFICATION ==============================
+
+[task.5.1]
+title  = "Credentialed channel matrix qualification"
+status = "pending"
+wave   = 6
+do_1   = "Run real-account inbound, reply, thread, attachment, reaction or edit where supported, restart, schedule, rate limit, duplicate, and revocation journeys for every supported channel"
+do_2   = "Run concurrent multi-account fairness, queue isolation, credential rotation, webhook replay, group privacy, and cross-profile tests"
+do_3   = "Record exact unsupported capabilities and external approval blockers rather than counting unqualified platforms"
+do_4   = "Trace every adapter to implementation and evidence"
+reqs   = ["6.1", "6.2", "6.3", "6.4", "6.5", "6.6", "7.1", "7.2", "7.3", "7.4", "7.5", "7.6", "8.1", "8.2", "8.3", "8.4", "8.5", "8.6"]
+requires = ["4.2", "4.3"]
+touches = ["crates/channel-adapters/tests/*", "crates/channel-gateway/tests/*", "apps/agent-web/ui/tests/channels*", "evidence/channels/*"]
+verify_cmd = "cargo test -p keith-channel-core -p keith-channel-adapters -p keith-channel-gateway"
+
+[task.5.2]
+title  = "ACP interoperability and protocol qualification"
+status = "pending"
+wave   = 6
+do_1   = "Run stable-v1 initialization, concurrent sessions, prompt, streaming, files, terminal, permissions, MCP, cancellation, reconnect, resume, and restart against real ACP clients"
+do_2   = "Run stdio, HTTP or SSE, WebSocket, malformed JSON-RPC, batch, version refusal, and authority non-widening fixtures"
+do_3   = "Keep draft-v2 evidence separate and label it experimental"
+do_4   = "Trace every protocol operation to code and evidence"
+reqs   = ["9.1", "9.2", "9.3", "9.4", "9.5", "9.6", "10.1", "10.2", "10.3", "10.4", "10.5", "10.6"]
+requires = ["4.2"]
+touches = ["crates/acp/tests/*", "apps/agent-acp/tests/*", "evidence/acp/*"]
+verify_cmd = "cargo test -p keith-acp --all-features && cargo test -p keith-agent-acp --all-features"
+
+[task.5.3]
+title  = "Plugin and Composio production qualification"
+status = "pending"
+wave   = 6
+do_1   = "Run real WASI plugin payload, stream, cancellation, resource denial, update, migration, rollback, quarantine, safe mode, and uninstall journeys"
+do_2   = "Connect at least three real Composio applications and prove discovery, read, approval-gated write, multiple accounts, expiry, revocation, deletion, and profile isolation"
+do_3   = "Run hostile package, OAuth substitution, credential, SSRF, network, storage, and result-injection tests"
+do_4   = "Trace plugin and application operations to code and evidence"
+reqs   = ["11.1", "11.2", "11.3", "11.4", "11.5", "11.6", "12.1", "12.2", "12.3", "12.4", "12.5", "12.6", "13.1", "13.2", "13.3", "13.4", "13.5", "13.6"]
+requires = ["4.2", "4.3"]
+touches = ["crates/plugin-host/tests/*", "crates/composio/tests/*", "apps/agent-web/ui/tests/apps*", "evidence/plugins/*", "evidence/composio/*"]
+verify_cmd = "cargo test -p keith-plugin-sdk -p keith-plugin-host -p keith-composio"
+
+[task.5.4]
+title  = "Keith Computer, co-control, and teaching qualification"
+status = "pending"
+wave   = 6
+do_1   = "Run real computer lifecycle, authenticated stream, visual action, semantic action, stale target, approval, user takeover, reconnect, snapshot, reset, crash, isolation, and deletion journeys"
+do_2   = "Record a task, redact secrets, compile a recipe, correct a changed target, replay from checkpoint, publish a skill, invoke it, version it, roll it back, and delete all data"
+do_3   = "Measure task success, action count, stream and action latency, recovery, cancellation, resource reclamation, and unsafe-action refusal"
+do_4   = "Trace computer and teaching operations to code and evidence"
+reqs   = ["14.1", "14.2", "14.3", "14.4", "14.5", "14.6", "15.1", "15.2", "15.3", "15.4", "15.5", "15.6", "16.1", "16.2", "16.3", "16.4", "16.5", "16.6", "17.1", "17.2", "17.3", "17.4", "17.5", "17.6"]
+requires = ["4.2", "4.3"]
+touches = ["crates/cua/tests/*", "apps/cua-runner/tests/*", "crates/task-recipe/tests/*", "apps/agent-web/ui/tests/computer*", "evidence/cua/*"]
+verify_cmd = "cargo test -p keith-cua -p keith-cua-runner -p keith-task-recipe"
+
+[task.5.5]
+title  = "Meta-Harness deliberate-defect qualification"
+status = "pending"
+wave   = 6
+do_1   = "Introduce a bounded harness defect fixture and capture the real failed task trace"
+do_2   = "Diagnose the harness cause, generate multiple candidates, evaluate search and held-out sets, retain the Pareto frontier, and reject regressions"
+do_3   = "Promote the winner through real build, signed image, canary, observation, and known-good advancement, then rerun the original task"
+do_4   = "Reverse the promotion in one action and prove byte-exact source and image restoration"
+do_5   = "Run evaluator tampering, hidden-data leakage, reward hacking, injection, crash, budget, and protected-surface attacks"
+reqs   = ["3.1", "3.2", "3.3", "3.4", "3.5", "3.6", "4.1", "4.2", "4.3", "4.4", "4.5", "4.6", "5.1", "5.2", "5.3", "5.4", "5.5", "5.6"]
+requires = ["4.1", "4.2", "4.3"]
+touches = ["crates/meta-harness/tests/*", "crates/self-evolution/tests/meta_harness*", "evidence/meta-harness/*"]
+verify_cmd = "cargo test -p keith-meta-harness -p keith-self-evolution meta_harness"
+
+[task.6.1]
+title  = "Cross-surface adversarial security and fault-injection gate"
+status = "pending"
+wave   = 7
+do_1   = "Attack every transition among channel, ACP, plugin, Composio, computer, teaching, Meta-Harness, credentials, profiles, approvals, and data control"
+do_2   = "Cover injection, SSRF, webhook forgery, protocol confusion, plugin escape, OAuth substitution, stream hijack, stale input, recording leakage, evaluator tampering, and cross-profile access"
+do_3   = "Kill each service at durable boundaries and prove safe reconciliation, cancellation, quarantine, reversal, deletion, and daemon availability"
+do_4   = "Run against real processes, real WASI, real browser or workstation, real protocol frames, and credentialed services where available"
+do_5   = "Block release while any authority widening, credential leak, cross-profile access, fabricated success, data loss, or unrecoverable state remains open"
+reqs   = ["19.1", "19.2", "19.3", "19.4", "19.5", "19.6"]
+requires = ["5.1", "5.2", "5.3", "5.4", "5.5"]
+touches = ["apps/xtask/src/security.rs", "apps/xtask/src/main.rs", "tests/security/keith_everywhere*", "evidence/security/*"]
+verify_cmd = "cargo run -p keith-xtask --locked -- security-gate"
+
+[task.6.2]
+title  = "Keith Everywhere integrated release qualification"
+status = "pending"
+wave   = 8
+do_1   = "Run the real channel to durable session to Composio to computer to teaching to published recipe journey with Web and ACP continuity"
+do_2   = "Run the real harness defect to candidate search to held-out evaluation to promotion to successful retry to reversal journey"
+do_3   = "Run formatting, strict Clippy, dependency policy, all focused suites, browser journeys, process suites, security gate, platform gate, restart, export, deletion, and safe-mode startup"
+do_4   = "Run Codify review, strict guard, check, test impact, trace every task, and preserve honest implemented-versus-qualified status"
+do_5   = "Publish only genuinely qualified tasks and list unavailable credentials or external approvals as explicit remaining blockers"
+reqs   = ["19.1", "19.2", "19.3", "19.4", "19.5", "19.6", "20.1", "20.2", "20.3", "20.4", "20.5", "20.6"]
+requires = ["6.1"]
+touches = ["crates/*", "apps/*", "evidence/keith-everywhere/*", "docs/release-qualification.md"]
+verify_cmd = "cargo fmt --all --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --all-features && cargo run -p keith-xtask --locked -- security-gate && cargo run -p keith-xtask --locked -- platform-gate"

@@ -384,6 +384,7 @@ fn dispatch_available(
     socket: &Path,
     reconnect: ReconnectPolicy,
     channel: &str,
+    external_account: &str,
     attachment_root: &Path,
     adapter: &mut DiscordAdapter,
 ) -> Result<usize, String> {
@@ -395,6 +396,7 @@ fn dispatch_available(
             reconnect,
             &ClientCommand::ClaimDelivery {
                 channel: channel.to_owned(),
+                external_account: external_account.to_owned(),
             },
         )? {
             CommandResult::Data(payload) => match *payload {
@@ -409,6 +411,9 @@ fn dispatch_available(
         let Some(claim) = claim else {
             break;
         };
+        if claim.route.channel != channel || claim.route.external_account != external_account {
+            return Err("daemon returned a delivery claim for another channel account".to_owned());
+        }
         let staged = load_delivery_artifacts(
             attachment_root,
             &claim.artifacts,
@@ -587,6 +592,7 @@ fn run_discord(
     let outbound_shutdown = Arc::clone(&shutdown);
     let outbound_socket = socket.to_path_buf();
     let outbound_token_environment = arguments.token_environment.clone();
+    let outbound_external_account = arguments.bot_user_id.clone();
     let outbound_attachment_root = arguments.attachment_root.clone();
     let mut outbound_adapter = DiscordAdapter::new(
         config,
@@ -602,6 +608,7 @@ fn run_discord(
                 &outbound_socket,
                 reconnect,
                 "discord",
+                &outbound_external_account,
                 &outbound_attachment_root,
                 &mut outbound_adapter,
             ) {

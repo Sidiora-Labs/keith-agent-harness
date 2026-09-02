@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "qualification_id": "keith-everywhere-5.1-2026-09-01",
+  "qualification_result": "local_conformance_passed_external_accounts_blocked",
+  "credential_inventory": {
+    "environment_names_inspected": true,
+    "matching_channel_credential_names": [],
+    "secret_values_read": false,
+    "owner_authorization_present": false
+  },
+  "local_gates": [
+    {
+      "command": "cargo test -p keith-channel-core -p keith-channel-adapters -p keith-channel-gateway",
+      "status": "passed",
+      "observed": "42 passed, 0 failed, 4 credential-independent loopback tests explicitly ignored by the default suite"
+    },
+    {
+      "command": "cargo test -p keith-channel-adapters -- --ignored",
+      "status": "passed",
+      "observed": "4 passed, 0 failed; Telegram and WhatsApp real-loopback HTTP, rate-limit, media, retry, reconnect, and unsupported-route journeys"
+    },
+    {
+      "command": "npm --prefix apps/agent-web/ui test",
+      "status": "passed",
+      "observed": "26 passed, 0 failed across 8 test files"
+    }
+  ],
+  "local_evidence": {
+    "adapter_contract_and_normalization": [
+      "crates/channel-adapters/tests/catalog.rs",
+      "crates/channel-adapters/tests/slack.rs",
+      "crates/channel-adapters/tests/telegram.rs",
+      "crates/channel-adapters/tests/whatsapp.rs",
+      "crates/channel-adapters/tests/work_channels.rs"
+    ],
+    "multi_account_fairness_restart_rotation_replay_and_isolation": "apps/channel-gateway/tests/supervisor.rs",
+    "secret_free_web_lifecycle": "apps/agent-web/ui/tests/channels.test.tsx"
+  },
+  "platforms": [
+    {
+      "platform": "discord",
+      "implementation": "crates/channel-adapters/src/lib.rs",
+      "required_credential_references": ["bot_token"],
+      "unsupported_capabilities": ["commands", "message_edits", "message_deletion", "reactions", "voice", "rich_content", "delivery_receipts", "read_receipts", "cancellation"],
+      "real_account_status": "blocked_external_credentials_and_owner_authorization",
+      "external_blockers": ["Discord bot account identity", "bot token credential reference", "owner authorization for inbound, outbound, restart, scheduling, rate-limit, duplicate, and revocation actions"]
+    },
+    {
+      "platform": "slack",
+      "implementation": "crates/channel-adapters/src/slack.rs",
+      "required_credential_references": ["bot_token", "signing_secret"],
+      "unsupported_capabilities": ["voice", "typing", "read_receipts"],
+      "real_account_status": "blocked_external_credentials_and_owner_authorization",
+      "external_blockers": ["Slack workspace and app identity", "bot token and signing secret credential references", "owner authorization for Events API or Socket Mode and write/revocation actions"]
+    },
+    {
+      "platform": "telegram",
+      "implementation": "crates/channel-adapters/src/telegram.rs",
+      "required_credential_references": ["bot_token", "webhook_secret"],
+      "unsupported_capabilities": ["mentions", "message_deletion", "reactions", "rich_content", "delivery_receipts", "read_receipts", "idempotent_send"],
+      "real_account_status": "blocked_external_credentials_and_owner_authorization",
+      "external_blockers": ["Telegram bot identity", "bot token and webhook secret credential references", "owner authorization for webhook or polling and outbound/revocation actions"]
+    },
+    {
+      "platform": "whatsapp_cloud",
+      "implementation": "crates/channel-adapters/src/whatsapp.rs",
+      "required_credential_references": ["access_token", "app_secret", "verify_token"],
+      "unsupported_capabilities": ["threads", "mentions", "message_edits", "message_deletion", "reactions", "rich_content", "typing", "idempotent_send"],
+      "real_account_status": "blocked_external_credentials_and_owner_authorization",
+      "external_blockers": ["WhatsApp Business account and phone-number identity", "access token, app secret, and verify token credential references", "owner authorization for webhook, templates, outbound, and revocation actions"]
+    },
+    {
+      "platform": "teams",
+      "implementation": "crates/channel-adapters/src/teams.rs",
+      "required_credential_references": ["bot_framework_access_token", "bot_framework_request_verifier"],
+      "unsupported_capabilities": ["commands", "message_edits", "message_deletion", "reactions", "voice", "rich_content", "typing", "delivery_receipts", "read_receipts", "idempotent_send"],
+      "real_account_status": "blocked_external_credentials_and_owner_authorization",
+      "external_blockers": ["Microsoft tenant, bot app, and channel identity", "Bot Framework access-token and request-verifier credential references", "owner authorization for Bot Framework inbound, outbound, and revocation actions"]
+    },
+    {
+      "platform": "google_chat",
+      "implementation": "crates/channel-adapters/src/google_chat.rs",
+      "required_credential_references": ["chat_api_access_token", "google_chat_request_verifier"],
+      "unsupported_capabilities": ["mentions", "commands", "message_edits", "message_deletion", "reactions", "voice", "rich_content", "typing", "delivery_receipts", "read_receipts", "idempotent_send"],
+      "real_account_status": "blocked_external_credentials_and_owner_authorization",
+      "external_blockers": ["Google Cloud project, Chat app, and space identity", "Chat API access-token and request-verifier credential references", "owner authorization for event endpoint, outbound, and revocation actions"]
+    },
+    {
+      "platform": "email",
+      "implementation": "crates/channel-adapters/src/email.rs",
+      "required_credential_references": ["provider_access_token", "webhook_signature_verifier"],
+      "unsupported_capabilities": ["mentions", "commands", "message_edits", "message_deletion", "reactions", "voice", "rich_content", "typing", "delivery_receipts", "read_receipts", "idempotent_send_when_provider_does_not_guarantee_it"],
+      "real_account_status": "blocked_external_credentials_and_owner_authorization",
+      "external_blockers": ["mail provider endpoint and sender identity", "provider access-token and webhook-verifier credential references", "owner authorization for inbound, outbound, scheduled return, duplicate-risk, and revocation actions"]
+    },
+    {
+      "platform": "matrix",
+      "implementation": "crates/channel-adapters/src/matrix.rs",
+      "required_credential_references": ["access_token"],
+      "unsupported_capabilities": ["mentions", "commands", "voice", "rich_content", "delivery_receipts"],
+      "real_account_status": "blocked_external_credentials_and_owner_authorization",
+      "external_blockers": ["Matrix homeserver, user, and room identity", "access-token credential reference", "owner authorization for sync, outbound, room-state, and revocation actions"]
+    }
+  ],
+  "release_claim": "No channel is recorded as real-account qualified by this artifact. Local conformance is evidence of implementation only; the listed external account journeys remain blocked until credentials and owner authorization are supplied."
+}

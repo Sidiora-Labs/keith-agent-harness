@@ -361,6 +361,7 @@ pub fn run_qualification() -> Result<(), String> {
             None,
             ClientCommand::ClaimDelivery {
                 channel: "performance".into(),
+                external_account: "performance".into(),
             },
             "delivery_outbox_claim",
             &mut measurements,

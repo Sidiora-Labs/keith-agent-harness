@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "qualification_id": "keith-everywhere-5.2-2026-09-01",
+  "official_sources": [
+    "https://github.com/agentclientprotocol/agent-client-protocol",
+    "https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/protocol/v1/overview.mdx",
+    "https://github.com/agentclientprotocol/rust-sdk/blob/main/md/protocol-v2.md"
+  ],
+  "official_rust_sdk": {
+    "crate": "agent-client-protocol",
+    "crate_version": "2.0.0",
+    "wire_compatibility_basis": "initialize.protocolVersion",
+    "client_evidence": "apps/agent-acp/src/client_facilities.rs::real_sdk_client_serves_files_terminal_and_permission_requests"
+  },
+  "stable_v1": {
+    "wire_protocol_version": 1,
+    "release_status": "stable",
+    "operation_trace": [
+      { "operation": "initialize", "implementation": "apps/agent-acp/src/main.rs::serve_v1" },
+      { "operation": "session/new", "implementation": "apps/agent-acp/src/main.rs::serve_v1 and crates/acp/src/bridge.rs::create_session" },
+      { "operation": "session/load", "implementation": "apps/agent-acp/src/main.rs::serve_v1 and crates/acp/src/bridge.rs::load_session" },
+      { "operation": "session/fork", "implementation": "apps/agent-acp/src/main.rs::serve_v1 and crates/acp/src/bridge.rs::fork_session" },
+      { "operation": "session/prompt", "implementation": "apps/agent-acp/src/main.rs::drive_prompt and crates/acp/src/bridge.rs::prompt" },
+      { "operation": "session/cancel", "implementation": "apps/agent-acp/src/main.rs::serve_v1 and crates/acp/src/bridge.rs::cancel_session" },
+      { "operation": "session/update", "implementation": "apps/agent-acp/src/main.rs::send_updates and crates/acp/src/projector.rs" },
+      { "operation": "fs/read_text_file", "implementation": "apps/agent-acp/src/client_facilities.rs::read_text_file" },
+      { "operation": "fs/write_text_file", "implementation": "apps/agent-acp/src/client_facilities.rs::write_text_file" },
+      { "operation": "terminal/create", "implementation": "apps/agent-acp/src/client_facilities.rs::terminal" },
+      { "operation": "session/request_permission", "implementation": "apps/agent-acp/src/client_facilities.rs::request_permission and crates/acp/src/permission.rs" },
+      { "operation": "mcp/session_scope", "implementation": "apps/agent-acp/src/client_facilities.rs::convert_mcp_server and crates/acp/src/capabilities.rs" },
+      { "operation": "session/close", "implementation": "crates/acp/src/bridge.rs::close_session" }
+    ],
+    "transports": {
+      "stdio": "required local line-framed transport",
+      "http_sse": "authenticated managed connection with bounded replay and explicit closure",
+      "websocket": "authenticated managed connection with exact frame preservation"
+    },
+    "qualification_status": "passed",
+    "observed": "Stable core, durable state, transport, permission, capability, official SDK client, and real process fixtures passed with no failures."
+  },
+  "draft_v2": {
+    "wire_protocol_version": 2,
+    "release_status": "experimental",
+    "compile_gate": "unstable-acp-v2",
+    "runtime_gate": "--unstable-acp-v2 true",
+    "handler": "apps/agent-acp/src/v2.rs",
+    "no_downgrade_or_schema_conversion": true,
+    "qualification_status": "passed_experimental",
+    "observed": "All-features draft-v2 schema, raw-secret refusal, runtime gate, and separate process-handler tests passed; this does not promote v2 to stable."
+  },
+  "test_evidence": [
+    "crates/acp/tests/interoperability.rs",
+    "crates/acp/src/bridge.rs",
+    "crates/acp/src/capabilities.rs",
+    "crates/acp/src/permission.rs",
+    "crates/acp/src/protocol_router.rs",
+    "crates/acp/src/store.rs",
+    "crates/acp/src/transport.rs",
+    "apps/agent-acp/src/client_facilities.rs",
+    "apps/agent-acp/tests/protocol_process.rs"
+  ],
+  "gate_results": [
+    {
+      "command": "cargo test -p keith-acp --all-features",
+      "status": "passed",
+      "observed": "14 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p keith-agent-acp --all-features",
+      "status": "passed",
+      "observed": "15 passed, 0 failed, including 6 real process transport fixtures"
+    }
+  ],
+  "authority_result": "Client files, terminal, permissions, and MCP are intersected with profile and session policy; reconnect can only reduce authority; raw MCP credentials and cross-version continuation are rejected.",
+  "external_editor_clients": {
+    "status": "not_claimed",
+    "reason": "No interactive Zed, VS Code, or other editor client binary was installed in this environment. Official Rust SDK client and wire-level process interoperability are qualified; editor-specific UX is not claimed."
+  },
+  "credential_inventory": {
+    "external_credentials_required": false,
+    "secret_values_read": false
+  }
+}

@@ -1,0 +1,4 @@
+tree 563fa5c03d8a2c5950b43ece38c9956e8f54ed59f38f5ffe2df74963bc9f81e7
+parent f35bb4c50e229c70962242cf368b9c531b7f9060cec0b741ca2b4318ec3a68bb
+date 1788273866
+message Implement demonstration capture and TaskRecipe domain [spec:keith-everywhere/2.9]

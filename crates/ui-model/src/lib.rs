@@ -4,11 +4,13 @@ use std::collections::BTreeSet;
 
 use keith_agent_types::{
     ActionId, ChildId, CommitmentId, DeliveryId, EntityId, EntryId, Generation, GoalId, JobId,
-    Sequence, SessionId, ToolCallId, TurnId, UtcTimestamp,
+    ProfileId, Sequence, SessionId, ToolCallId, TurnId, UtcTimestamp,
 };
 use keith_protocol::{
-    DaemonEvent, EventEnvelope, EvolutionAvailabilityProjection, GoalState, MemoryChangeKind,
-    MemoryChangeProjection, MessageProjection, MessageRole, SessionSnapshot, TurnTerminalStatus,
+    DaemonEvent, EventEnvelope, EvolutionAvailabilityProjection, GoalState, IntegrationControl,
+    IntegrationResourceProjection, IntegrationServiceProjection, MemoryChangeKind,
+    MemoryChangeProjection, MessageProjection, MessageRole, ProfileEventEnvelope,
+    ProfileIntegrationEvent, ProfileIntegrationsProjection, SessionSnapshot, TurnTerminalStatus,
 };
 pub use keith_protocol::{PresenceProjection, PresenceState};
 use serde::{Deserialize, Serialize};
@@ -1268,6 +1270,215 @@ fn upsert_memory(items: &mut Vec<MemoryChangeProjection>, value: MemoryChangePro
     upsert(items, value, |item| item.entry_id.clone());
 }
 
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum IntegrationProjectionError {
+    #[error("integration projection belongs to another profile")]
+    ProfileMismatch,
+    #[error("integration projection contains a duplicate resource")]
+    DuplicateResource,
+    #[error("integration projection reports invalid or fabricated lifecycle health")]
+    InvalidHealth,
+    #[error("integration event sequence overflowed")]
+    SequenceOverflow,
+}
+
+pub struct IntegrationProjectionReducer {
+    snapshot: ProfileIntegrationsProjection,
+    generation: Generation,
+    stream_state: ProjectionStreamState,
+}
+
+impl IntegrationProjectionReducer {
+    /// Creates a profile-global reducer independently of ordinary session projections.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the snapshot crosses a profile boundary, duplicates a resource, or
+    /// reports lifecycle health that is not supported by its durable state.
+    pub fn new(
+        snapshot: ProfileIntegrationsProjection,
+        generation: Generation,
+    ) -> Result<Self, IntegrationProjectionError> {
+        validate_integration_snapshot(&snapshot)?;
+        Ok(Self {
+            snapshot,
+            generation,
+            stream_state: ProjectionStreamState::Current,
+        })
+    }
+
+    pub const fn snapshot(&self) -> &ProfileIntegrationsProjection {
+        &self.snapshot
+    }
+
+    pub const fn generation(&self) -> Generation {
+        self.generation
+    }
+
+    pub const fn stream_state(&self) -> ProjectionStreamState {
+        self.stream_state
+    }
+
+    /// Applies a complete authoritative profile snapshot without regressing sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a cross-profile or invalid snapshot.
+    pub fn apply_snapshot(
+        &mut self,
+        snapshot: ProfileIntegrationsProjection,
+        generation: Generation,
+    ) -> Result<ReductionOutcome, IntegrationProjectionError> {
+        if snapshot.profile_id != self.snapshot.profile_id {
+            return Err(IntegrationProjectionError::ProfileMismatch);
+        }
+        validate_integration_snapshot(&snapshot)?;
+        if generation < self.generation
+            || (generation == self.generation
+                && snapshot.through_sequence < self.snapshot.through_sequence)
+        {
+            return Ok(ReductionOutcome::StaleGeneration);
+        }
+        if generation == self.generation
+            && snapshot.through_sequence == self.snapshot.through_sequence
+            && snapshot == self.snapshot
+        {
+            return Ok(ReductionOutcome::Duplicate);
+        }
+        self.snapshot = snapshot;
+        self.generation = generation;
+        self.stream_state = ProjectionStreamState::Current;
+        Ok(ReductionOutcome::SnapshotReplaced)
+    }
+
+    /// Applies exactly the next profile event and requests a replacement snapshot on gaps.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for cross-profile or untruthful resource projections.
+    pub fn apply_event(
+        &mut self,
+        envelope: &ProfileEventEnvelope,
+    ) -> Result<ReductionOutcome, IntegrationProjectionError> {
+        if envelope.profile_id != self.snapshot.profile_id {
+            return Err(IntegrationProjectionError::ProfileMismatch);
+        }
+        if envelope.generation < self.generation {
+            return Ok(ReductionOutcome::StaleGeneration);
+        }
+        if envelope.generation > self.generation {
+            if let ProfileIntegrationEvent::Snapshot(snapshot) = &envelope.event {
+                let mut snapshot = *snapshot.clone();
+                snapshot.through_sequence = envelope.sequence;
+                return self.apply_snapshot(snapshot, envelope.generation);
+            }
+            let expected = self
+                .snapshot
+                .through_sequence
+                .checked_next()
+                .ok_or(IntegrationProjectionError::SequenceOverflow)?;
+            self.stream_state = ProjectionStreamState::SnapshotRequired {
+                reason: SnapshotRequiredReason::GenerationGap,
+                generation: envelope.generation,
+                expected_sequence: expected,
+                received_sequence: envelope.sequence,
+            };
+            return Ok(ReductionOutcome::Gap);
+        }
+        if envelope.sequence <= self.snapshot.through_sequence {
+            return Ok(ReductionOutcome::Duplicate);
+        }
+        let expected = self
+            .snapshot
+            .through_sequence
+            .checked_next()
+            .ok_or(IntegrationProjectionError::SequenceOverflow)?;
+        if envelope.sequence != expected {
+            self.stream_state = ProjectionStreamState::SnapshotRequired {
+                reason: SnapshotRequiredReason::SequenceGap,
+                generation: envelope.generation,
+                expected_sequence: expected,
+                received_sequence: envelope.sequence,
+            };
+            return Ok(ReductionOutcome::Gap);
+        }
+        match &envelope.event {
+            ProfileIntegrationEvent::Snapshot(snapshot) => {
+                let mut snapshot = *snapshot.clone();
+                snapshot.through_sequence = envelope.sequence;
+                return self.apply_snapshot(snapshot, envelope.generation);
+            }
+            ProfileIntegrationEvent::ResourceChanged(resource) => {
+                validate_integration_resource(&self.snapshot.profile_id, resource)?;
+                upsert(&mut self.snapshot.resources, *resource.clone(), |item| {
+                    (item.service, item.id.clone())
+                });
+            }
+            ProfileIntegrationEvent::ResourceRemoved {
+                service,
+                resource_id,
+            } => self
+                .snapshot
+                .resources
+                .retain(|resource| resource.service != *service || resource.id != *resource_id),
+            ProfileIntegrationEvent::ServiceAvailabilityChanged(service) => upsert(
+                &mut self.snapshot.services,
+                service.clone(),
+                |item: &IntegrationServiceProjection| item.service,
+            ),
+        }
+        self.snapshot.through_sequence = envelope.sequence;
+        self.stream_state = ProjectionStreamState::Current;
+        Ok(ReductionOutcome::Applied)
+    }
+}
+
+fn validate_integration_snapshot(
+    snapshot: &ProfileIntegrationsProjection,
+) -> Result<(), IntegrationProjectionError> {
+    let mut resources = BTreeSet::new();
+    for resource in &snapshot.resources {
+        validate_integration_resource(&snapshot.profile_id, resource)?;
+        if !resources.insert((resource.service, resource.id.clone())) {
+            return Err(IntegrationProjectionError::DuplicateResource);
+        }
+    }
+    let mut services = BTreeSet::new();
+    if snapshot
+        .services
+        .iter()
+        .any(|service| !services.insert(service.service))
+    {
+        return Err(IntegrationProjectionError::DuplicateResource);
+    }
+    Ok(())
+}
+
+fn validate_integration_resource(
+    profile_id: &ProfileId,
+    resource: &IntegrationResourceProjection,
+) -> Result<(), IntegrationProjectionError> {
+    if resource.profile_id != *profile_id {
+        return Err(IntegrationProjectionError::ProfileMismatch);
+    }
+    resource
+        .bounds
+        .validate()
+        .map_err(|_| IntegrationProjectionError::InvalidHealth)?;
+    let error_required = matches!(
+        resource.lifecycle,
+        keith_platform_contracts::LifecycleState::Failed
+            | keith_platform_contracts::LifecycleState::Interrupted
+    );
+    if error_required != resource.safe_error.is_some()
+        || (resource.lifecycle.is_terminal()
+            && resource.controls.contains(&IntegrationControl::Cancel))
+    {
+        return Err(IntegrationProjectionError::InvalidHealth);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeFact {
     ActionStarted {
@@ -1601,6 +1812,9 @@ mod tests {
         ActionId, CURRENT_PROTOCOL_VERSION, ChildId, CommitmentId, DeliveryId, EntityId, EntryId,
         JobId, KernelId, MessageId, ProfileId, Revision, RootTreeId, ToolCallId,
     };
+    use keith_platform_contracts::{
+        AuditCorrelationId, CancellationId, LifecycleState, ResourceBounds,
+    };
     use keith_protocol::{
         ActionProjection, ChildProjection, CommitmentProjection, DeliveryProjection,
         EvolutionDisclosureProjection, EvolutionLedgerProjection, EvolutionProjection,
@@ -1672,6 +1886,105 @@ mod tests {
 
     fn virtualization() -> VirtualizationConfig {
         VirtualizationConfig::new(8, 4, 1).unwrap()
+    }
+
+    fn integration_resource(profile_id: ProfileId) -> IntegrationResourceProjection {
+        IntegrationResourceProjection {
+            id: EntityId::new(),
+            profile_id,
+            owning_session_id: Some(SessionId::new()),
+            service: keith_protocol::IntegrationService::ConnectedApp,
+            native_resource_key: "github-primary".into(),
+            display_label: "GitHub".into(),
+            lifecycle: LifecycleState::Pending,
+            cancellation_id: CancellationId::new(),
+            audit_correlation: AuditCorrelationId::new(),
+            bounds: ResourceBounds {
+                max_concurrency: 1,
+                max_duration_ms: 1_000,
+                max_cpu_time_ms: 1_000,
+                max_retries: 1,
+                max_input_bytes: 1_024,
+                max_output_bytes: 1_024,
+                max_memory_bytes: 1_024,
+                max_disk_bytes: 1_024,
+                max_events_per_minute: 10,
+            },
+            controls: [
+                IntegrationControl::Restart,
+                IntegrationControl::Cancel,
+                IntegrationControl::Export,
+                IntegrationControl::Delete,
+            ]
+            .into_iter()
+            .collect(),
+            safe_error: None,
+            revision: Revision::ZERO,
+            created_at: UtcTimestamp::UNIX_EPOCH,
+            updated_at: UtcTimestamp::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn profile_integration_reducer_enforces_identity_sequence_and_truthful_health() {
+        let profile_id = ProfileId::new();
+        let snapshot = ProfileIntegrationsProjection {
+            profile_id: profile_id.clone(),
+            through_sequence: Sequence::ZERO,
+            services: vec![IntegrationServiceProjection {
+                service: keith_protocol::IntegrationService::ConnectedApp,
+                availability: keith_protocol::IntegrationAvailabilityProjection::Available,
+            }],
+            resources: Vec::new(),
+        };
+        let mut reducer = IntegrationProjectionReducer::new(snapshot, Generation::new(1)).unwrap();
+        let resource = integration_resource(profile_id.clone());
+        let event = ProfileEventEnvelope {
+            protocol: CURRENT_PROTOCOL_VERSION,
+            profile_id: profile_id.clone(),
+            generation: Generation::new(1),
+            sequence: Sequence::new(1),
+            occurred_at: UtcTimestamp::UNIX_EPOCH,
+            event: ProfileIntegrationEvent::ResourceChanged(Box::new(resource.clone())),
+        };
+        assert_eq!(
+            reducer.apply_event(&event).unwrap(),
+            ReductionOutcome::Applied
+        );
+        assert_eq!(reducer.snapshot().resources, vec![resource]);
+
+        let gap = ProfileEventEnvelope {
+            sequence: Sequence::new(3),
+            event: ProfileIntegrationEvent::ResourceRemoved {
+                service: keith_protocol::IntegrationService::ConnectedApp,
+                resource_id: reducer.snapshot().resources[0].id.clone(),
+            },
+            ..event.clone()
+        };
+        assert_eq!(reducer.apply_event(&gap).unwrap(), ReductionOutcome::Gap);
+        assert_eq!(reducer.snapshot().resources.len(), 1);
+
+        let mut untruthful = reducer.snapshot().resources[0].clone();
+        untruthful.lifecycle = LifecycleState::Failed;
+        untruthful.safe_error = None;
+        let replacement = ProfileIntegrationsProjection {
+            resources: vec![untruthful],
+            ..reducer.snapshot().clone()
+        };
+        assert_eq!(
+            reducer.apply_snapshot(replacement, Generation::new(2)),
+            Err(IntegrationProjectionError::InvalidHealth)
+        );
+
+        let cross_profile = ProfileEventEnvelope {
+            profile_id: ProfileId::new(),
+            sequence: Sequence::new(2),
+            ..event
+        };
+        assert_eq!(
+            reducer.apply_event(&cross_profile),
+            Err(IntegrationProjectionError::ProfileMismatch)
+        );
     }
 
     #[test]

@@ -1089,6 +1089,7 @@ mod tests {
                 enabled_mcp_servers: vec![format!("mcp-{name}")],
                 enabled_plugins: vec![format!("plugin-{name}")],
                 channels: vec![channel.into()],
+                service_policy: Default::default(),
                 autonomy: ProfileAutonomy {
                     mode: AutonomyMode::Bounded,
                     max_children: 2,

@@ -198,6 +198,717 @@ pub trait ChannelAdapter {
     fn reconnect(&mut self) -> Result<(), AdapterFailure>;
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelContractVersion {
+    pub major: u16,
+    pub minor: u16,
+}
+
+impl ChannelContractVersion {
+    pub const fn new(major: u16, minor: u16) -> Self {
+        Self { major, minor }
+    }
+
+    pub const fn is_compatible_with(self, required: Self) -> bool {
+        self.major == required.major && self.minor >= required.minor
+    }
+}
+
+pub const CHANNEL_CONTRACT_V2: ChannelContractVersion = ChannelContractVersion::new(2, 0);
+
+/// Selects the stable v2 contract only when the peer advertises a compatible version.
+///
+/// # Errors
+///
+/// Returns an unsupported-feature error rather than silently downgrading or translating versions.
+pub fn negotiate_channel_contract_v2(
+    peer_versions: &[ChannelContractVersion],
+) -> Result<ChannelContractVersion, ChannelAdapterErrorV2> {
+    if peer_versions
+        .iter()
+        .any(|version| version.is_compatible_with(CHANNEL_CONTRACT_V2))
+    {
+        Ok(CHANNEL_CONTRACT_V2)
+    } else {
+        Err(ChannelAdapterErrorV2::unsupported(
+            "channel contract v2 is not supported by the peer",
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelCapabilityV2 {
+    InboundMessages,
+    OutboundMessages,
+    Threads,
+    Replies,
+    Mentions,
+    Commands,
+    MessageEdits,
+    MessageDeletion,
+    Reactions,
+    Attachments,
+    Voice,
+    RichContent,
+    Typing,
+    DeliveryReceipts,
+    ReadReceipts,
+    RateLimits,
+    Reconnect,
+    Cancellation,
+    IdempotentSend,
+}
+
+impl ChannelCapabilityV2 {
+    pub const ALL: [Self; 19] = [
+        Self::InboundMessages,
+        Self::OutboundMessages,
+        Self::Threads,
+        Self::Replies,
+        Self::Mentions,
+        Self::Commands,
+        Self::MessageEdits,
+        Self::MessageDeletion,
+        Self::Reactions,
+        Self::Attachments,
+        Self::Voice,
+        Self::RichContent,
+        Self::Typing,
+        Self::DeliveryReceipts,
+        Self::ReadReceipts,
+        Self::RateLimits,
+        Self::Reconnect,
+        Self::Cancellation,
+        Self::IdempotentSend,
+    ];
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "support")]
+pub enum ChannelCapabilitySupportV2 {
+    Supported,
+    Unsupported { safe_reason: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelCapabilitiesV2 {
+    pub contract: ChannelContractVersion,
+    pub declarations: BTreeMap<ChannelCapabilityV2, ChannelCapabilitySupportV2>,
+    pub max_event_bytes: u64,
+    pub max_attachment_bytes: u64,
+    pub max_attachments: usize,
+    pub max_rich_content_bytes: u64,
+    pub requests_per_minute: Option<u32>,
+}
+
+impl ChannelCapabilitiesV2 {
+    pub fn supports(&self, capability: ChannelCapabilityV2) -> bool {
+        matches!(
+            self.declarations.get(&capability),
+            Some(ChannelCapabilitySupportV2::Supported)
+        )
+    }
+
+    /// Validates that every v2 feature is truthfully declared and all bounds are operative.
+    ///
+    /// # Errors
+    ///
+    /// Returns a malformed-contract error for an incompatible version, missing declaration,
+    /// blank limitation, or disabled resource bound.
+    pub fn validate(&self) -> Result<(), ChannelAdapterErrorV2> {
+        if !self.contract.is_compatible_with(CHANNEL_CONTRACT_V2)
+            || self.max_event_bytes == 0
+            || self.max_attachment_bytes == 0
+            || self.max_attachments == 0
+            || self.max_rich_content_bytes == 0
+            || self.requests_per_minute == Some(0)
+            || ChannelCapabilityV2::ALL
+                .iter()
+                .any(|capability| !self.declarations.contains_key(capability))
+            || self.declarations.values().any(|support| {
+                matches!(
+                    support,
+                    ChannelCapabilitySupportV2::Unsupported { safe_reason }
+                        if safe_reason.trim().is_empty()
+                )
+            })
+        {
+            return Err(ChannelAdapterErrorV2::malformed(
+                "channel capability declaration is incomplete or invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuses an operation unless the adapter explicitly declared support.
+    ///
+    /// # Errors
+    ///
+    /// Returns an unsupported-feature error for a missing or unsupported declaration.
+    pub fn require(&self, capability: ChannelCapabilityV2) -> Result<(), ChannelAdapterErrorV2> {
+        match self.declarations.get(&capability) {
+            Some(ChannelCapabilitySupportV2::Supported) => Ok(()),
+            Some(ChannelCapabilitySupportV2::Unsupported { safe_reason }) => {
+                Err(ChannelAdapterErrorV2::unsupported(safe_reason))
+            }
+            None => Err(ChannelAdapterErrorV2::unsupported(
+                "channel capability was not declared",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelConnectionHealthV2 {
+    Disconnected,
+    Connected,
+    RateLimited,
+    Revoked,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ChannelAccountSetupV2 {
+    pub account_id: String,
+    pub required_credential_names: BTreeSet<String>,
+    pub required_scopes: BTreeSet<String>,
+    pub webhook_configured: bool,
+    pub socket_or_polling_configured: bool,
+    pub connection_health: ChannelConnectionHealthV2,
+    pub reconnect_cursor_present: bool,
+    pub safe_test_supported: bool,
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl ChannelAccountSetupV2 {
+    /// Ensures setup diagnostics contain stable names and never pretend an ingress path exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a malformed-contract error for blank account, credential, or scope identifiers,
+    /// or when neither webhook nor socket/polling ingress is configured.
+    pub fn validate(&self) -> Result<(), ChannelAdapterErrorV2> {
+        if self.account_id.trim().is_empty()
+            || self
+                .required_credential_names
+                .iter()
+                .any(|name| name.trim().is_empty())
+            || self
+                .required_scopes
+                .iter()
+                .any(|scope| scope.trim().is_empty())
+            || (!self.webhook_configured && !self.socket_or_polling_configured)
+        {
+            return Err(ChannelAdapterErrorV2::malformed(
+                "channel account setup diagnostics are invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelAdapterErrorKindV2 {
+    Authentication,
+    Permission,
+    MalformedEvent,
+    RateLimit,
+    TransientNetwork,
+    PermanentDestination,
+    UnsupportedFeature,
+    UncertainAcknowledgement,
+    StaleCursor,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelAdapterErrorV2 {
+    pub kind: ChannelAdapterErrorKindV2,
+    pub safe_message: String,
+    pub retry_after_ms: Option<u64>,
+}
+
+impl ChannelAdapterErrorV2 {
+    pub fn malformed(message: impl Into<String>) -> Self {
+        Self {
+            kind: ChannelAdapterErrorKindV2::MalformedEvent,
+            safe_message: message.into(),
+            retry_after_ms: None,
+        }
+    }
+
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self {
+            kind: ChannelAdapterErrorKindV2::UnsupportedFeature,
+            safe_message: message.into(),
+            retry_after_ms: None,
+        }
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self.kind,
+            ChannelAdapterErrorKindV2::RateLimit
+                | ChannelAdapterErrorKindV2::TransientNetwork
+                | ChannelAdapterErrorKindV2::UncertainAcknowledgement
+        )
+    }
+}
+
+impl From<AdapterFailure> for ChannelAdapterErrorV2 {
+    fn from(failure: AdapterFailure) -> Self {
+        let kind = match failure.class {
+            RetryClass::Retryable | RetryClass::Reconnect => {
+                ChannelAdapterErrorKindV2::TransientNetwork
+            }
+            RetryClass::RateLimited => ChannelAdapterErrorKindV2::RateLimit,
+            RetryClass::Permanent => ChannelAdapterErrorKindV2::PermanentDestination,
+        };
+        Self {
+            kind,
+            safe_message: failure.safe_message,
+            retry_after_ms: failure.retry_after_ms,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelConversationKindV2 {
+    Direct,
+    GroupDirect,
+    Channel,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelIdentityV2 {
+    pub platform_id: String,
+    pub display_name: Option<String>,
+    pub is_bot: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelConversationV2 {
+    pub platform_id: String,
+    pub kind: ChannelConversationKindV2,
+    pub thread_id: Option<String>,
+    pub reply_to_message_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelMentionV2 {
+    pub identity: ChannelIdentityV2,
+    pub start: Option<usize>,
+    pub end: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelAttachmentKindV2 {
+    File,
+    Image,
+    Audio,
+    Voice,
+    Video,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelAttachmentV2 {
+    pub attachment: Attachment,
+    pub kind: ChannelAttachmentKindV2,
+    pub duration_ms: Option<u64>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelRichContentV2 {
+    pub kind: String,
+    pub text: String,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelMessageV2 {
+    pub message_id: String,
+    pub account_id: String,
+    pub conversation: ChannelConversationV2,
+    pub sender: ChannelIdentityV2,
+    pub text: String,
+    pub attachments: Vec<ChannelAttachmentV2>,
+    pub rich_content: Vec<ChannelRichContentV2>,
+    pub mentions: Vec<ChannelMentionV2>,
+    pub occurred_at: UtcTimestamp,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelMessageEditV2 {
+    pub message_id: String,
+    pub account_id: String,
+    pub conversation: ChannelConversationV2,
+    pub editor: ChannelIdentityV2,
+    pub text: String,
+    pub occurred_at: UtcTimestamp,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelMessageDeleteV2 {
+    pub message_id: String,
+    pub account_id: String,
+    pub conversation: ChannelConversationV2,
+    pub actor: Option<ChannelIdentityV2>,
+    pub occurred_at: UtcTimestamp,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelReactionActionV2 {
+    Added,
+    Removed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelReactionV2 {
+    pub message_id: String,
+    pub account_id: String,
+    pub conversation: ChannelConversationV2,
+    pub actor: ChannelIdentityV2,
+    pub reaction: String,
+    pub action: ChannelReactionActionV2,
+    pub occurred_at: UtcTimestamp,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelCommandV2 {
+    pub command_id: String,
+    pub account_id: String,
+    pub conversation: ChannelConversationV2,
+    pub sender: ChannelIdentityV2,
+    pub name: String,
+    pub arguments: String,
+    pub occurred_at: UtcTimestamp,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelReceiptStateV2 {
+    Accepted,
+    Delivered,
+    Read,
+    Failed,
+    Cancelled,
+    Uncertain,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "event", content = "payload")]
+pub enum ChannelEventKindV2 {
+    MessageCreated(ChannelMessageV2),
+    MessageEdited(ChannelMessageEditV2),
+    MessageDeleted(ChannelMessageDeleteV2),
+    Reaction(ChannelReactionV2),
+    Command(ChannelCommandV2),
+    Typing {
+        account_id: String,
+        conversation: ChannelConversationV2,
+        actor: ChannelIdentityV2,
+    },
+    Receipt {
+        account_id: String,
+        conversation: ChannelConversationV2,
+        platform_message_id: String,
+        state: ChannelReceiptStateV2,
+    },
+    RateLimited {
+        retry_after_ms: u64,
+    },
+    ReconnectRequired {
+        safe_reason: String,
+    },
+    CancellationRequested {
+        cancellation_id: String,
+    },
+}
+
+impl ChannelEventKindV2 {
+    pub const fn required_capability(&self) -> ChannelCapabilityV2 {
+        match self {
+            Self::MessageCreated(_) => ChannelCapabilityV2::InboundMessages,
+            Self::MessageEdited(_) => ChannelCapabilityV2::MessageEdits,
+            Self::MessageDeleted(_) => ChannelCapabilityV2::MessageDeletion,
+            Self::Reaction(_) => ChannelCapabilityV2::Reactions,
+            Self::Command(_) => ChannelCapabilityV2::Commands,
+            Self::Typing { .. } => ChannelCapabilityV2::Typing,
+            Self::Receipt { .. } => ChannelCapabilityV2::DeliveryReceipts,
+            Self::RateLimited { .. } => ChannelCapabilityV2::RateLimits,
+            Self::ReconnectRequired { .. } => ChannelCapabilityV2::Reconnect,
+            Self::CancellationRequested { .. } => ChannelCapabilityV2::Cancellation,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelEventV2 {
+    pub contract: ChannelContractVersion,
+    pub event_id: String,
+    pub delivery_attempt: u32,
+    pub event: ChannelEventKindV2,
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl ChannelEventV2 {
+    /// Checks version, identity, delivery attempt, and feature declaration before admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns malformed or unsupported-feature errors without dispatching the event.
+    pub fn validate(
+        &self,
+        capabilities: &ChannelCapabilitiesV2,
+    ) -> Result<(), ChannelAdapterErrorV2> {
+        capabilities.validate()?;
+        if !self.contract.is_compatible_with(CHANNEL_CONTRACT_V2)
+            || self.event_id.trim().is_empty()
+            || self.delivery_attempt == 0
+        {
+            return Err(ChannelAdapterErrorV2::malformed(
+                "channel event envelope is malformed",
+            ));
+        }
+        capabilities.require(self.event.required_capability())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelOutboundMessageV2 {
+    pub route: ReplyRoute,
+    pub idempotency_key: String,
+    pub text: String,
+    pub artifacts: Vec<ArtifactId>,
+    pub rich_content: Vec<ChannelRichContentV2>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "operation", content = "payload")]
+pub enum ChannelOperationV2 {
+    SendMessage(ChannelOutboundMessageV2),
+    EditMessage {
+        route: ReplyRoute,
+        platform_message_id: String,
+        text: String,
+        rich_content: Vec<ChannelRichContentV2>,
+    },
+    DeleteMessage {
+        route: ReplyRoute,
+        platform_message_id: String,
+    },
+    AddReaction {
+        route: ReplyRoute,
+        platform_message_id: String,
+        reaction: String,
+    },
+    RemoveReaction {
+        route: ReplyRoute,
+        platform_message_id: String,
+        reaction: String,
+    },
+    SetTyping {
+        route: ReplyRoute,
+        active: bool,
+    },
+    Cancel {
+        cancellation_id: String,
+    },
+}
+
+impl ChannelOperationV2 {
+    pub const fn required_capability(&self) -> ChannelCapabilityV2 {
+        match self {
+            Self::SendMessage(_) => ChannelCapabilityV2::OutboundMessages,
+            Self::EditMessage { .. } => ChannelCapabilityV2::MessageEdits,
+            Self::DeleteMessage { .. } => ChannelCapabilityV2::MessageDeletion,
+            Self::AddReaction { .. } | Self::RemoveReaction { .. } => {
+                ChannelCapabilityV2::Reactions
+            }
+            Self::SetTyping { .. } => ChannelCapabilityV2::Typing,
+            Self::Cancel { .. } => ChannelCapabilityV2::Cancellation,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelOperationReceiptV2 {
+    pub operation_id: String,
+    pub platform_message_id: Option<String>,
+    pub accepted_at: UtcTimestamp,
+    pub state: ChannelReceiptStateV2,
+    pub duplicate_possible: bool,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReconnectCursorV2 {
+    pub value: String,
+    pub observed_at: UtcTimestamp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RawWebhookRequestV2<'a> {
+    pub timestamp_seconds: i64,
+    pub signature: &'a str,
+    pub body: &'a [u8],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedWebhookRequestV2<'a> {
+    body: &'a [u8],
+}
+
+impl<'a> VerifiedWebhookRequestV2<'a> {
+    /// Verifies timestamp freshness and signature against the raw body before parsing is possible.
+    ///
+    /// # Errors
+    ///
+    /// Returns authentication for a stale timestamp, unsupported signature version, or mismatch.
+    pub fn verify(
+        request: RawWebhookRequestV2<'a>,
+        now_seconds: i64,
+        max_clock_skew_seconds: i64,
+        verifier: impl FnOnce(i64, &[u8], &str) -> bool,
+    ) -> Result<Self, ChannelAdapterErrorV2> {
+        if max_clock_skew_seconds <= 0
+            || now_seconds.abs_diff(request.timestamp_seconds)
+                > u64::try_from(max_clock_skew_seconds).unwrap_or(0)
+            || !request.signature.starts_with("v0=")
+            || !verifier(request.timestamp_seconds, request.body, request.signature)
+        {
+            return Err(ChannelAdapterErrorV2 {
+                kind: ChannelAdapterErrorKindV2::Authentication,
+                safe_message: "channel webhook signature verification failed".to_owned(),
+                retry_after_ms: None,
+            });
+        }
+        Ok(Self { body: request.body })
+    }
+
+    pub const fn body(&self) -> &[u8] {
+        self.body
+    }
+}
+
+pub struct ChannelConformanceV2;
+
+impl ChannelConformanceV2 {
+    /// Applies the common contract checks to a normalized event.
+    ///
+    /// # Errors
+    ///
+    /// Returns malformed or unsupported-feature errors for non-conforming events.
+    pub fn admit_event(
+        capabilities: &ChannelCapabilitiesV2,
+        event: &ChannelEventV2,
+    ) -> Result<(), ChannelAdapterErrorV2> {
+        event.validate(capabilities)
+    }
+
+    /// Rejects absent, blank, or stale reconnect cursors.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stale-cursor error when durable reconnect cannot safely continue.
+    pub fn admit_cursor(
+        cursor: &ReconnectCursorV2,
+        now: UtcTimestamp,
+        max_age_ms: u64,
+    ) -> Result<(), ChannelAdapterErrorV2> {
+        let age = now.unix_millis().abs_diff(cursor.observed_at.unix_millis());
+        if cursor.value.trim().is_empty() || max_age_ms == 0 || age > max_age_ms {
+            return Err(ChannelAdapterErrorV2 {
+                kind: ChannelAdapterErrorKindV2::StaleCursor,
+                safe_message: "channel reconnect cursor is stale".to_owned(),
+                retry_after_ms: None,
+            });
+        }
+        Ok(())
+    }
+
+    /// Checks that classified errors are safe and internally consistent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a malformed error when a safe message is absent or retry metadata is invalid.
+    pub fn admit_error(error: &ChannelAdapterErrorV2) -> Result<(), ChannelAdapterErrorV2> {
+        if error.safe_message.trim().is_empty()
+            || (error.retry_after_ms.is_some()
+                && error.kind != ChannelAdapterErrorKindV2::RateLimit)
+            || (error.kind == ChannelAdapterErrorKindV2::RateLimit
+                && error.retry_after_ms == Some(0))
+        {
+            return Err(ChannelAdapterErrorV2::malformed(
+                "channel adapter error classification is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub trait ChannelAdapterV2 {
+    fn capabilities_v2(&self) -> ChannelCapabilitiesV2;
+
+    /// Receives one verified and normalized v2 channel event.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified adapter error without invoking a model or tool.
+    fn receive_v2(&mut self) -> Result<ChannelEventV2, ChannelAdapterErrorV2>;
+
+    /// Executes one capability-checked outbox operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified adapter error, including uncertain acknowledgement.
+    fn execute_v2(
+        &mut self,
+        operation: &ChannelOperationV2,
+    ) -> Result<ChannelOperationReceiptV2, ChannelAdapterErrorV2>;
+
+    /// Reconnects using adapter-owned durable state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified connection or stale-cursor error.
+    fn reconnect_v2(&mut self) -> Result<(), ChannelAdapterErrorV2>;
+
+    fn reconnect_cursor_v2(&self) -> Option<ReconnectCursorV2>;
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GatewayLimits {
     pub global_concurrency: usize,
@@ -759,5 +1470,161 @@ mod tests {
             CommandResult::Accepted { .. }
         ));
         server_thread.join().expect("server completes");
+    }
+
+    fn slack_capabilities() -> ChannelCapabilitiesV2 {
+        let declarations = ChannelCapabilityV2::ALL
+            .into_iter()
+            .map(|capability| {
+                let support = if matches!(
+                    capability,
+                    ChannelCapabilityV2::Typing | ChannelCapabilityV2::ReadReceipts
+                ) {
+                    ChannelCapabilitySupportV2::Unsupported {
+                        safe_reason: "Slack does not expose this feature to bot applications"
+                            .to_owned(),
+                    }
+                } else {
+                    ChannelCapabilitySupportV2::Supported
+                };
+                (capability, support)
+            })
+            .collect();
+        ChannelCapabilitiesV2 {
+            contract: CHANNEL_CONTRACT_V2,
+            declarations,
+            max_event_bytes: 1_024,
+            max_attachment_bytes: 1_024,
+            max_attachments: 4,
+            max_rich_content_bytes: 1_024,
+            requests_per_minute: Some(50),
+        }
+    }
+
+    #[test]
+    fn slack_v2_conformance_requires_complete_truthful_capability_declarations() {
+        assert_eq!(
+            negotiate_channel_contract_v2(&[
+                ChannelContractVersion::new(1, 4),
+                ChannelContractVersion::new(2, 1),
+            ])
+            .expect("compatible v2 peer"),
+            CHANNEL_CONTRACT_V2
+        );
+        assert_eq!(
+            negotiate_channel_contract_v2(&[ChannelContractVersion::new(1, 9)])
+                .expect_err("no silent v1 downgrade")
+                .kind,
+            ChannelAdapterErrorKindV2::UnsupportedFeature
+        );
+        let capabilities = slack_capabilities();
+        capabilities.validate().expect("complete declaration");
+        let setup = ChannelAccountSetupV2 {
+            account_id: "T123".to_owned(),
+            required_credential_names: BTreeSet::from(["bot_token".to_owned()]),
+            required_scopes: BTreeSet::from(["chat:write".to_owned()]),
+            webhook_configured: true,
+            socket_or_polling_configured: false,
+            connection_health: ChannelConnectionHealthV2::Disconnected,
+            reconnect_cursor_present: false,
+            safe_test_supported: true,
+            metadata: BTreeMap::new(),
+        };
+        setup.validate().expect("truthful account setup");
+        let mut unavailable = setup;
+        unavailable.webhook_configured = false;
+        assert_eq!(
+            unavailable
+                .validate()
+                .expect_err("account without ingress is invalid")
+                .kind,
+            ChannelAdapterErrorKindV2::MalformedEvent
+        );
+        assert!(capabilities.supports(ChannelCapabilityV2::Threads));
+        assert_eq!(
+            capabilities
+                .require(ChannelCapabilityV2::Typing)
+                .expect_err("typing must remain unsupported")
+                .kind,
+            ChannelAdapterErrorKindV2::UnsupportedFeature
+        );
+
+        let mut incomplete = capabilities;
+        incomplete
+            .declarations
+            .remove(&ChannelCapabilityV2::MessageDeletion);
+        assert_eq!(
+            incomplete
+                .validate()
+                .expect_err("undeclared behavior denied")
+                .kind,
+            ChannelAdapterErrorKindV2::MalformedEvent
+        );
+    }
+
+    #[test]
+    fn slack_v2_webhook_must_be_verified_before_body_access() {
+        let body = br#"{"type":"event_callback"}"#;
+        let request = RawWebhookRequestV2 {
+            timestamp_seconds: 100,
+            signature: "v0=trusted",
+            body,
+        };
+        let verified =
+            VerifiedWebhookRequestV2::verify(request, 110, 300, |timestamp, raw, sig| {
+                timestamp == 100 && raw == body && sig == "v0=trusted"
+            })
+            .expect("verified raw body");
+        assert_eq!(verified.body(), body);
+
+        let stale = RawWebhookRequestV2 {
+            timestamp_seconds: 100,
+            signature: "v0=trusted",
+            body,
+        };
+        let mut verifier_called = false;
+        let error = VerifiedWebhookRequestV2::verify(stale, 1_000, 300, |_, _, _| {
+            verifier_called = true;
+            true
+        })
+        .expect_err("stale request denied before verification");
+        assert_eq!(error.kind, ChannelAdapterErrorKindV2::Authentication);
+        assert!(!verifier_called);
+    }
+
+    #[test]
+    fn slack_v2_conformance_covers_events_errors_and_stale_reconnect_cursors() {
+        let capabilities = slack_capabilities();
+        let event = ChannelEventV2 {
+            contract: CHANNEL_CONTRACT_V2,
+            event_id: "Ev01".to_owned(),
+            delivery_attempt: 1,
+            event: ChannelEventKindV2::RateLimited {
+                retry_after_ms: 1_000,
+            },
+            metadata: BTreeMap::new(),
+        };
+        ChannelConformanceV2::admit_event(&capabilities, &event).expect("declared event");
+        ChannelConformanceV2::admit_error(&ChannelAdapterErrorV2 {
+            kind: ChannelAdapterErrorKindV2::RateLimit,
+            safe_message: "Slack rate limit reached".to_owned(),
+            retry_after_ms: Some(1_000),
+        })
+        .expect("classified rate limit");
+
+        let stale = ReconnectCursorV2 {
+            value: "Ev01".to_owned(),
+            observed_at: UtcTimestamp::from_unix_millis(1_000),
+        };
+        assert_eq!(
+            ChannelConformanceV2::admit_cursor(
+                &stale,
+                UtcTimestamp::from_unix_millis(11_001),
+                10_000,
+            )
+            .expect_err("stale cursor denied")
+            .kind,
+            ChannelAdapterErrorKindV2::StaleCursor
+        );
     }
 }

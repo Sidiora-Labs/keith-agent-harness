@@ -29,6 +29,7 @@ const REQUIRED_ATTACKS: &[&str] = &[
     "export_disclosure",
     "forged_route",
     "kernel_isolation",
+    "injection",
     "log_disclosure",
     "malicious_markdown",
     "malicious_media",
@@ -42,6 +43,7 @@ const REQUIRED_ATTACKS: &[&str] = &[
     "path_traversal",
     "payload_bound",
     "plugin_isolation",
+    "plugin_escape",
     "protected_path",
     "rate_limit",
     "real_process_boundary",
@@ -71,11 +73,81 @@ const REQUIRED_ATTACKS: &[&str] = &[
     "self_evolution_toolchain_override",
     "self_evolution_unsigned_worker",
     "self_evolution_workspace_manifest",
+    "durable_boundary_crash",
+    "evaluator_tampering",
+    "oauth_substitution",
+    "protocol_confusion",
+    "recording_leakage",
     "ssrf",
     "stale_lease",
+    "stale_input",
+    "stream_hijack",
     "symlink_race",
     "terminal_escape",
     "unauthenticated_access",
+    "webhook_forgery",
+];
+
+const KEITH_EVERYWHERE_SURFACES: &[&str] = &[
+    "channel",
+    "acp",
+    "plugin",
+    "composio",
+    "computer",
+    "teaching",
+    "meta_harness",
+    "credentials",
+    "profiles",
+    "approvals",
+    "data_control",
+];
+
+const KEITH_EVERYWHERE_ATTACKS: &[&str] = &[
+    "injection",
+    "ssrf",
+    "webhook_forgery",
+    "protocol_confusion",
+    "plugin_escape",
+    "oauth_substitution",
+    "stream_hijack",
+    "stale_input",
+    "recording_leakage",
+    "evaluator_tampering",
+    "cross_profile",
+    "durable_boundary_crash",
+];
+
+const PRIVILEGED_TRANSITIONS: &[&str] = &[
+    "self_evolution",
+    "plugin_install",
+    "account_connection",
+    "grant_widening",
+    "computer_control",
+    "action_approval",
+    "credential_access",
+    "profile_selection",
+];
+
+const DATA_CONTROL_CLASSES: &[&str] = &[
+    "channel_accounts",
+    "channel_events",
+    "acp_metadata",
+    "plugins",
+    "connected_accounts",
+    "computer_state",
+    "recordings",
+    "recipes",
+    "traces",
+    "candidates",
+    "derived_indexes",
+];
+
+const FORBIDDEN_AUDIT_FIELDS: &[&str] = &[
+    "raw_credentials",
+    "secrets",
+    "full_private_content",
+    "reusable_stream_urls",
+    "private_reasoning",
 ];
 
 const PACKAGED_BINARIES: &[&str] = &[
@@ -92,7 +164,12 @@ const PACKAGED_BINARIES: &[&str] = &[
 ];
 
 const RELEASE_BLOCKING_CLASSES: &[&str] = &[
+    "authority_widening",
+    "credential_leak",
     "credential_exfiltration",
+    "cross_profile_access",
+    "data_loss",
+    "fabricated_success",
     "self_evolution_candidate_tamper",
     "self_evolution_credential_access",
     "self_evolution_filesystem_escape",
@@ -100,6 +177,7 @@ const RELEASE_BLOCKING_CLASSES: &[&str] = &[
     "self_evolution_process_escape",
     "self_evolution_protected_path",
     "self_evolution_unsigned_worker",
+    "unrecoverable_state",
     "unreversible_state",
 ];
 
@@ -364,7 +442,179 @@ const PROBES: &[Probe] = &[
         test: "unsigned_wrong_signer_and_tampered_worker_images_are_rejected_at_decode",
         attacks: &["self_evolution_unsigned_worker"],
     },
+    Probe {
+        package: "keith-channel-adapters",
+        test: "slack_signed_webhook_uses_official_hmac_vector_and_rejects_before_parse",
+        attacks: &["webhook_forgery", "injection"],
+    },
+    Probe {
+        package: "keith-agent-acp",
+        test: "real_process_refuses_unsupported_protocol_versions",
+        attacks: &["protocol_confusion"],
+    },
+    Probe {
+        package: "keith-agent-acp",
+        test: "managed_http_sse_authenticates_replays_and_closes_a_real_connection",
+        attacks: &[],
+    },
+    Probe {
+        package: "keith-plugin-host",
+        test: "abi_ambient_wasi_import_is_rejected_instead_of_inherited",
+        attacks: &["plugin_escape"],
+    },
+    Probe {
+        package: "keith-composio",
+        test: "tests::durable_state_refuses_profile_or_provider_identity_substitution",
+        attacks: &["oauth_substitution", "cross_profile"],
+    },
+    Probe {
+        package: "keith-composio",
+        test: "control_plane_and_mcp_endpoint_policy_blocks_credential_ssrf",
+        attacks: &["ssrf"],
+    },
+    Probe {
+        package: "keith-cua-runner",
+        test: "real_runner_process_enforces_stream_and_exclusive_control_across_restart",
+        attacks: &["stream_hijack"],
+    },
+    Probe {
+        package: "keith-cua",
+        test: "controller::tests::stale_coordinate_is_refused_and_exact_semantic_action_is_audited",
+        attacks: &["stale_input"],
+    },
+    Probe {
+        package: "keith-task-recipe",
+        test: "synchronized_capture_substitutes_credentials_and_never_serializes_raw_secrets",
+        attacks: &["recording_leakage"],
+    },
+    Probe {
+        package: "keith-meta-harness",
+        test: "meta_harness_evaluator_leakage_injection_crash_and_protected_surface_attacks_fail_closed",
+        attacks: &["evaluator_tampering", "injection"],
+    },
+    Probe {
+        package: "keith-agentd",
+        test: "daemon_process_integration_lifecycle_survives_crash_and_quarantines_corrupt_service",
+        attacks: &["durable_boundary_crash", "cross_profile"],
+    },
+    Probe {
+        package: "keith-platform-contracts",
+        test: "tests::consequential_action_requires_exact_unexpired_approval",
+        attacks: &[],
+    },
+    Probe {
+        package: "keith-acp",
+        test: "permission::tests::client_response_cannot_substitute_target_or_unoffered_option",
+        attacks: &[],
+    },
+    Probe {
+        package: "keith-plugin-host",
+        test: "authority_lifecycle_provenance_grants_updates_and_uninstall_are_durable",
+        attacks: &[],
+    },
+    Probe {
+        package: "keith-plugin-host",
+        test: "authority_crash_loop_and_corruption_enter_safe_mode_without_blocking_uninstall",
+        attacks: &[],
+    },
+    Probe {
+        package: "keith-composio",
+        test: "tests::real_http_journey_proves_sessions_accounts_policy_mcp_recovery_and_isolation",
+        attacks: &[],
+    },
+    Probe {
+        package: "keith-cua-runner",
+        test: "named_credential_is_origin_scoped_and_only_fills_a_protected_field",
+        attacks: &[],
+    },
+    Probe {
+        package: "keith-cua-runner",
+        test: "real_runner_process_crash_reconciles_without_cross_profile_access",
+        attacks: &[],
+    },
+    Probe {
+        package: "keith-task-recipe",
+        test: "filesystem_store_exports_sanitized_data_and_cascades_complete_deletion",
+        attacks: &[],
+    },
+    Probe {
+        package: "keith-meta-harness",
+        test: "meta_harness_real_failure_diagnosis_candidates_held_out_pareto_and_history",
+        attacks: &[],
+    },
+    Probe {
+        package: "keith-state-store",
+        test: "tests::external_service_collections_round_trip_restart_and_exact_deletion",
+        attacks: &[],
+    },
 ];
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(deny_unknown_fields)]
+struct ProbeReference {
+    package: String,
+    test: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeithEverywhereSecurityManifest {
+    schema_version: u16,
+    surfaces: Vec<String>,
+    privileged_transitions: Vec<String>,
+    attacks: Vec<AttackCoverage>,
+    authority_boundaries: Vec<AuthorityBoundaryCoverage>,
+    durable_boundaries: Vec<DurableBoundaryCoverage>,
+    data_control: Vec<DataControlCoverage>,
+    forbidden_audit_fields: Vec<String>,
+    audit_records: Vec<SafeAuditRecord>,
+    unavailable_credentialed_services: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttackCoverage {
+    class: String,
+    probes: Vec<ProbeReference>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorityBoundaryCoverage {
+    source_surface: String,
+    denies_all_privileged_transitions: bool,
+    probes: Vec<ProbeReference>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableBoundaryCoverage {
+    surface: String,
+    recovery: Vec<String>,
+    probes: Vec<ProbeReference>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DataControlCoverage {
+    class: String,
+    exported: bool,
+    deleted: bool,
+    remaining_records: u64,
+    remaining_objects: u64,
+    probe: ProbeReference,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SafeAuditRecord {
+    correlation_id: String,
+    profile_id: String,
+    surface: String,
+    action: String,
+    outcome: String,
+    safe_summary: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -401,6 +651,11 @@ enum FindingStatus {
 
 pub fn run(root: &Path) -> Result<(), String> {
     validate_corpus()?;
+    validate_keith_everywhere_manifest(
+        &fs::read(root.join("tests/security/keith_everywhere.json")).map_err(|error| {
+            format!("Keith Everywhere security manifest is unavailable: {error}")
+        })?,
+    )?;
     validate_findings(
         &fs::read(root.join("security/findings.json"))
             .map_err(|error| format!("security finding ledger is unavailable: {error}"))?,
@@ -425,7 +680,14 @@ pub fn run(root: &Path) -> Result<(), String> {
         run_command(
             root,
             "cargo",
-            &["test", "-p", package, "--release", "--locked"],
+            &[
+                "test",
+                "-p",
+                package,
+                "--release",
+                "--locked",
+                "--all-features",
+            ],
         )?;
     }
     println!(
@@ -434,6 +696,224 @@ pub fn run(root: &Path) -> Result<(), String> {
         PACKAGED_BINARIES.len(),
         PROBES.len()
     );
+    Ok(())
+}
+
+fn validate_keith_everywhere_manifest(bytes: &[u8]) -> Result<(), String> {
+    let manifest: KeithEverywhereSecurityManifest = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Keith Everywhere security manifest is invalid: {error}"))?;
+    if manifest.schema_version != 1 {
+        return Err(format!(
+            "Keith Everywhere security schema {} is unsupported",
+            manifest.schema_version
+        ));
+    }
+    exact_strings(
+        "security surfaces",
+        &manifest.surfaces,
+        KEITH_EVERYWHERE_SURFACES,
+    )?;
+    exact_strings(
+        "privileged transitions",
+        &manifest.privileged_transitions,
+        PRIVILEGED_TRANSITIONS,
+    )?;
+
+    let attacks = manifest
+        .attacks
+        .iter()
+        .map(|coverage| coverage.class.clone())
+        .collect::<Vec<_>>();
+    exact_strings(
+        "Keith Everywhere attacks",
+        &attacks,
+        KEITH_EVERYWHERE_ATTACKS,
+    )?;
+    for coverage in &manifest.attacks {
+        validate_probe_references(&coverage.probes, &format!("attack {}", coverage.class))?;
+    }
+
+    let authority_surfaces = manifest
+        .authority_boundaries
+        .iter()
+        .map(|coverage| coverage.source_surface.clone())
+        .collect::<Vec<_>>();
+    exact_strings(
+        "authority source surfaces",
+        &authority_surfaces,
+        KEITH_EVERYWHERE_SURFACES,
+    )?;
+    for coverage in &manifest.authority_boundaries {
+        if !coverage.denies_all_privileged_transitions {
+            return Err(format!(
+                "{} does not deny every privileged cross-surface transition",
+                coverage.source_surface
+            ));
+        }
+        validate_probe_references(
+            &coverage.probes,
+            &format!("{} authority boundary", coverage.source_surface),
+        )?;
+    }
+
+    let durable_surfaces = manifest
+        .durable_boundaries
+        .iter()
+        .map(|coverage| coverage.surface.clone())
+        .collect::<Vec<_>>();
+    exact_strings(
+        "durable boundary surfaces",
+        &durable_surfaces,
+        KEITH_EVERYWHERE_SURFACES,
+    )?;
+    let required_recovery = BTreeSet::from([
+        "safe_reconciliation",
+        "cancellation",
+        "quarantine",
+        "reversal",
+        "deletion",
+        "daemon_availability",
+    ]);
+    let mut observed_recovery = BTreeSet::new();
+    for coverage in &manifest.durable_boundaries {
+        let recovery = coverage
+            .recovery
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if !recovery.contains("safe_reconciliation")
+            || !recovery.contains("daemon_availability")
+            || !recovery.is_subset(&required_recovery)
+        {
+            return Err(format!(
+                "{} durable boundary lacks safe reconciliation or daemon availability",
+                coverage.surface
+            ));
+        }
+        observed_recovery.extend(recovery);
+        validate_probe_references(
+            &coverage.probes,
+            &format!("{} durable boundary", coverage.surface),
+        )?;
+    }
+    if observed_recovery != required_recovery {
+        return Err("durable boundary suite does not cover every required recovery outcome".into());
+    }
+
+    let data_classes = manifest
+        .data_control
+        .iter()
+        .map(|coverage| coverage.class.clone())
+        .collect::<Vec<_>>();
+    exact_strings("data-control classes", &data_classes, DATA_CONTROL_CLASSES)?;
+    for coverage in &manifest.data_control {
+        if !coverage.exported
+            || !coverage.deleted
+            || coverage.remaining_records != 0
+            || coverage.remaining_objects != 0
+        {
+            return Err(format!(
+                "{} lacks complete export, deletion, or exact zero-remnant proof",
+                coverage.class
+            ));
+        }
+        validate_probe_references(
+            std::slice::from_ref(&coverage.probe),
+            &format!("{} data control", coverage.class),
+        )?;
+    }
+
+    exact_strings(
+        "forbidden audit fields",
+        &manifest.forbidden_audit_fields,
+        FORBIDDEN_AUDIT_FIELDS,
+    )?;
+    validate_audit_records(&manifest.audit_records)?;
+    if manifest
+        .unavailable_credentialed_services
+        .iter()
+        .any(|service| service.trim().is_empty())
+    {
+        return Err("credential availability contains an empty service name".into());
+    }
+    Ok(())
+}
+
+fn exact_strings(label: &str, actual: &[String], expected: &[&str]) -> Result<(), String> {
+    let actual_len = actual.len();
+    let actual = actual.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+    if actual == expected && actual_len == expected.len() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} mismatch: expected {expected:?}, got {actual:?}"
+        ))
+    }
+}
+
+fn validate_probe_references(probes: &[ProbeReference], label: &str) -> Result<(), String> {
+    if probes.is_empty() {
+        return Err(format!("{label} has no executable security probe"));
+    }
+    let known = PROBES
+        .iter()
+        .map(|probe| (probe.package, probe.test))
+        .collect::<BTreeSet<_>>();
+    for probe in probes {
+        if !known.contains(&(probe.package.as_str(), probe.test.as_str())) {
+            return Err(format!(
+                "{label} references unknown probe {}::{}",
+                probe.package, probe.test
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_audit_records(records: &[SafeAuditRecord]) -> Result<(), String> {
+    if records.len() < 3 {
+        return Err("cross-surface audit evidence requires at least three records".into());
+    }
+    let correlation_ids = records
+        .iter()
+        .map(|record| record.correlation_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let profiles = records
+        .iter()
+        .map(|record| record.profile_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let surfaces = records
+        .iter()
+        .map(|record| record.surface.as_str())
+        .collect::<BTreeSet<_>>();
+    if correlation_ids.len() != 1 || profiles.len() != 1 || surfaces.len() < 3 {
+        return Err(
+            "audit records must correlate at least three surfaces within one profile".into(),
+        );
+    }
+    let known_surfaces = KEITH_EVERYWHERE_SURFACES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for record in records {
+        let summary = record.safe_summary.to_ascii_lowercase();
+        if !known_surfaces.contains(record.surface.as_str())
+            || record.action.trim().is_empty()
+            || record.outcome.trim().is_empty()
+            || record.safe_summary.len() > 160
+            || summary.contains("secret")
+            || summary.contains("token")
+            || summary.contains("password")
+            || summary.contains("http://")
+            || summary.contains("https://")
+        {
+            return Err(format!(
+                "audit record for {} is unbounded or contains private material",
+                record.surface
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -500,6 +980,7 @@ fn listed_tests(root: &Path, package: &str) -> Result<BTreeSet<String>, String> 
             package,
             "--release",
             "--locked",
+            "--all-features",
             "--",
             "--list",
         ])
@@ -635,5 +1116,26 @@ mod tests {
             );
             assert!(validate_findings(ledger.as_bytes()).is_err(), "{class}");
         }
+    }
+
+    #[test]
+    fn keith_everywhere_manifest_is_complete_and_tampering_fails_closed() {
+        let manifest = include_bytes!("../../../tests/security/keith_everywhere.json");
+        validate_keith_everywhere_manifest(manifest).unwrap();
+
+        let mut missing_surface: serde_json::Value = serde_json::from_slice(manifest).unwrap();
+        missing_surface["surfaces"].as_array_mut().unwrap().pop();
+        assert!(
+            validate_keith_everywhere_manifest(&serde_json::to_vec(&missing_surface).unwrap())
+                .is_err()
+        );
+
+        let mut fabricated_probe: serde_json::Value = serde_json::from_slice(manifest).unwrap();
+        fabricated_probe["attacks"][0]["probes"][0]["test"] =
+            serde_json::Value::String("fabricated_success".into());
+        assert!(
+            validate_keith_everywhere_manifest(&serde_json::to_vec(&fabricated_probe).unwrap())
+                .is_err()
+        );
     }
 }

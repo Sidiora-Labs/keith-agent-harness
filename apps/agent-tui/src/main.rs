@@ -11,12 +11,9 @@ use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event,
 use crossterm::execute;
 use keith_agent_tui::{
     Accessibility, AgentCommandDispatcher, AgentConnectionClient, AppAction, DispatchEvent, TuiApp,
-    TuiArguments, render, settled_transcript_lines,
+    TuiArguments, render,
 };
 use keith_protocol::WireMessage;
-use ratatui::text::Text;
-use ratatui::widgets::{Paragraph, Widget};
-use ratatui::{TerminalOptions, Viewport};
 use signal_hook::consts::{SIGINT, SIGTERM};
 
 enum LoopExit {
@@ -50,19 +47,14 @@ fn run() -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     let mut dispatcher = AgentCommandDispatcher::new(client, arguments.startup_timeout);
     app.connected = true;
+    app.list_profiles();
     app.list_sessions();
     if let Some(session_id) = arguments.session_id {
         app.attach(session_id);
     }
 
     loop {
-        let terminal_rows = crossterm::terminal::size()
-            .map_err(|error| error.to_string())?
-            .1;
-        let options = TerminalOptions {
-            viewport: Viewport::Inline(terminal_rows.saturating_sub(1).clamp(6, 18)),
-        };
-        let mut terminal = init_terminal(options).map_err(|error| error.to_string())?;
+        let mut terminal = init_terminal().map_err(|error| error.to_string())?;
         let result = event_loop(&mut terminal, &mut app, &mut dispatcher, &shutdown);
         let restored = restore_terminal();
         let exit = result.map_err(|error| error.to_string())?;
@@ -74,9 +66,14 @@ fn run() -> Result<(), String> {
     }
 }
 
-fn init_terminal(options: TerminalOptions) -> io::Result<ratatui::DefaultTerminal> {
-    let terminal = ratatui::try_init_with_options(options)?;
+fn init_terminal() -> io::Result<ratatui::DefaultTerminal> {
+    let mut terminal = ratatui::try_init()?;
     if let Err(error) = execute!(stdout(), EnableBracketedPaste) {
+        let _ = ratatui::try_restore();
+        return Err(error);
+    }
+    if let Err(error) = terminal.clear() {
+        let _ = execute!(stdout(), DisableBracketedPaste);
         let _ = ratatui::try_restore();
         return Err(error);
     }
@@ -95,8 +92,10 @@ fn event_loop(
     dispatcher: &mut AgentCommandDispatcher,
     shutdown: &AtomicBool,
 ) -> io::Result<LoopExit> {
+    let mut dirty = true;
     while !shutdown.load(Ordering::Acquire) && !app.quit {
         while let Some(event) = dispatcher.try_next() {
+            dirty = true;
             match event {
                 DispatchEvent::Message(message) => {
                     let message = *message;
@@ -107,7 +106,7 @@ fn event_loop(
                 }
                 DispatchEvent::CommandFailed(error) => {
                     app.command_finished();
-                    app.report_command_failure(error);
+                    app.report_command_failure(None, error);
                 }
                 DispatchEvent::Reconnecting => app.report_reconnecting(),
                 DispatchEvent::Reconnected => {
@@ -118,50 +117,40 @@ fn event_loop(
             }
         }
         while let Some(command) = app.next_command() {
+            dirty = true;
             let envelope = app.command_envelope(command);
+            let command_id = envelope.command_id.clone();
             match dispatcher.dispatch(envelope) {
-                Ok(()) => app.command_dispatched(),
-                Err(error) => app.report_command_failure(error),
+                Ok(()) => app.command_dispatched(&command_id),
+                Err(error) => app.report_command_failure(Some(&command_id), error),
             }
         }
-        promote_settled_messages(terminal, app)?;
-        terminal.draw(|frame| render(frame, app))?;
+        if dirty {
+            terminal.draw(|frame| render(frame, app))?;
+            dirty = false;
+        }
         if !event::poll(Duration::from_millis(100))? {
+            if app.turn_is_active() {
+                dirty = true;
+            }
             continue;
         }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => match app.handle_key(key) {
                 AppAction::Quit => return Ok(LoopExit::Quit),
                 AppAction::OpenExternalEditor => return Ok(LoopExit::ExternalEditor),
-                AppAction::None | AppAction::Redraw => {}
+                AppAction::Redraw => dirty = true,
+                AppAction::None => {}
             },
             Event::Paste(content) => {
                 app.handle_paste(&content);
+                dirty = true;
             }
-            Event::Resize(_, _)
-            | Event::FocusGained
-            | Event::FocusLost
-            | Event::Mouse(_)
-            | Event::Key(_) => {}
+            Event::Resize(_, _) | Event::FocusGained => dirty = true,
+            Event::FocusLost | Event::Mouse(_) | Event::Key(_) => {}
         }
     }
     Ok(LoopExit::Quit)
-}
-
-fn promote_settled_messages(
-    terminal: &mut ratatui::DefaultTerminal,
-    app: &mut TuiApp,
-) -> io::Result<()> {
-    let width = terminal.size()?.width.saturating_sub(2).max(1);
-    for message in app.pending_settled_messages() {
-        let lines = settled_transcript_lines(&message, width, app.accessibility.color_mode);
-        let height = u16::try_from(lines.len()).unwrap_or(u16::MAX).max(1);
-        terminal.insert_before(height, move |buffer| {
-            Paragraph::new(Text::from(lines)).render(buffer.area, buffer);
-        })?;
-        app.mark_message_settled(&message);
-    }
-    Ok(())
 }
 
 fn edit_composer(app: &mut TuiApp) -> Result<(), String> {

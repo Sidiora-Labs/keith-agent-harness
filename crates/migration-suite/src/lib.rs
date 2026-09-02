@@ -16,12 +16,13 @@ pub enum MigrationCase {
     LegacySessionExport,
     WorkspaceSchema,
     DerivedIndexRebuild,
+    PluginAbiV1Compatibility,
     PluginMismatch,
     PluginRollback,
 }
 
 impl MigrationCase {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::LegacyConfiguration,
         Self::ConfigurationLayering,
         Self::InvalidConfigurationFallback,
@@ -31,6 +32,7 @@ impl MigrationCase {
         Self::LegacySessionExport,
         Self::WorkspaceSchema,
         Self::DerivedIndexRebuild,
+        Self::PluginAbiV1Compatibility,
         Self::PluginMismatch,
         Self::PluginRollback,
     ];
@@ -75,8 +77,8 @@ mod tests {
     };
     use keith_plugin_host::{PluginHost, PluginHostError};
     use keith_plugin_sdk::{
-        MANIFEST_FILE, MODULE_FILE, ManifestError, PluginHook, PluginKind, PluginManifest,
-        ResourceGrants,
+        MANIFEST_FILE, MANIFEST_VERSION, MODULE_FILE, ManifestError, PluginHook, PluginKind,
+        PluginManifest, ResourceGrants,
     };
     use keith_protocol::{
         ClientHello, Feature, ProtocolError, WireFormat, WireMessage, decode_negotiated_bounded,
@@ -131,6 +133,12 @@ mod tests {
             kind: PluginKind::WasiComponent,
             hooks: BTreeSet::from([PluginHook::Activate, PluginHook::Migrate]),
             grants: ResourceGrants::default(),
+            publisher: None,
+            digest: None,
+            signature: None,
+            tools: Vec::new(),
+            commands: Vec::new(),
+            migration: None,
         };
         fs::write(
             package.join(MANIFEST_FILE),
@@ -161,6 +169,12 @@ mod tests {
             kind: PluginKind::WasiComponent,
             hooks: BTreeSet::new(),
             grants: ResourceGrants::default(),
+            publisher: None,
+            digest: None,
+            signature: None,
+            tools: Vec::new(),
+            commands: Vec::new(),
+            migration: None,
         })
         .unwrap()
     }
@@ -390,7 +404,12 @@ max_processes = 6
         matrix.record(MigrationCase::DerivedIndexRebuild);
 
         let plugin_toml = valid_plugin_toml();
-        assert!(PluginManifest::parse_bounded(&plugin_toml, plugin_toml.len()).is_ok());
+        let legacy_plugin = PluginManifest::parse_bounded(&plugin_toml, plugin_toml.len()).unwrap();
+        assert_eq!(legacy_plugin.manifest_version, 1);
+        assert!(legacy_plugin.manifest_version < MANIFEST_VERSION);
+        assert!(legacy_plugin.tools.is_empty());
+        assert!(legacy_plugin.commands.is_empty());
+        matrix.record(MigrationCase::PluginAbiV1Compatibility);
         assert_eq!(
             PluginManifest::parse_bounded(&plugin_toml, plugin_toml.len() - 1),
             Err(ManifestError::TooLarge)
