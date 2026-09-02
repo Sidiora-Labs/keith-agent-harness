@@ -1,91 +1,121 @@
-# Install and lifecycle
+# Install and run Keith
 
-Keith Agent releases are versioned directories whose signed manifest covers every executable and supporting asset. The `release-public-key.hex` file inside the release is a copy of the publisher key, not a trust root. Obtain the expected public-key value through an independent authenticated channel and require an exact match while verifying `release-manifest.sig`.
+Keith can run from Docker Compose, a source checkout, or a signed release
+archive. All three paths use the same durable daemon, profile/provider model,
+Web interface, and terminal client.
 
-For a source-built release, the build-side verifier accepts the release directory and independently obtained key:
+For a first local run, use Docker Compose. Use a source checkout when developing
+Keith. Use a signed archive when you need an immutable installation with managed
+backup, update, rollback, and uninstall behavior.
 
-```sh
-cargo xtask verify-release /absolute/path/to/release EXPECTED_PUBLIC_KEY_HEX
+## Before you start
+
+Keith needs:
+
+- a model-provider credential;
+- a directory it may use as its workspace;
+- a durable data location; and
+- a separate Web login secret.
+
+Keith can run commands, edit files, control a browser, and call configured
+services. Start with a workspace you can inspect and restore. Keep the Web/API
+listeners on loopback unless you have configured TLS and network policy as
+described in [Deployment](deployment.md).
+
+## Option 1: Docker Compose
+
+From the repository root:
+
+```bash
+cp .env.example .env
 ```
 
-An already trusted Keith installation can verify a downloaded update without a source checkout:
+Edit `.env`. At minimum, replace `KEITH_WEB_LOGIN_SECRET` and set one provider
+credential such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`OPENROUTER_API_KEY`, or `GEMINI_API_KEY`. Do not commit the populated file.
 
-```sh
-bin/agent-desktop verify-release /absolute/path/to/release EXPECTED_PUBLIC_KEY_HEX
+Then start the stack:
+
+```bash
+./keith up
+./keith logs
 ```
 
-Do not execute a newly downloaded release's own verifier as the only proof of that same release. First installation must be authenticated by the operating-system package channel, an independently obtained verifier, or the build-side command above.
+Open <http://localhost:7341> and sign in with the Web login secret. Compose
+stores durable state in the `keith-data` volume and mounts `KEITH_WORKSPACE`
+from `.env` at `/workspace` inside the container.
 
-## Install and first run
+Stop the service without deleting its volume:
 
-1. Extract the archive into a new version directory. Do not merge it over an older release.
-2. Verify the publisher key, signature, exact payload file set, file sizes, and SHA-256 digests. Verification rejects unlisted files, duplicate paths, symlinks, and unsafe paths.
-3. Run `bin/agentd --build-info` and `bin/agent-worker --build-info`; confirm the build ID, protocol version, storage schema, and enabled features match the manifest.
-4. Initialize desktop settings with `bin/agent-desktop setup STATE_ROOT DATA_ROOT http://127.0.0.1:7341`.
-5. Configure a provider with the authenticated web settings page or the environment-only CLI flow below. Credentials do not belong in shell history, the release, or the data directory.
-6. Start `agentd` first, then a TUI or `agent-web`. Keep long-running processes attached to the operating system's user-service manager so stop and restart signals are delivered cleanly.
-
-The release contains `bin/`, `web/`, `builtins/`, `providers/providers.json`, `schemas/`, `provenance/Cargo.lock`, a CycloneDX SBOM, and a license report. The signed manifest records the shared build ID and complete daemon and worker compatibility reports. User-created sessions, memory, credentials, logs, and backups are never stored inside the release directory.
-
-## Produce a release
-
-Release construction requires an explicit non-development build ID and a 32-byte Ed25519 signing seed encoded as 64 hexadecimal characters. Both values must be present before Cargo compiles the build tool so the packaged binaries and signed manifest receive the same build identity:
-
-```sh
-export KEITH_BUILD_ID='git-COMMIT_OR_RELEASE_BUILD_ID'
-export KEITH_RELEASE_SIGNING_KEY='64_HEXADECIMAL_CHARACTERS'
-cargo xtask release /absolute/path/to/new-release
-unset KEITH_RELEASE_SIGNING_KEY
+```bash
+./keith down
 ```
 
-Construction builds locked release binaries and Rust/WASM assets, assembles everything in a private sibling staging directory, signs and verifies the result, executes packaged daemon and worker build reports, and only then atomically promotes the complete directory. A failed build never promotes a partial release.
+Read [Deployment](deployment.md) before exposing the container outside the
+host or moving it to a cloud provider.
 
-## Connect a provider and use the TUI
+## Option 2: Run from source
 
-The default credential reference is `default`. Keith creates an owner-only local master key under the credential root, so desktop and headless installs use the same flow without requiring a secret-service daemon. Configure OpenAI without placing the provider key in a command argument:
+### Requirements
 
-```sh
+- Rust 1.93.0 with `rustfmt` and Clippy
+- Node.js 22.22.2
+- Corepack with pnpm 11.18.0
+- Git
+
+Check the local environment and install locked dependencies:
+
+```bash
+./keith doctor
+./keith setup
+```
+
+Choose an explicit development data root and provide one model credential:
+
+```bash
+export KEITH_DEV_DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/keith-dev"
+export KEITH_WEB_LOGIN_SECRET='replace-with-a-long-random-password'
+export OPENROUTER_API_KEY='your-provider-key'
+./keith dev
+```
+
+`./keith dev` imports recognized provider variables into Keith's encrypted
+credential store, removes them from the child-process environment, builds the
+daemon, worker, Web server, and administration CLI, and opens the local service
+at <http://127.0.0.1:7341>. It keeps Cargo output under
+`${XDG_CACHE_HOME:-/tmp}/keith-dev/target`, outside the checkout.
+
+The wrapper enables channels, ACP, plugins, connected apps, computers, and
+teaching in development. Feature enablement does not configure external
+accounts or prove their credentialed journeys.
+
+## Configure or change a provider
+
+The Web Settings page can store a provider credential after authentication.
+For a headless or release installation, use `agent-cli` and read the secret from
+an environment variable rather than a command argument:
+
+```bash
 export KEITH_DATA_ROOT=/absolute/path/to/keith-data
 export OPENAI_API_KEY='your-provider-key'
-bin/agent-cli provider set --provider openai --secret-env OPENAI_API_KEY --data-root "$KEITH_DATA_ROOT"
+
+bin/agent-cli provider set \
+  --provider openai \
+  --secret-env OPENAI_API_KEY \
+  --data-root "$KEITH_DATA_ROOT"
+
 unset OPENAI_API_KEY
 bin/agent-cli provider list --data-root "$KEITH_DATA_ROOT"
 ```
 
-Start the daemon and attach the TUI:
+The default credential reference is `default`. Provider values are encrypted;
+plaintext keys must not be placed in configuration files, shell arguments,
+logs, session data, or release directories.
 
-```sh
-bin/agentd --data-root "$KEITH_DATA_ROOT" --socket "$KEITH_DATA_ROOT/agentd.sock" --worker-executable "$PWD/bin/agent-worker" --workspace-root /absolute/path/to/workspace
-bin/agent-tui --socket "$KEITH_DATA_ROOT/agentd.sock"
-```
+Some providers require an account- or deployment-specific base URL. Pass each
+one to `agentd` explicitly:
 
-For a release managed by the desktop lifecycle, activate it with `update` and run the complete daemon plus authenticated web surface through the signed active version. Both child processes receive the same credential-key reference, and the daemon receives the explicit workspace root:
-
-```sh
-export KEITH_WEB_LOGIN_SECRET='a-long-local-login-secret'
-export KEITH_CREDENTIAL_KEY='64_HEXADECIMAL_CHARACTERS'
-bin/agent-desktop serve STATE_ROOT /absolute/path/to/workspace 127.0.0.1:7341
-```
-
-Send the desktop supervisor `SIGTERM` or `SIGINT` to stop web first and drain the daemon and workers. A managed child crash produces a bounded report beneath `STATE_ROOT/crashes` and stops the supervisor instead of silently running a partial stack.
-
-The TUI attaches to the first durable session. Open the Models view to inspect the complete Prime/Cow provider catalog. Send `/model PROVIDER` to select that provider's catalog default, or `/model PROVIDER MODEL` to choose an explicit model. The web Models and Settings selectors expose the same catalog. `bin/agent-cli provider list` prints every provider ID, transport, authentication mode, and conventional environment-variable name.
-
-The same environment-only credential command works for every provider. For example:
-
-```sh
-export DEEPSEEK_API_KEY='your-provider-key'
-bin/agent-cli provider set --provider deepseek --secret-env DEEPSEEK_API_KEY --data-root "$KEITH_DATA_ROOT"
-unset DEEPSEEK_API_KEY
-# In the TUI:
-# /model deepseek
-```
-
-OpenAI-compatible, Anthropic-compatible, Gemini, Azure OpenAI, ChatGPT Codex Responses, GitHub Copilot bearer, and Amazon Bedrock Converse transports are normalized by the runtime. Bedrock uses a scoped `AWS_BEARER_TOKEN_BEDROCK` value. ChatGPT Codex accepts its OAuth access-token JWT through the same write-only credential flow; GitHub Copilot accepts an exchanged Copilot bearer token. Those tokens are never accepted as command arguments.
-
-Account- or deployment-specific providers have no safe global endpoint. Supply each endpoint when starting `agentd`; the flag may be repeated:
-
-```sh
+```bash
 bin/agentd \
   --data-root "$KEITH_DATA_ROOT" \
   --socket "$KEITH_DATA_ROOT/agentd.sock" \
@@ -95,67 +125,214 @@ bin/agentd \
   --provider-base-url custom-openai=https://provider.example/v1
 ```
 
-Azure OpenAI uses its API key in the `api-key` header. Cloudflare AI Gateway, Cloudflare Workers AI, Google Vertex AI, and custom OpenAI-compatible deployments also require their account-specific base URL. A provider remains visible in clients before its endpoint is configured, but model selection fails explicitly instead of silently substituting another provider.
+A provider can remain visible before its credential or endpoint is ready.
+Selection then fails explicitly instead of silently substituting another
+provider. See [Providers and model routing](features/providers-and-model-routing.md)
+for the catalog, transports, model selection, fallback, and current limits.
 
-On a headless machine without a native keyring, generate and persist a 32-byte master key as a 64-character hex value in a protected service environment. Pass only its environment-variable name to every process:
+### Headless credential master key
 
-```sh
-bin/agent-cli provider set --provider openai --secret-env OPENAI_API_KEY --data-root "$KEITH_DATA_ROOT" --credential-key-env KEITH_CREDENTIAL_KEY
-bin/agentd --data-root "$KEITH_DATA_ROOT" --socket "$KEITH_DATA_ROOT/agentd.sock" --worker-executable "$PWD/bin/agent-worker" --workspace-root /absolute/path/to/workspace --credential-key-env KEITH_CREDENTIAL_KEY
+On a host where the installation cannot create or use its normal local key,
+generate a 32-byte master key as 64 hexadecimal characters and inject it from a
+protected service environment. Pass only the variable name:
+
+```bash
+export KEITH_CREDENTIAL_KEY='64_HEXADECIMAL_CHARACTERS'
+export OPENAI_API_KEY='your-provider-key'
+
+bin/agent-cli provider set \
+  --provider openai \
+  --secret-env OPENAI_API_KEY \
+  --data-root "$KEITH_DATA_ROOT" \
+  --credential-key-env KEITH_CREDENTIAL_KEY
+
+bin/agentd \
+  --data-root "$KEITH_DATA_ROOT" \
+  --socket "$KEITH_DATA_ROOT/agentd.sock" \
+  --worker-executable "$PWD/bin/agent-worker" \
+  --workspace-root /absolute/path/to/workspace \
+  --credential-key-env KEITH_CREDENTIAL_KEY
 ```
 
-Losing or changing that master key makes the encrypted provider credentials unreadable.
+Losing or changing the master key makes the encrypted provider credentials
+unreadable. Store and back it up separately from the data root.
 
-## Start the web application
+## Use the terminal interface
 
-Set a separate login secret and point the authenticated local web server at the same daemon and credential store:
+With `./keith dev` running and the same `KEITH_DEV_DATA_ROOT`, attach from a
+second terminal:
 
-```sh
-export KEITH_WEB_LOGIN_SECRET='a-long-local-login-secret'
-bin/agent-web --bind 127.0.0.1:7341 --origin http://127.0.0.1:7341 --socket "$KEITH_DATA_ROOT/agentd.sock" --asset-root "$PWD/web" --credential-root "$KEITH_DATA_ROOT/credentials" --login-secret-env KEITH_WEB_LOGIN_SECRET
+```bash
+CARGO_TARGET_DIR="${XDG_CACHE_HOME:-/tmp}/keith-dev/target" \
+CARGO_INCREMENTAL=0 \
+  cargo run --quiet -p keith-agent-tui --bin agent-tui -- \
+  --socket "$KEITH_DEV_DATA_ROOT/agentd.sock"
 ```
 
-Open `http://127.0.0.1:7341`, sign in, and use Settings to configure a provider or Models to change the active model. New chat creates a durable session in the current profile.
+For a packaged release:
 
-`agent-web` can also expose a separately authenticated OpenAI-compatible `/v1` interface for Open WebUI, assistant-ui, OpenAI SDKs, and similar applications. This remains a thin adapter over the primary native `AgentConnection` API. See [OpenAI-compatible application interface](openai-compatibility.md) for enablement, supported behavior, durable session mapping, and network-safety requirements.
+```bash
+bin/agent-tui --socket "$KEITH_DATA_ROOT/agentd.sock"
+```
 
-For trusted platform integration, `agent-web` can instead expose the separately authenticated native `/platform/v1` bridge. This is the private V1 integration path and does not route internal platform traffic through OpenAI compatibility. See [Native platform integration](platform-integration.md) for exact routes, cohort/profile ownership, configuration, and remaining beta gates.
+The TUI attaches to a durable session and uses the same profile, model, tools,
+and history as the Web interface. See [Terminal interface](features/terminal-interface.md)
+for commands, keys, pending/streaming states, reconnect, and accessibility.
 
-## Start and stop
+`Connection refused` means the socket path exists but no daemon is accepting
+connections there. Confirm `agentd` is running with the same data root, then
+remove a stale socket only after the daemon is stopped.
 
-Run `agentd --data-root DATA_ROOT --socket ENDPOINT --worker-executable RELEASE/bin/agent-worker --workspace-root WORKSPACE` as the user service. Run `agent-web` against the same endpoint. Stop the web process first and send the daemon its normal termination signal; the daemon drains and stops its workers before exiting. Abrupt process termination is recovered from durable state on the next start.
+## Run the Web server directly
+
+Start `agentd` first, then point `agent-web` at its socket and credential root:
+
+```bash
+export KEITH_WEB_LOGIN_SECRET='replace-with-a-long-random-password'
+
+bin/agent-web \
+  --bind 127.0.0.1:7341 \
+  --origin http://127.0.0.1:7341 \
+  --socket "$KEITH_DATA_ROOT/agentd.sock" \
+  --asset-root "$PWD/web" \
+  --credential-root "$KEITH_DATA_ROOT/credentials" \
+  --login-secret-env KEITH_WEB_LOGIN_SECRET
+```
+
+The OpenAI-compatible and native APIs are independently disabled unless their
+own bearer keys are configured. See the
+[OpenAI-compatible API](features/openai-compatible-api.md) and
+[native platform API](features/native-platform-api.md) guides.
+
+## Option 3: Install a signed release
+
+A release is an immutable version directory containing `bin/`, `web/`,
+`builtins/`, `providers/providers.json`, `schemas/`, Cargo provenance, a
+CycloneDX SBOM, a license report, and a signed manifest. Sessions, memory,
+credentials, logs, workspaces, and backups live outside that directory.
+
+### Verify before running
+
+The `release-public-key.hex` inside an archive is a copy of the publisher key,
+not an independent trust root. Obtain the expected Ed25519 public key through a
+separate authenticated channel.
+
+From an audited source checkout:
+
+```bash
+cargo xtask verify-release /absolute/path/to/release EXPECTED_PUBLIC_KEY_HEX
+```
+
+From an already trusted Keith installation:
+
+```bash
+bin/agent-desktop verify-release /absolute/path/to/release EXPECTED_PUBLIC_KEY_HEX
+```
+
+Verification checks the publisher key, signature, exact file set, sizes,
+SHA-256 digests, permissions, paths, build identity, and component
+compatibility. It rejects unlisted files, duplicate paths, and symlinks. Do not
+execute a newly downloaded release's verifier as the only proof of that same
+download.
+
+### Initialize and serve
+
+```bash
+bin/agent-desktop setup \
+  STATE_ROOT \
+  DATA_ROOT \
+  http://127.0.0.1:7341
+
+export KEITH_WEB_LOGIN_SECRET='replace-with-a-long-random-password'
+export KEITH_CREDENTIAL_KEY='64_HEXADECIMAL_CHARACTERS'
+
+bin/agent-desktop serve \
+  STATE_ROOT \
+  /absolute/path/to/workspace \
+  127.0.0.1:7341
+```
+
+The desktop lifecycle owns the daemon and Web child processes. If either child
+crashes, it writes a bounded report under `STATE_ROOT/crashes` and stops rather
+than silently leaving a partial stack. Send the supervisor `SIGTERM` or
+`SIGINT` for an orderly stop.
 
 ## Backup and restore
 
-Stop the service before a filesystem backup. The desktop lifecycle command copies the configured data root and notification state into `STATE_ROOT/backups` and prints the new backup path:
+Stop the managed service before a filesystem backup:
 
-```sh
-BACKUP_PATH="$(bin/agent-desktop backup STATE_ROOT)"
-bin/agent-desktop restore "$BACKUP_PATH" /absolute/path/to/empty-restored-data
+```bash
+backup_path="$(bin/agent-desktop backup STATE_ROOT)"
+bin/agent-desktop restore "$backup_path" /absolute/path/to/empty-restored-data
 ```
 
-Backup construction uses a sibling staging directory and atomically promotes it only after writing a versioned manifest with data and notification-tree digests. Restore revalidates that manifest and both trees, rejects symlinks or modified bytes, and atomically promotes the restored data into an empty target. Notification state remains in the backup for inspection; it is not imported into a different desktop state root.
+The backup is assembled atomically with a versioned manifest and data and
+notification-tree digests. Restore rejects changed bytes, unsafe paths, and
+symlinks, and only promotes into an empty target.
 
-Restore only into an empty data root, point desktop settings to it, and start the same or a schema-compatible release. Provider credentials remain in the native credential store and must be restored separately by that store's supported mechanism. Move any backup that must survive `remove-everything` outside `STATE_ROOT` before uninstalling.
+Provider credentials and the credential master key are a separate data class.
+Back them up using the configured credential backend's procedure. A data-root
+backup without the master key cannot decrypt them.
 
 ## Update and rollback
 
-Verify the new release signature and manifest before staging it. Stage it as a complete new version, stop the service, atomically activate it, and restart. The lifecycle executable pins the independently supplied publisher key on first use, rejects key changes, verifies before copying, re-verifies the copied tree, and re-verifies a retained version during rollback:
+Verify a new release before staging it. Keep versions separate; never copy
+individual binaries over an active installation.
 
-```sh
-bin/agent-desktop update STATE_ROOT /absolute/path/to/new-release EXPECTED_PUBLIC_KEY_HEX
+```bash
+bin/agent-desktop update \
+  STATE_ROOT \
+  /absolute/path/to/new-release \
+  EXPECTED_PUBLIC_KEY_HEX
+
 bin/agent-desktop rollback STATE_ROOT
 ```
 
-Keep the immediately previous version. If readiness or compatibility checks fail, stop the service, run `rollback`, and restart. Never copy individual binaries across active versions.
+The desktop lifecycle pins the publisher key on first use, verifies before and
+after copying, and re-verifies the retained version during rollback. Stop the
+service before update or rollback, then restart and confirm readiness and data
+compatibility.
 
 ## Uninstall and data choices
 
-The uninstall plan presents exact paths and the installation-specific confirmation phrase:
+Preview exact paths and the installation-specific confirmation phrase:
 
-```sh
+```bash
 bin/agent-desktop uninstall-plan STATE_ROOT keep-user-data
-bin/agent-desktop uninstall STATE_ROOT keep-user-data 'REMOVE INSTALLATION_ID'
+bin/agent-desktop uninstall \
+  STATE_ROOT \
+  keep-user-data \
+  'REMOVE INSTALLATION_ID'
 ```
 
-`keep-user-data` removes only installed release versions. `remove-runtime` additionally removes crash reports, notification state, the daemon socket, and the transient runtime directory while retaining sessions, profiles, memory, artifacts, indexes, schedules, and credentials. `remove-everything` removes the configured state and data roots. Native credential-store entries are a separate documented data class and must be removed through the authenticated settings flow or the operating system credential manager. No files are intentionally written outside the selected release, state, data, backup, and native credential-store locations.
+- `keep-user-data` removes installed release versions.
+- `remove-runtime` additionally removes crash reports, notifications, the
+  daemon socket, and transient runtime state while retaining durable user data.
+- `remove-everything` removes the configured state and data roots.
+
+Move any backup that must survive `remove-everything` outside `STATE_ROOT`
+before uninstalling. Credential-backend entries may require separate removal.
+
+## Build a signed release
+
+This is a maintainer workflow, not a normal installation step. Release assembly
+requires an explicit build ID and a 32-byte Ed25519 signing seed encoded as 64
+hexadecimal characters:
+
+```bash
+export KEITH_BUILD_ID='git-COMMIT_OR_RELEASE_BUILD_ID'
+export KEITH_RELEASE_SIGNING_KEY='64_HEXADECIMAL_CHARACTERS'
+cargo xtask release /absolute/path/to/new-release
+unset KEITH_RELEASE_SIGNING_KEY
+```
+
+`KEITH_RELEASE_SIGNING_KEY` signs Keith's release manifest. It is not an Apple
+Developer ID certificate, Microsoft Authenticode certificate, or desktop app-
+store signing identity. Native platform packaging may require those separate
+credentials in addition to Keith's manifest signature.
+
+The builder compiles locked release binaries and WebAssembly assets, assembles
+the result in a private sibling staging directory, signs and verifies it, runs
+the packaged daemon and worker build reports, and only then promotes the
+complete directory. Follow [Release qualification](release-qualification.md)
+before publication.
