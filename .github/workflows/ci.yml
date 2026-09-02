@@ -72,10 +72,10 @@ jobs:
                   for option in mount.group(1).split(',')
                   if '=' in option
               )
-              if options.get('type') == 'cache' and not options.get('id'):
+              if options.get('type') == 'cache':
                   line_number = dockerfile.count('\n', 0, mount.start()) + 1
                   raise SystemExit(
-                      f'Dockerfile:{line_number}: BuildKit cache mount requires a stable id'
+                      f'Dockerfile:{line_number}: provider-specific cache mounts are not portable'
                   )
           for line_number, line in enumerate(dockerfile.splitlines(), start=1):
               if line.lstrip().startswith('VOLUME '):
