@@ -12,7 +12,7 @@ keith-agent-types = { path = "../../crates/agent-types" }
 keith-cua = { path = "../../crates/cua" }
 keith-platform-contracts = { path = "../../crates/platform-contracts" }
 keith-sandbox = { path = "../../crates/sandbox" }
-nix = { version = "0.30.1", features = ["poll"] }
+nix = { version = "0.31.3", features = ["poll"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
