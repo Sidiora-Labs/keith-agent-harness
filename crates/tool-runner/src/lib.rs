@@ -887,12 +887,23 @@ impl RestrictedProcessRunner {
                 "--die-with-parent".into(),
                 "--new-session".into(),
                 "--unshare-all".into(),
+                "--tmpfs".into(),
+                "/tmp".into(),
             ];
             if !request.limits.deny_network {
                 wrapped.push("--share-net".into());
             }
             if Path::new("/usr").is_dir() {
                 wrapped.extend(["--ro-bind".into(), "/usr".into(), "/usr".into()]);
+            }
+            if Path::new("/etc/alternatives").is_dir() {
+                wrapped.extend([
+                    "--dir".into(),
+                    "/etc".into(),
+                    "--ro-bind".into(),
+                    "/etc/alternatives".into(),
+                    "/etc/alternatives".into(),
+                ]);
             }
             for (target, source) in [
                 ("/bin", "usr/bin"),
