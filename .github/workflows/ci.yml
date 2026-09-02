@@ -72,10 +72,11 @@ jobs:
                   for option in mount.group(1).split(',')
                   if '=' in option
               )
-              if options.get('type') == 'cache' and not options.get('id'):
+              # Railway supplies a service-scoped cache key when id is omitted.
+              if options.get('type') == 'cache' and options.get('id'):
                   line_number = dockerfile.count('\n', 0, mount.start()) + 1
                   raise SystemExit(
-                      f'Dockerfile:{line_number}: BuildKit cache mount requires a stable id'
+                      f'Dockerfile:{line_number}: cache mount id prevents Railway service scoping'
                   )
           for line_number, line in enumerate(dockerfile.splitlines(), start=1):
               if line.lstrip().startswith('VOLUME '):
