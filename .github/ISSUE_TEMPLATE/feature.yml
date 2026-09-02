@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a focused improvement to Keith
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem should Keith solve?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Authority and compatibility constraints
+      description: Note data ownership, approval, API, platform, or migration constraints.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+

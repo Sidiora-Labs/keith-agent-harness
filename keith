@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cache_root="${XDG_CACHE_HOME:-/tmp}/keith-dev"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${cache_root}/target}"
+export CARGO_INCREMENTAL=0
+
+usage() {
+  cat <<'EOF'
+Keith contributor toolchain
+
+Usage: ./keith COMMAND [arguments]
+
+Development
+  doctor                         Check required and optional tools
+  setup                          Install locked web dependencies and fetch Rust crates
+  dev                            Run agentd and agent-web locally
+  check                          Run formatting, Rust checks, and TypeScript checks
+  test                           Run Rust and web test suites
+  build                          Build the web UI and release binaries
+  image [tag]                    Build the production OCI image
+  up | down | logs               Operate the Docker Compose stack
+
+Scaffolding
+  scaffold plugin NAME [DIR]     Create a Rust/WASI Keith plugin
+  scaffold skill NAME [DIR]      Create a Keith skill package
+
+Deployment
+  deploy railway [args]          Plan/apply Railway IaC
+  deploy fly [args]              Plan/deploy Fly.io
+  deploy kubernetes [args]       Render/deploy the Helm chart
+  deploy digitalocean [args]     Plan/create DOKS and deploy Keith
+  deploy azure [args]            Plan/create AKS and deploy Keith
+  deploy aws [args]              Plan/create EKS and deploy Keith
+  deploy gcp [args]              Plan/create GKE Autopilot and deploy Keith
+
+Cloud scripts are plan-only unless both --execute and KEITH_DEPLOY_APPROVED=YES are supplied.
+EOF
+}
+
+has() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+require() {
+  if ! has "$1"; then
+    echo "Missing required tool: $1" >&2
+    exit 69
+  fi
+}
+
+doctor() {
+  local failed=0
+  local tool
+  for tool in cargo rustc node corepack git; do
+    if has "$tool"; then
+      printf 'ok       %-14s %s\n' "$tool" "$($tool --version 2>&1 | head -n 1)"
+    else
+      printf 'missing  %-14s required\n' "$tool"
+      failed=1
+    fi
+  done
+  for tool in docker helm kubectl railway flyctl doctl az aws eksctl gcloud shellcheck actionlint; do
+    if has "$tool"; then
+      printf 'ok       %-14s installed\n' "$tool"
+    else
+      printf 'optional %-14s install when using that workflow\n' "$tool"
+    fi
+  done
+  if [[ -d "$root/target" ]]; then
+    echo "error    repo target/ exists; Keith builds must use a disposable or external target" >&2
+    failed=1
+  fi
+  return "$failed"
+}
+
+setup() {
+  require cargo
+  require corepack
+  corepack pnpm --dir "$root/apps/agent-web/ui" install --frozen-lockfile
+  cargo fetch --locked --manifest-path "$root/Cargo.toml"
+  echo "Dependencies are ready. Build cache: $CARGO_TARGET_DIR"
+}
+
+dev() {
+  require cargo
+  local data_root="${KEITH_DEV_DATA_ROOT:-${XDG_DATA_HOME:-${HOME}/.local/share}/keith-dev}"
+  local port="${PORT:-7341}"
+  local socket="${data_root}/agentd.sock"
+  local login_secret="${KEITH_WEB_LOGIN_SECRET:-keith-local-dev}"
+  mkdir -p "$data_root"
+  rm -f "$socket"
+
+  cargo build --locked --manifest-path "$root/Cargo.toml" \
+    -p keith-agentd -p keith-agent-worker -p keith-agent-web -p keith-agent-cli
+
+  while IFS=$'\t' read -r provider credential_env; do
+    [[ -n "$provider" && -n "$credential_env" ]] || continue
+    [[ "$credential_env" == "GITHUB_TOKEN" ]] && continue
+    if [[ -n "${!credential_env:-}" ]]; then
+      "$CARGO_TARGET_DIR/debug/agent-cli" provider set \
+        --provider "$provider" \
+        --secret-env "$credential_env" \
+        --data-root "$data_root"
+      unset "$credential_env"
+    fi
+  done < <(node -e 'const p=require(process.argv[1]); for (const x of p.providers) console.log(x.id + "\t" + x.credential_environment)' "$root/packaging/providers.json")
+
+  "$CARGO_TARGET_DIR/debug/agentd" \
+    --data-root "$data_root" \
+    --socket "$socket" \
+    --worker-executable "$CARGO_TARGET_DIR/debug/agent-worker" \
+    --workspace-root "$root" \
+    --enable-service channels \
+    --enable-service acp \
+    --enable-service plugins \
+    --enable-service connected_apps \
+    --enable-service computers \
+    --enable-service teaching &
+  local daemon_pid=$!
+  local web_pid=""
+  cleanup_dev() {
+    trap - TERM INT EXIT
+    if [[ -n "$web_pid" ]]; then
+      kill -TERM "$web_pid" 2>/dev/null || true
+    fi
+    kill -TERM "$daemon_pid" 2>/dev/null || true
+    if [[ -n "$web_pid" ]]; then
+      wait "$web_pid" 2>/dev/null || true
+    fi
+    wait "$daemon_pid" 2>/dev/null || true
+  }
+  trap cleanup_dev TERM INT EXIT
+
+  for _ in $(seq 1 300); do
+    [[ -S "$socket" ]] && break
+    kill -0 "$daemon_pid" 2>/dev/null || wait "$daemon_pid"
+    sleep 0.1
+  done
+  [[ -S "$socket" ]] || {
+    echo "agentd did not become ready" >&2
+    exit 70
+  }
+
+  KEITH_WEB_LOGIN_SECRET="$login_secret" \
+    "$CARGO_TARGET_DIR/debug/agent-web" \
+      --bind "127.0.0.1:${port}" \
+      --origin "http://127.0.0.1:${port}" \
+      --socket "$socket" \
+      --asset-root "$root/apps/agent-web/static" \
+      --credential-root "$data_root/credentials" &
+  web_pid=$!
+  echo "Keith is running at http://127.0.0.1:${port} (password: ${login_secret})"
+  wait "$web_pid"
+}
+
+check() {
+  require cargo
+  require corepack
+  cargo fmt --all --manifest-path "$root/Cargo.toml" -- --check
+  cargo check --workspace --all-targets --locked --manifest-path "$root/Cargo.toml"
+  corepack pnpm --dir "$root/apps/agent-web/ui" run check
+}
+
+test_all() {
+  require cargo
+  require corepack
+  cargo test --workspace --locked --manifest-path "$root/Cargo.toml"
+  corepack pnpm --dir "$root/apps/agent-web/ui" run test
+}
+
+build_all() {
+  require cargo
+  require corepack
+  corepack pnpm --dir "$root/apps/agent-web/ui" install --frozen-lockfile
+  corepack pnpm --dir "$root/apps/agent-web/ui" run build
+  cargo build --workspace --bins --release --locked --manifest-path "$root/Cargo.toml"
+  echo "Binaries: $CARGO_TARGET_DIR/release"
+}
+
+image_build() {
+  require docker
+  local tag="${1:-keith-agent:dev}"
+  docker build \
+    --build-arg "KEITH_BUILD_ID=${KEITH_BUILD_ID:-local}" \
+    --tag "$tag" \
+    "$root"
+}
+
+valid_name() {
+  [[ "$1" =~ ^[a-z][a-z0-9-]{1,62}$ ]]
+}
+
+scaffold_plugin() {
+  local name="${1:-}"
+  local destination="${2:-$root/plugins/$name}"
+  valid_name "$name" || {
+    echo "plugin name must match [a-z][a-z0-9-]{1,62}" >&2
+    exit 64
+  }
+  [[ ! -e "$destination" ]] || {
+    echo "destination already exists: $destination" >&2
+    exit 73
+  }
+  mkdir -p "$destination"
+  cp -R "$root/crates/plugin-sdk/reference-component/." "$destination/"
+  rm -f "$destination/Cargo.lock"
+  mkdir -p "$destination/wit"
+  cp -R "$root/crates/plugin-sdk/wit/." "$destination/wit/"
+  sed -i "s/keith-reference-plugin-component/keith-plugin-${name}/; s#path: \"../wit\"#path: \"wit\"#" \
+    "$destination/Cargo.toml" "$destination/src/lib.rs"
+  echo "Created plugin at $destination"
+  echo "Build with: cargo component build --release --manifest-path $destination/Cargo.toml"
+}
+
+scaffold_skill() {
+  local name="${1:-}"
+  local destination="${2:-$root/skills/$name}"
+  valid_name "$name" || {
+    echo "skill name must match [a-z][a-z0-9-]{1,62}" >&2
+    exit 64
+  }
+  [[ ! -e "$destination" ]] || {
+    echo "destination already exists: $destination" >&2
+    exit 73
+  }
+  mkdir -p "$destination/references" "$destination/scripts"
+  printf '%s\n' \
+    "---" \
+    "name: $name" \
+    "description: Explain exactly when Keith should use this skill." \
+    "---" \
+    "" \
+    "# $name" \
+    "" \
+    "Describe the workflow, safety boundaries, inputs, and expected output." \
+    > "$destination/SKILL.md"
+  echo "Created skill at $destination"
+}
+
+deploy() {
+  local provider="${1:-}"
+  [[ -n "$provider" ]] || {
+    usage
+    exit 64
+  }
+  shift
+  case "$provider" in
+    railway) exec "$root/deploy/railway/deploy.sh" "$@" ;;
+    fly) exec "$root/deploy/fly/deploy.sh" "$@" ;;
+    kubernetes) exec "$root/deploy/kubernetes/deploy.sh" "$@" ;;
+    digitalocean|azure|aws|gcp) exec "$root/deploy/cloud/${provider}.sh" "$@" ;;
+    *) echo "unknown deployment provider: $provider" >&2; exit 64 ;;
+  esac
+}
+
+command="${1:-help}"
+shift || true
+cd "$root"
+case "$command" in
+  help|-h|--help) usage ;;
+  doctor) doctor ;;
+  setup) setup ;;
+  dev) dev ;;
+  check) check ;;
+  test) test_all ;;
+  build) build_all ;;
+  image) image_build "$@" ;;
+  up) require docker; docker compose up --build -d "$@" ;;
+  down) require docker; docker compose down "$@" ;;
+  logs) require docker; docker compose logs --follow "$@" ;;
+  scaffold)
+    kind="${1:-}"
+    shift || true
+    case "$kind" in
+      plugin) scaffold_plugin "$@" ;;
+      skill) scaffold_skill "$@" ;;
+      *) echo "usage: ./keith scaffold <plugin|skill> NAME [DIR]" >&2; exit 64 ;;
+    esac
+    ;;
+  deploy) deploy "$@" ;;
+  *) echo "unknown command: $command" >&2; usage >&2; exit 64 ;;
+esac

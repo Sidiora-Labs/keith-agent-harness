@@ -1,0 +1,235 @@
+name: Publish
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  verify:
+    name: Verify source before publication
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: /tmp/keith-publish-verify-target
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.93.0
+          components: clippy,rustfmt
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: . -> /tmp/keith-publish-verify-target
+      - name: Install supply-chain tools
+        uses: taiki-e/install-action@541dbe11e2898b05bb65bedbd1d0c4e3092b5bdd # v2.67.29
+        with:
+          tool: cargo-deny@0.18.9,cargo-audit@0.21.2
+      - name: Require release tag to match workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          version = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version']
+          expected = f'v{version}'
+          actual = os.environ['RELEASE_TAG']
+          if actual != expected:
+              raise SystemExit(f'release tag {actual!r} must equal workspace version {expected!r}')
+          PY
+      - name: Run the complete source gate
+        run: cargo ci
+      - name: Recheck dependency advisories and licenses
+        run: |
+          cargo deny check
+          cargo audit
+
+  image:
+    name: Publish multi-architecture OCI image
+    needs: [verify, container-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Log in to GHCR
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute image metadata
+        id: metadata
+        uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+      - name: Build and publish image
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: KEITH_BUILD_ID=git-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          sbom: true
+          provenance: mode=max
+      - name: Attest published image
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  container-smoke:
+    name: Prove the publish candidate end to end
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Build publish candidate
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: keith-agent:publish-candidate
+          build-args: KEITH_BUILD_ID=git-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Run live container journey
+        run: scripts/ci/container-smoke.sh keith-agent:publish-candidate 17342
+
+  binaries:
+    name: Binary (${{ matrix.name }})
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            extension: tar.gz
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            extension: tar.gz
+          - name: macos-aarch64
+            runner: macos-14
+            extension: tar.gz
+          - name: macos-x86_64
+            runner: macos-15-intel
+            extension: tar.gz
+          - name: windows-x86_64
+            runner: windows-latest
+            extension: zip
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../keith-release-target
+      KEITH_BUILD_ID: git-${{ github.sha }}
+      KEITH_RELEASE_SIGNING_KEY: ${{ secrets.KEITH_RELEASE_SIGNING_KEY }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.93.0
+      - name: Set up Node
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22.22.2
+          cache: pnpm
+          cache-dependency-path: apps/agent-web/ui/pnpm-lock.yaml
+      - name: Enable locked pnpm
+        run: corepack enable
+      - name: Build signed release directory
+        shell: bash
+        run: cargo xtask release "${RUNNER_TEMP}/keith-agent-${GITHUB_REF_NAME}-${{ matrix.name }}"
+      - name: Archive Unix release
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar -C "$RUNNER_TEMP" -czf "keith-agent-${GITHUB_REF_NAME}-${{ matrix.name }}.tar.gz" "keith-agent-${GITHUB_REF_NAME}-${{ matrix.name }}"
+      - name: Archive Windows release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "$env:RUNNER_TEMP/keith-agent-$env:GITHUB_REF_NAME-${{ matrix.name }}" -DestinationPath "keith-agent-$env:GITHUB_REF_NAME-${{ matrix.name }}.zip"
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: keith-agent-${{ matrix.name }}
+          path: keith-agent-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.extension }}
+          if-no-files-found: error
+
+  github-release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [image, binaries]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Download binary artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: keith-agent-*
+          path: artifacts
+          merge-multiple: true
+      - name: Attest binary archives
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: artifacts/*
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --verify-tag --generate-notes

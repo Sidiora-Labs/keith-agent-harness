@@ -1,0 +1,33 @@
+app = "keith-agent"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "7341"
+  KEITH_DATA_ROOT = "/var/lib/keith"
+
+[[mounts]]
+  source = "keith_data"
+  destination = "/var/lib/keith"
+  initial_size = "20gb"
+
+[http_service]
+  internal_port = 7341
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "45s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/login"
+
+[[vm]]
+  size = "performance-2x"
+  memory = "8gb"

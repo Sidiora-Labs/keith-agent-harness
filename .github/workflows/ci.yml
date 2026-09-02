@@ -1,48 +1,191 @@
-name: ci
+name: CI
 
 on:
   pull_request:
   push:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
 jobs:
-  rust:
+  tooling:
+    name: Tooling and deployment manifests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+          install -d /tmp/keith-validators
+          curl --fail --silent --show-error --location \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output /tmp/actionlint.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz' | sha256sum --check
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp/keith-validators actionlint
+          curl --fail --silent --show-error --location \
+            https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz \
+            --output /tmp/helm.tar.gz
+          echo 'a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  /tmp/helm.tar.gz' | sha256sum --check
+          tar -xzf /tmp/helm.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+      - name: Validate shell scripts
+        run: |
+          find . -type f -name '*.sh' -not -path './target/*' -not -path '*/node_modules/*' -print0 | xargs -0 bash -n
+          find . -type f -name '*.sh' -not -path './target/*' -not -path '*/node_modules/*' -print0 | xargs -0 shellcheck
+          bash -n ./keith
+          shellcheck ./keith
+          /tmp/keith-validators/actionlint -color
+          ./keith help >/dev/null
+      - name: Validate deployment manifests
+        env:
+          KEITH_WEB_LOGIN_SECRET: ci-login-secret-not-for-production
+        run: |
+          helm lint deploy/kubernetes/helm/keith
+          helm template keith deploy/kubernetes/helm/keith >/tmp/keith-manifests.yaml
+          docker compose config --quiet
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import tomllib
+
+          json.loads(pathlib.Path('.devcontainer/devcontainer.json').read_text())
+          tomllib.loads(pathlib.Path('deploy/fly/fly.toml').read_text())
+          PY
+      - name: Validate provider plans are non-mutating
+        run: |
+          ./keith deploy digitalocean >/dev/null
+          ./keith deploy azure >/dev/null
+          ./keith deploy aws >/dev/null
+          ./keith deploy gcp --project keith-ci >/dev/null
+          ./keith deploy fly >/dev/null
+
+  web:
+    name: Web UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/agent-web/ui
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Node
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22.22.2
+          cache: pnpm
+          cache-dependency-path: apps/agent-web/ui/pnpm-lock.yaml
+      - name: Enable locked pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Type-check
+        run: pnpm run check
+      - name: Test
+        run: pnpm run test
+      - name: Build static application
+        run: pnpm run build
+
+  rust:
+    name: Rust quality and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: /tmp/keith-ci-target
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.93.0
           components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo ci
-      - run: cargo clean-checkout
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: . -> /tmp/keith-ci-target
+      - name: Run the repository CI gate
+        run: cargo ci
+      - name: Prove clean-checkout reproducibility
+        run: cargo clean-checkout
 
   platform:
+    name: Platform (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../keith-platform-target
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.93.0
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo platform-gate
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Run platform gate
+        run: cargo platform-gate
 
   supply-chain:
+    name: Supply chain and security
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: /tmp/keith-security-target
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.93.0
-      - uses: taiki-e/install-action@v2
+      - name: Install audit tools
+        uses: taiki-e/install-action@541dbe11e2898b05bb65bedbd1d0c4e3092b5bdd # v2.67.29
         with:
-          tool: cargo-deny,cargo-audit
-      - run: cargo deny check
-      - run: cargo audit
+          tool: cargo-deny@0.18.9,cargo-audit@0.21.2
+      - name: Check dependency policy
+        run: cargo deny check
+      - name: Audit advisories
+        run: cargo audit
+      - name: Run Keith security gate
+        run: cargo security-gate
+
+  container:
+    name: OCI build and live smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Build local image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: keith-agent:ci
+          build-args: KEITH_BUILD_ID=ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Exercise daemon, web, session auth, and API bridge
+        run: scripts/ci/container-smoke.sh keith-agent:ci 17341
