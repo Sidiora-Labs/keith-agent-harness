@@ -1,0 +1,32 @@
+name: keith
+
+services:
+  keith:
+    build:
+      context: .
+      args:
+        KEITH_BUILD_ID: ${KEITH_BUILD_ID:-compose}
+    image: ${KEITH_IMAGE:-ghcr.io/machinecity/keith-agent:main}
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "${KEITH_PORT:-7341}:7341"
+    environment:
+      KEITH_WEB_LOGIN_SECRET: ${KEITH_WEB_LOGIN_SECRET:?copy .env.example to .env and set KEITH_WEB_LOGIN_SECRET}
+      KEITH_PUBLIC_ORIGIN: ${KEITH_PUBLIC_ORIGIN:-http://localhost:7341}
+      KEITH_OPENAI_COMPAT_API_KEY: ${KEITH_OPENAI_COMPAT_API_KEY:-}
+      KEITH_PLATFORM_API_KEY: ${KEITH_PLATFORM_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    volumes:
+      - keith-data:/var/lib/keith
+      - type: bind
+        source: ${KEITH_WORKSPACE:-.}
+        target: /workspace
+
+volumes:
+  keith-data:

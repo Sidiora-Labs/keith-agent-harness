@@ -184,6 +184,10 @@ fn assemble_release(
         "kernel-runner",
         "agent-web",
         "agent-desktop",
+        "keith-agent-acp",
+        "keith-composio-mcp",
+        "keith-cua-runner",
+        "keith-performance-runner",
     ] {
         let filename = format!("{binary}{}", env::consts::EXE_SUFFIX);
         let source = release_root.join(&filename);

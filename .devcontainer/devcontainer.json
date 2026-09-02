@@ -1,0 +1,27 @@
+{
+  "name": "Keith",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspaces/keith-agent",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/keith-agent,type=bind,consistency=cached",
+  "mounts": [
+    "source=keith-cargo,target=/usr/local/cargo,type=volume",
+    "source=keith-target,target=/tmp/keith-dev/target,type=volume"
+  ],
+  "containerEnv": {
+    "CARGO_TARGET_DIR": "/tmp/keith-dev/target",
+    "CARGO_INCREMENTAL": "0"
+  },
+  "postCreateCommand": "corepack enable && ./keith setup",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "dbaeumer.vscode-eslint"
+      ]
+    }
+  }
+}

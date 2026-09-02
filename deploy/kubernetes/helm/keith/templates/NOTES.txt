@@ -1,0 +1,8 @@
+Keith is deployed as a single stateful replica.
+
+Wait for readiness:
+  kubectl rollout status statefulset/{{ include "keith.fullname" . }} -n {{ .Release.Namespace }}
+
+Find the service address:
+  kubectl get service {{ include "keith.fullname" . }} -n {{ .Release.Namespace }}
+

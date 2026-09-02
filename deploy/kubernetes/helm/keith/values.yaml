@@ -1,0 +1,69 @@
+image:
+  repository: ghcr.io/machinecity/keith-agent
+  tag: main
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 10001
+
+service:
+  type: LoadBalancer
+  port: 80
+  annotations: {}
+
+config:
+  publicOrigin: http://localhost:7341
+  services: channels,acp,plugins,connected_apps,computers,teaching
+  existingSecret: keith-secrets
+
+persistence:
+  enabled: true
+  size: 20Gi
+  storageClass: ""
+  accessModes: ["ReadWriteOnce"]
+  existingClaim: ""
+
+workspace:
+  enabled: false
+  existingClaim: ""
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: keith.example.com
+  tls: []
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: "4"
+    memory: 8Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+

@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a reproducible defect in Keith
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include secrets or security vulnerabilities. Use the private security-reporting flow for those.
+  - type: input
+    id: version
+    attributes:
+      label: Keith version or commit
+      placeholder: v0.1.0 or full commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options: [Web UI, TUI, OpenAI API, daemon, provider, channels, plugins, CUA, deployment, build and CI, other]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include the smallest sequence that reproduces the problem and redact all secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and safe logs
+    validations:
+      required: true
+

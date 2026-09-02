@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and support
+    url: https://github.com/machinecity/keith-agent/discussions
+    about: Ask setup, usage, integration, and troubleshooting questions in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/machinecity/keith-agent/security/advisories/new
+    about: Report vulnerabilities privately. Never place secrets in an issue.

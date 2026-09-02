@@ -1,0 +1,17 @@
+.git
+.github
+.codegraph
+.agents
+.claude
+.gemini
+.kiro
+.zed
+target
+**/target
+tmp
+**/*.tmp
+**/.env
+**/node_modules
+apps/agent-web/ui/.next
+apps/agent-web/ui/out
+
