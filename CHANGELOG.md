@@ -4,6 +4,11 @@ This is the curated public development history of Keith Agent. It is generated f
 
 The original `spec/keith-agent` delivery is traceable through explicit task and wave markers for every completed wave from 1 through 23. Waves 24 through 30 remain pending in the specification and are not represented as completed work.
 
+## Unreleased
+
+- Configure authenticated multi-architecture GHCR publication with protected credentials.
+- Pin the Ed25519 release trust key and stop publication when the signing seed, protected public-key variable, and packaged key disagree.
+
 ## 2026-09-02
 
 - [`dbd2fb187920`](https://github.com/Sidiora-Labs/keith-agent/commit/dbd2fb1879201100eae7915eee9c9e7d7241984c) Finalize the Sidiora Labs public repository boundary

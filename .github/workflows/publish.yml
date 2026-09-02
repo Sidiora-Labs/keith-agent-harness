@@ -21,7 +21,7 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: sidiora-labs/keith-agent
 
 jobs:
   verify:
@@ -87,8 +87,8 @@ jobs:
         uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ vars.GHCR_USERNAME }}
+          password: ${{ secrets.GHCR_TOKEN }}
       - name: Compute image metadata
         id: metadata
         uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
@@ -174,6 +174,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/../keith-release-target
       KEITH_BUILD_ID: git-${{ github.sha }}
       KEITH_RELEASE_SIGNING_KEY: ${{ secrets.KEITH_RELEASE_SIGNING_KEY }}
+      KEITH_RELEASE_PUBLIC_KEY: ${{ vars.KEITH_RELEASE_PUBLIC_KEY }}
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -191,7 +192,20 @@ jobs:
         run: corepack enable
       - name: Build signed release directory
         shell: bash
-        run: cargo xtask release "${RUNNER_TEMP}/keith-agent-${GITHUB_REF_NAME}-${{ matrix.name }}"
+        run: |
+          set -euo pipefail
+          repository_key=$(tr -d '\r\n' < release-signing-public-key.hex)
+          if [[ "$repository_key" != "$KEITH_RELEASE_PUBLIC_KEY" ]]; then
+            echo "repository release key does not match the protected Actions variable" >&2
+            exit 1
+          fi
+          release_directory="${RUNNER_TEMP}/keith-agent-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          cargo xtask release "$release_directory"
+          packaged_key=$(tr -d '\r\n' < "$release_directory/release-public-key.hex")
+          if [[ "$packaged_key" != "$KEITH_RELEASE_PUBLIC_KEY" ]]; then
+            echo "packaged release key does not match the trusted release key" >&2
+            exit 1
+          fi
       - name: Archive Unix release
         if: runner.os != 'Windows'
         shell: bash
@@ -219,6 +233,8 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
+      - name: Check out release trust material
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Download binary artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
@@ -232,4 +248,4 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/* --verify-tag --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* release-signing-public-key.hex --verify-tag --generate-notes

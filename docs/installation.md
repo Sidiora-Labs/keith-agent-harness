@@ -215,7 +215,9 @@ credentials, logs, workspaces, and backups live outside that directory.
 
 The `release-public-key.hex` inside an archive is a copy of the publisher key,
 not an independent trust root. Obtain the expected Ed25519 public key through a
-separate authenticated channel.
+separate authenticated channel. The public key currently pinned by this source
+tree is also published as [`release-signing-public-key.hex`](../release-signing-public-key.hex)
+and attached directly to each GitHub release.
 
 From an audited source checkout:
 
@@ -330,6 +332,10 @@ unset KEITH_RELEASE_SIGNING_KEY
 Developer ID certificate, Microsoft Authenticode certificate, or desktop app-
 store signing identity. Native platform packaging may require those separate
 credentials in addition to Keith's manifest signature.
+
+The publish workflow compares the public key derived from the protected signing
+seed with both the repository's pinned key and the protected
+`KEITH_RELEASE_PUBLIC_KEY` Actions variable. A mismatch stops publication.
 
 The builder compiles locked release binaries and WebAssembly assets, assembles
 the result in a private sibling staging directory, signs and verifies it, runs
