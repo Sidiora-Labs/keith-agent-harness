@@ -8,7 +8,7 @@ WORKDIR /src/apps/agent-web/ui
 RUN corepack enable \
     && corepack prepare pnpm@11.18.0 --activate
 COPY apps/agent-web/ui/package.json apps/agent-web/ui/pnpm-lock.yaml apps/agent-web/ui/pnpm-workspace.yaml ./
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+RUN --mount=type=cache,id=keith-pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY apps/agent-web/ui/ ./
 RUN pnpm run check && pnpm run test && pnpm run build
@@ -23,9 +23,9 @@ COPY --from=web /src/apps/agent-web/static/ui/ apps/agent-web/static/ui/
 ARG KEITH_BUILD_ID=container
 ENV KEITH_BUILD_ID=${KEITH_BUILD_ID} \
     CARGO_INCREMENTAL=0
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=keith-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=keith-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=keith-cargo-target,target=/src/target \
     cargo build --workspace --release --locked \
       --bin agentd \
       --bin agent-worker \
