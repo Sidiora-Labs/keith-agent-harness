@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::ffi::OsString;
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -35,6 +37,7 @@ use keith_protocol::{
 };
 use keith_provider_catalog::provider as provider_spec;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -48,6 +51,7 @@ pub use openai_compat::OpenAiCompatibilityConfig;
 pub use platform_compat::PlatformCompatibilityConfig;
 
 const MAX_BROWSER_BODY_BYTES: usize = 128 * 1024;
+const MAX_ATTACHMENT_BYTES: usize = 25 * 1_024 * 1_024;
 const EVENT_QUEUE_CAPACITY: usize = 256;
 const UI_INDEX: &str = "ui/index.html";
 
@@ -142,6 +146,7 @@ struct AppState {
     openai_compatibility: Option<Arc<openai_compat::OpenAiCompatibility>>,
     platform_compatibility: Option<Arc<platform_compat::PlatformCompatibility>>,
     catalog_cache: CatalogCache,
+    attachment_root: PathBuf,
 }
 
 type CatalogCache = Arc<Mutex<Option<(Vec<ProfileSummary>, Vec<SessionSummary>)>>>;
@@ -182,6 +187,12 @@ impl WebServer {
             .map(Arc::new);
         let credential_store =
             EncryptedCredentialStore::open(&config.credential_root, config.credential_key)?;
+        let attachment_root = config
+            .daemon_socket
+            .parent()
+            .ok_or_else(|| ServerError::Configuration("daemon socket has no data root".into()))?
+            .join("channel-staging")
+            .join("inbound");
         Ok(Self {
             state: AppState {
                 security: Arc::new(security),
@@ -195,6 +206,7 @@ impl WebServer {
                 openai_compatibility,
                 platform_compatibility,
                 catalog_cache: Arc::new(Mutex::new(None)),
+                attachment_root,
             },
             bind: config.bind,
         })
@@ -210,6 +222,10 @@ impl WebServer {
             .route("/api/evolution/commands", post(evolution_command))
             .route("/assets/ui/{*path}", get(ui_asset))
             .route("/api/profiles/{profile}/commands", post(command))
+            .route(
+                "/api/profiles/{profile}/sessions/{session}/attachments",
+                post(upload_attachment).layer(DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES)),
+            )
             .route(
                 "/api/profiles/{profile}/credentials",
                 post(write_credential),
@@ -570,6 +586,170 @@ async fn ui_asset(State(state): State<AppState>, Path(path): Path<String>) -> Re
         _ => "application/octet-stream",
     };
     file_asset(&state.asset_root.join("ui"), &path, media_type)
+}
+
+#[derive(Deserialize)]
+struct AttachmentSelection {
+    name: String,
+}
+
+async fn upload_attachment(
+    State(state): State<AppState>,
+    Path((profile, session)): Path<(String, String)>,
+    Query(selection): Query<AttachmentSelection>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(csrf) = headers
+        .get("x-keith-csrf")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return security_response(SecurityError::Csrf);
+    };
+    if let Err(error) = state.security.authorize_mutation(&headers, csrf) {
+        return security_response(error);
+    }
+    let profile: ProfileId = match profile.parse() {
+        Ok(profile) => profile,
+        Err(_) => return safe_error(StatusCode::BAD_REQUEST, "invalid profile scope"),
+    };
+    let session: SessionId = match session.parse() {
+        Ok(session) => session,
+        Err(_) => return safe_error(StatusCode::BAD_REQUEST, "invalid session scope"),
+    };
+    if !safe_attachment_name(&selection.name)
+        || body.is_empty()
+        || body.len() > MAX_ATTACHMENT_BYTES
+    {
+        return safe_error(
+            StatusCode::BAD_REQUEST,
+            "attachment name or size is invalid",
+        );
+    }
+    let media_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    if !safe_media_type(media_type) {
+        return safe_error(StatusCode::BAD_REQUEST, "attachment media type is invalid");
+    }
+    let staging_file = EntityId::new().to_string();
+    let path = match write_browser_attachment(&state.attachment_root, &staging_file, &body) {
+        Ok(path) => path,
+        Err(_) => {
+            return safe_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "attachment staging is unavailable",
+            );
+        }
+    };
+    let byte_length = u64::try_from(body.len()).unwrap_or(u64::MAX);
+    let sha256 = hex_sha256(&body);
+    let envelope = CommandEnvelope {
+        protocol: CURRENT_PROTOCOL_VERSION,
+        command_id: CommandId::new(),
+        client_id: ClientId::new(),
+        sent_at: UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+        session_id: Some(session.clone()),
+        command: ClientCommand::StageAttachment(keith_protocol::StagedAttachment {
+            session_id: session,
+            staging_file,
+            file_name: selection.name,
+            media_type: media_type.to_owned(),
+            byte_length,
+            sha256,
+        }),
+    };
+    let bridge = state.bridge.clone();
+    let result =
+        tokio::task::spawn_blocking(move || bridge.execute_scoped(&profile, envelope)).await;
+    match result {
+        Ok(Ok(result)) => match result.result {
+            keith_protocol::CommandResult::Data(payload) => match *payload {
+                ResponsePayload::Artifact(artifact_id) => {
+                    Json(serde_json::json!({"artifact_id": artifact_id})).into_response()
+                }
+                _ => {
+                    let _ = std::fs::remove_file(path);
+                    safe_error(
+                        StatusCode::BAD_GATEWAY,
+                        "Keith returned an invalid attachment response",
+                    )
+                }
+            },
+            keith_protocol::CommandResult::Rejected(error) => {
+                let _ = std::fs::remove_file(path);
+                safe_error(StatusCode::CONFLICT, &error.error.message)
+            }
+            keith_protocol::CommandResult::Accepted { .. } => {
+                let _ = std::fs::remove_file(path);
+                safe_error(
+                    StatusCode::BAD_GATEWAY,
+                    "Keith did not persist the attachment",
+                )
+            }
+        },
+        Ok(Err(BridgeError::Scope)) => {
+            let _ = std::fs::remove_file(path);
+            safe_error(StatusCode::FORBIDDEN, "attachment scope denied")
+        }
+        Ok(Err(_)) | Err(_) => {
+            let _ = std::fs::remove_file(path);
+            safe_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "attachment upload is unavailable",
+            )
+        }
+    }
+}
+
+fn safe_attachment_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\'])
+        && !name.chars().any(char::is_control)
+}
+
+fn safe_media_type(media_type: &str) -> bool {
+    media_type.len() <= 255
+        && media_type.split_once('/').is_some_and(|(kind, subtype)| {
+            !kind.is_empty()
+                && !subtype.is_empty()
+                && media_type.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'+' | b'.')
+                })
+        })
+}
+
+fn write_browser_attachment(root: &FsPath, token: &str, body: &[u8]) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(root)?;
+    let metadata = std::fs::symlink_metadata(root)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(std::io::Error::other("unsafe attachment staging root"));
+    }
+    let path = root.join(token);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    if let Err(error) = file.write_all(body).and_then(|()| file.sync_all()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(path)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 async fn command(

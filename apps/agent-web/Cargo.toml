@@ -33,6 +33,7 @@ keith-credentials = { path = "../../crates/credentials" }
 keith-framing = { path = "../../crates/framing" }
 keith-platform = { path = "../../crates/platform" }
 ring.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 url.workspace = true
 

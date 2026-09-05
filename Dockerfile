@@ -68,7 +68,6 @@ ENV KEITH_DATA_ROOT=/var/lib/keith \
     KEITH_SERVICES=channels,acp,plugins,connected_apps,computers,teaching \
     PORT=7341
 EXPOSE 7341
-USER keith
 WORKDIR /workspace
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=4 CMD ["keith-healthcheck"]
 ENTRYPOINT ["/usr/bin/tini", "--", "keith-entrypoint"]

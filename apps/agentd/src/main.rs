@@ -44,6 +44,8 @@ const READY_PATH_ENV: &str = "KEITH_DAEMON_READY_PATH";
 const READY_IMAGE_ENV: &str = "KEITH_DAEMON_READY_IMAGE";
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_POLL: Duration = Duration::from_millis(20);
+const READY_RETRY_INITIAL: Duration = Duration::from_millis(250);
+const READY_RETRY_MAX: Duration = Duration::from_secs(2);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl Arguments {
@@ -274,6 +276,7 @@ fn run_launcher() -> Result<(), String> {
     signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))
         .map_err(|error| format!("failed to register launcher SIGINT: {error}"))?;
     let readiness_retry_deadline = std::time::Instant::now() + READY_TIMEOUT;
+    let mut readiness_retry_delay = READY_RETRY_INITIAL;
 
     loop {
         let selection = staging
@@ -365,7 +368,11 @@ fn run_launcher() -> Result<(), String> {
                     return Ok(());
                 }
                 if std::time::Instant::now() < readiness_retry_deadline {
-                    thread::sleep(READY_POLL);
+                    let remaining = readiness_retry_deadline
+                        .saturating_duration_since(std::time::Instant::now());
+                    thread::sleep(readiness_retry_delay.min(remaining));
+                    readiness_retry_delay =
+                        readiness_retry_delay.saturating_mul(2).min(READY_RETRY_MAX);
                     continue;
                 }
                 return Err(reason);

@@ -54,7 +54,7 @@ url = "2.5.8"
 ulid = "1.2.1"
 wasm-bindgen = "0.2.127"
 web-sys = "0.3.104"
-wasmtime = { version = "36.0.2", default-features = false, features = ["cranelift", "runtime"] }
+wasmtime = { version = "36.0.14", default-features = false, features = ["cranelift", "runtime"] }
 wat = "1.240.0"
 
 [profile.release]

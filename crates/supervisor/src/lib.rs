@@ -474,7 +474,7 @@ impl WorkerSupervisor {
         let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .map_err(SupervisorError::from)?;
         Ok(child)
@@ -1239,7 +1239,8 @@ fn read_resources(pid: u32) -> WorkerResourceState {
     else {
         return WorkerResourceState::default();
     };
-    let mut values = String::from_utf8_lossy(&output.stdout)
+    let output = String::from_utf8_lossy(&output.stdout);
+    let mut values = output
         .split_whitespace()
         .filter_map(|value| value.parse::<u64>().ok())
         .map(|value| value.saturating_mul(1024));

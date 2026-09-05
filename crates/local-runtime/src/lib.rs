@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+
 use keith_action_store::{
     ActionInboxConfig, ActionLimits, ActionPayload, ActionPriority, ActionSource, ActionState,
     DeliveryPolicy as ActionDeliveryPolicy, PersistentActionInbox, PumpContext,
@@ -1929,19 +1931,21 @@ impl LocalRuntime {
         text: &str,
         generation: Generation,
     ) -> Result<SessionSnapshot, LocalRuntimeError> {
-        self.run_prompt_with_events(session_id, text, generation, &mut NoRuntimeEvents)
+        self.run_prompt_with_events(session_id, text, &[], generation, &mut NoRuntimeEvents)
     }
 
     fn run_prompt_with_events(
         &self,
         session_id: &SessionId,
         text: &str,
+        artifact_ids: &[keith_agent_types::ArtifactId],
         generation: Generation,
         events: &mut dyn RuntimeEventSink,
     ) -> Result<SessionSnapshot, LocalRuntimeError> {
         self.run_turn(
             session_id,
             text,
+            artifact_ids,
             generation,
             &TurnIngress::User {
                 source_id: "interactive_prompt".into(),
@@ -1958,12 +1962,14 @@ impl LocalRuntime {
         &self,
         session_id: &SessionId,
         text: &str,
+        artifact_ids: &[keith_agent_types::ArtifactId],
         generation: Generation,
         ingress: &TurnIngress,
         events: &mut dyn RuntimeEventSink,
     ) -> Result<SessionSnapshot, LocalRuntimeError> {
         validate_prompt_text(text)?;
         let manifest = self.owned_manifest(session_id)?;
+        let attachment_blocks = self.attachment_blocks(&manifest, artifact_ids)?;
         let profile = self.profile(&manifest.profile_id)?;
         self.prepare_model_route(&profile)?;
         self.adapt_model_route(&profile, text)?;
@@ -2066,9 +2072,11 @@ impl LocalRuntime {
                     TurnIngress::User { .. } => SessionEntryPayload::UserMessage {
                         message: StoredMessage {
                             role: StoredMessageRole::User,
-                            content: vec![StoredContentBlock::Text {
+                            content: std::iter::once(StoredContentBlock::Text {
                                 text: text.to_owned(),
-                            }],
+                            })
+                            .chain(attachment_blocks.clone())
+                            .collect(),
                             provider_metadata,
                         },
                     },
@@ -2722,7 +2730,13 @@ impl LocalRuntime {
         let Some(route) = &prompt.reply_route else {
             let text =
                 self.prompt_with_artifacts(&prompt.session_id, &prompt.text, &prompt.artifacts)?;
-            return self.run_prompt_with_events(&prompt.session_id, &text, generation, events);
+            return self.run_prompt_with_events(
+                &prompt.session_id,
+                &text,
+                &prompt.artifacts,
+                generation,
+                events,
+            );
         };
         self.owned_manifest(&prompt.session_id)?;
         let action_id = ActionId::new();
@@ -2770,6 +2784,7 @@ impl LocalRuntime {
             return self.run_turn(
                 &prompt.session_id,
                 &text,
+                &prompt.artifacts,
                 generation,
                 &TurnIngress::User {
                     source_id: format!("accepted_prompt:{}", accepted.acceptance_id),
@@ -3999,6 +4014,7 @@ impl LocalRuntime {
             match self.run_turn(
                 session_id,
                 &text,
+                action_artifacts(&selected.record.action.payload),
                 generation,
                 &ingress,
                 &mut NoRuntimeEvents,
@@ -4870,6 +4886,33 @@ impl LocalRuntime {
             }
         }
         Ok(prompt)
+    }
+
+    fn attachment_blocks(
+        &self,
+        manifest: &SessionManifest,
+        artifact_ids: &[keith_agent_types::ArtifactId],
+    ) -> Result<Vec<StoredContentBlock>, LocalRuntimeError> {
+        let scope = ArtifactScope {
+            root_tree_id: manifest.root_tree_id.clone(),
+            session_id: manifest.session_id.clone(),
+            profile_id: manifest.profile_id.clone(),
+        };
+        artifact_ids
+            .iter()
+            .map(|artifact_id| {
+                let reference = ArtifactReference {
+                    id: artifact_id.clone(),
+                    root_tree_id: manifest.root_tree_id.clone(),
+                    profile_id: manifest.profile_id.clone(),
+                };
+                let metadata = self.artifacts.inspect(&scope, &reference)?;
+                Ok(StoredContentBlock::Artifact {
+                    artifact_id: artifact_id.clone(),
+                    media_type: metadata.media_type,
+                })
+            })
+            .collect()
     }
 
     fn background_allowed(
@@ -6095,12 +6138,12 @@ impl LocalRuntime {
                 );
             }
         }
-        history.extend(provider_history(
+        history.extend(self.provider_history(
             context_entries,
             session_id,
             turn_id,
             &active_user_entry.id,
-        ));
+        )?);
         if !history.contains_entry(&active_user_entry.id) {
             history.prepend_user(
                 &active_user_session_id,
@@ -6167,6 +6210,176 @@ impl LocalRuntime {
             reasoning_effort: Some(thinking_effort(profile.profile.thinking).into()),
             context,
         })
+    }
+
+    fn provider_history(
+        &self,
+        entries: &[SessionEntry],
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        active_user_entry_id: &EntryId,
+    ) -> Result<CompiledProviderHistory, LocalRuntimeError> {
+        let mut history = CompiledProviderHistory::default();
+        let mut assistant_index = None;
+        for entry in entries {
+            match &entry.payload {
+                SessionEntryPayload::UserMessage { message } => {
+                    assistant_index = None;
+                    let content = self.provider_message_content(session_id, &message.content)?;
+                    if !content.is_empty() {
+                        let record = provider_context_record(
+                            session_id,
+                            turn_id,
+                            entry.id.clone(),
+                            format!("user_ingress:{}", entry.id),
+                            ContextProvenance::UserIngress,
+                            entry.id == *active_user_entry_id,
+                            PersistPolicy::Durable,
+                        );
+                        history.context.push(vec![record; content.len()]);
+                        history.messages.push(ProviderMessage {
+                            role: ProviderMessageRole::User,
+                            content,
+                        });
+                    }
+                }
+                SessionEntryPayload::AssistantMessage { message }
+                | SessionEntryPayload::AssistantFinal { message, .. }
+                | SessionEntryPayload::AssistantActivity { message, .. } => {
+                    let content = provider_text_content(&message.content);
+                    assistant_index = None;
+                    if !content.is_empty() {
+                        let provenance = if matches!(
+                            entry.payload,
+                            SessionEntryPayload::AssistantActivity { .. }
+                        ) {
+                            ContextProvenance::AssistantCommentary
+                        } else {
+                            ContextProvenance::AssistantFinal
+                        };
+                        let record = provider_context_record(
+                            session_id,
+                            turn_id,
+                            entry.id.clone(),
+                            format!("assistant:{}", entry.id),
+                            provenance,
+                            false,
+                            PersistPolicy::Durable,
+                        );
+                        history.context.push(vec![record; content.len()]);
+                        history.messages.push(ProviderMessage {
+                            role: ProviderMessageRole::Assistant,
+                            content,
+                        });
+                        assistant_index = Some(history.messages.len() - 1);
+                    }
+                }
+                SessionEntryPayload::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                } => {
+                    let call = ProviderContentBlock::ToolCall {
+                        id: call_id.clone(),
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                    };
+                    let record = provider_context_record(
+                        session_id,
+                        turn_id,
+                        entry.id.clone(),
+                        call_id.to_string(),
+                        ContextProvenance::ToolCall,
+                        false,
+                        PersistPolicy::Durable,
+                    );
+                    if let Some(index) = assistant_index {
+                        history.messages[index].content.push(call);
+                        history.context[index].push(record);
+                    } else {
+                        history.messages.push(ProviderMessage {
+                            role: ProviderMessageRole::Assistant,
+                            content: vec![call],
+                        });
+                        history.context.push(vec![record]);
+                        assistant_index = Some(history.messages.len() - 1);
+                    }
+                }
+                SessionEntryPayload::ToolResult {
+                    call_id,
+                    content,
+                    is_error,
+                    ..
+                } => {
+                    assistant_index = None;
+                    history.messages.push(ProviderMessage {
+                        role: ProviderMessageRole::Tool,
+                        content: vec![ProviderContentBlock::ToolResult {
+                            call_id: call_id.clone(),
+                            content: stored_text(content),
+                            is_error: *is_error,
+                        }],
+                    });
+                    history.context.push(vec![provider_context_record(
+                        session_id,
+                        turn_id,
+                        entry.id.clone(),
+                        call_id.to_string(),
+                        ContextProvenance::ToolResult,
+                        false,
+                        PersistPolicy::Durable,
+                    )]);
+                }
+                _ => {}
+            }
+        }
+        Ok(history)
+    }
+
+    fn provider_message_content(
+        &self,
+        session_id: &SessionId,
+        content: &[StoredContentBlock],
+    ) -> Result<Vec<ProviderContentBlock>, LocalRuntimeError> {
+        let mut provider = provider_text_content(content);
+        let manifest = self.owned_manifest(session_id)?;
+        let scope = ArtifactScope {
+            root_tree_id: manifest.root_tree_id.clone(),
+            session_id: manifest.session_id,
+            profile_id: manifest.profile_id.clone(),
+        };
+        for block in content {
+            let StoredContentBlock::Artifact {
+                artifact_id,
+                media_type,
+            } = block
+            else {
+                continue;
+            };
+            if !matches!(
+                media_type.as_str(),
+                "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+            ) {
+                continue;
+            }
+            let reference = ArtifactReference {
+                id: artifact_id.clone(),
+                root_tree_id: manifest.root_tree_id.clone(),
+                profile_id: manifest.profile_id.clone(),
+            };
+            let metadata = self.artifacts.inspect(&scope, &reference)?;
+            if metadata.byte_length > 25 * 1_024 * 1_024 {
+                return Err(LocalRuntimeError::Invalid(format!(
+                    "image artifact {artifact_id} exceeds the 25 MiB model input limit"
+                )));
+            }
+            let bytes = self.artifacts.download(&scope, &reference)?;
+            provider.push(ProviderContentBlock::Image {
+                media_type: media_type.clone(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            });
+        }
+        Ok(provider)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -7593,131 +7806,19 @@ fn provider_context_record(
 }
 
 #[allow(clippy::too_many_lines)]
-fn provider_history(
-    entries: &[SessionEntry],
-    session_id: &SessionId,
-    turn_id: &TurnId,
-    active_user_entry_id: &EntryId,
-) -> CompiledProviderHistory {
-    let mut history = CompiledProviderHistory::default();
-    let mut assistant_index = None;
-    for entry in entries {
-        match &entry.payload {
-            SessionEntryPayload::UserMessage { message } => {
-                assistant_index = None;
-                let content = provider_text_content(&message.content);
-                if !content.is_empty() {
-                    history.messages.push(ProviderMessage {
-                        role: ProviderMessageRole::User,
-                        content,
-                    });
-                    history.context.push(vec![provider_context_record(
-                        session_id,
-                        turn_id,
-                        entry.id.clone(),
-                        format!("user_ingress:{}", entry.id),
-                        ContextProvenance::UserIngress,
-                        entry.id == *active_user_entry_id,
-                        PersistPolicy::Durable,
-                    )]);
-                }
-            }
-            SessionEntryPayload::AssistantMessage { message }
-            | SessionEntryPayload::AssistantFinal { message, .. }
-            | SessionEntryPayload::AssistantActivity { message, .. } => {
-                let content = provider_text_content(&message.content);
-                assistant_index = None;
-                if !content.is_empty() {
-                    let provenance =
-                        if matches!(entry.payload, SessionEntryPayload::AssistantActivity { .. }) {
-                            ContextProvenance::AssistantCommentary
-                        } else {
-                            ContextProvenance::AssistantFinal
-                        };
-                    history.messages.push(ProviderMessage {
-                        role: ProviderMessageRole::Assistant,
-                        content,
-                    });
-                    history.context.push(vec![provider_context_record(
-                        session_id,
-                        turn_id,
-                        entry.id.clone(),
-                        format!("assistant:{}", entry.id),
-                        provenance,
-                        false,
-                        PersistPolicy::Durable,
-                    )]);
-                    assistant_index = Some(history.messages.len() - 1);
-                }
-            }
-            SessionEntryPayload::ToolCall {
-                call_id,
-                name,
-                arguments,
-            } => {
-                let call = ProviderContentBlock::ToolCall {
-                    id: call_id.clone(),
-                    name: name.clone(),
-                    arguments: arguments.clone(),
-                };
-                let record = provider_context_record(
-                    session_id,
-                    turn_id,
-                    entry.id.clone(),
-                    call_id.to_string(),
-                    ContextProvenance::ToolCall,
-                    false,
-                    PersistPolicy::Durable,
-                );
-                if let Some(index) = assistant_index {
-                    history.messages[index].content.push(call);
-                    history.context[index].push(record);
-                } else {
-                    history.messages.push(ProviderMessage {
-                        role: ProviderMessageRole::Assistant,
-                        content: vec![call],
-                    });
-                    history.context.push(vec![record]);
-                    assistant_index = Some(history.messages.len() - 1);
-                }
-            }
-            SessionEntryPayload::ToolResult {
-                call_id,
-                content,
-                is_error,
-                ..
-            } => {
-                assistant_index = None;
-                history.messages.push(ProviderMessage {
-                    role: ProviderMessageRole::Tool,
-                    content: vec![ProviderContentBlock::ToolResult {
-                        call_id: call_id.clone(),
-                        content: stored_text(content),
-                        is_error: *is_error,
-                    }],
-                });
-                history.context.push(vec![provider_context_record(
-                    session_id,
-                    turn_id,
-                    entry.id.clone(),
-                    call_id.to_string(),
-                    ContextProvenance::ToolResult,
-                    false,
-                    PersistPolicy::Durable,
-                )]);
-            }
-            _ => {}
-        }
-    }
-    history
-}
-
 fn provider_text_content(content: &[StoredContentBlock]) -> Vec<ProviderContentBlock> {
     let text = stored_text(content);
     if text.is_empty() {
         Vec::new()
     } else {
         vec![ProviderContentBlock::Text { text }]
+    }
+}
+
+fn action_artifacts(payload: &ActionPayload) -> &[keith_agent_types::ArtifactId] {
+    match payload {
+        ActionPayload::ChannelMessage { attachments, .. } => attachments,
+        _ => &[],
     }
 }
 

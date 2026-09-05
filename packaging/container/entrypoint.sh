@@ -5,8 +5,60 @@ data_root="${KEITH_DATA_ROOT:-/var/lib/keith}"
 workspace_root="${KEITH_WORKSPACE_ROOT:-/workspace}"
 asset_root="${KEITH_ASSET_ROOT:-/opt/keith/web}"
 port="${PORT:-7341}"
-socket="${KEITH_DAEMON_SOCKET:-${data_root}/agentd.sock}"
 provider_catalog="${KEITH_PROVIDER_CATALOG:-/opt/keith/providers/providers.json}"
+
+normalize_runtime_directory() {
+  local path="$1"
+  local label="$2"
+  if [[ "$path" != /* || "$path" == "/" ]]; then
+    echo "${label} must be an absolute, non-root path" >&2
+    exit 64
+  fi
+  case "$path" in
+    /bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/lib|/lib/*|/lib64|/lib64/*|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/sys|/sys/*|/usr|/usr/*|/var)
+      echo "${label} cannot use protected system path ${path}" >&2
+      exit 64
+      ;;
+  esac
+  if [[ -L "$path" ]]; then
+    echo "${label} cannot be a symbolic link" >&2
+    exit 64
+  fi
+  path="$(realpath -m -- "$path")"
+  case "$path" in
+    /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/lib|/lib/*|/lib64|/lib64/*|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/sys|/sys/*|/usr|/usr/*|/var)
+      echo "${label} resolves to protected system path ${path}" >&2
+      exit 64
+      ;;
+  esac
+  printf '%s\n' "$path"
+}
+
+data_root="$(normalize_runtime_directory "$data_root" "KEITH_DATA_ROOT")"
+workspace_root="$(normalize_runtime_directory "$workspace_root" "KEITH_WORKSPACE_ROOT")"
+socket="${KEITH_DAEMON_SOCKET:-${data_root}/agentd.sock}"
+if [[ "$data_root" == "$workspace_root" \
+  || "$data_root" == "$workspace_root/"* \
+  || "$workspace_root" == "$data_root/"* ]]; then
+  echo "KEITH_DATA_ROOT and KEITH_WORKSPACE_ROOT cannot overlap" >&2
+  exit 64
+fi
+
+if [[ "$(id -u)" == "0" ]]; then
+  keith_uid="$(id -u keith)"
+  keith_gid="$(id -g keith)"
+  mkdir -p "$data_root" "$workspace_root"
+  chown --no-dereference keith:keith "$data_root" "$workspace_root"
+  chmod 0700 "$data_root"
+  chmod 0750 "$workspace_root"
+  exec setpriv \
+    --reuid="$keith_uid" \
+    --regid="$keith_gid" \
+    --init-groups \
+    --no-new-privs \
+    env HOME=/home/keith USER=keith LOGNAME=keith KEITH_ENTRYPOINT_PRIVILEGES_DROPPED=1 \
+    "$0" "$@"
+fi
 
 mkdir -p "$data_root" "$workspace_root"
 chmod 0700 "$data_root"

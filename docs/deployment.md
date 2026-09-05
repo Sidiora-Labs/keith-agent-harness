@@ -97,6 +97,13 @@ The apply remains interactive. The tooling never passes Railway's unattended
 destructive flags. Configure a Railway public or custom domain whose origin
 matches `KEITH_PUBLIC_ORIGIN`.
 
+Mount the persistent volume at `/var/lib/keith`, never at `/workspace`.
+`/var/lib/keith` owns Keith's durable database, encrypted credentials, worker
+registries, and recovery state; `/workspace` is the agent's working tree. The
+container initializes either directory with the non-root Keith account when a
+provider supplies a fresh root-owned mount, then permanently drops privileges
+before importing credentials or starting any Keith process.
+
 ## Fly.io
 
 ```sh

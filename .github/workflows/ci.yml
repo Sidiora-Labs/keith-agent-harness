@@ -173,9 +173,10 @@ jobs:
   supply-chain:
     name: Supply chain and security
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 180
     env:
       CARGO_TARGET_DIR: /tmp/keith-security-target
+      KEITH_BUILD_ID: ci-${{ github.sha }}
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -183,6 +184,16 @@ jobs:
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.93.0
+      - name: Set up Node
+        if: github.event_name == 'push'
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22.22.2
+      - name: Enable locked pnpm
+        if: github.event_name == 'push'
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.18.0 --activate
       - name: Install audit tools
         uses: taiki-e/install-action@541dbe11e2898b05bb65bedbd1d0c4e3092b5bdd # v2.67.29
         with:
@@ -191,7 +202,29 @@ jobs:
         run: cargo deny check
       - name: Audit advisories
         run: cargo audit
-      - name: Run Keith security gate
+      - name: Assemble signed security candidate
+        if: github.event_name == 'push'
+        env:
+          KEITH_RELEASE_SIGNING_KEY: ${{ secrets.KEITH_RELEASE_SIGNING_KEY }}
+          KEITH_RELEASE_PUBLIC_KEY: ${{ vars.KEITH_RELEASE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          repository_key=$(tr -d '\r\n' < release-signing-public-key.hex)
+          if [[ "$repository_key" != "$KEITH_RELEASE_PUBLIC_KEY" ]]; then
+            echo "repository release key does not match the protected Actions variable" >&2
+            exit 1
+          fi
+          release_directory="${RUNNER_TEMP}/keith-security-release"
+          cargo xtask release "$release_directory"
+          packaged_key=$(tr -d '\r\n' < "$release_directory/release-public-key.hex")
+          if [[ "$packaged_key" != "$KEITH_RELEASE_PUBLIC_KEY" ]]; then
+            echo "packaged release key does not match the trusted release key" >&2
+            exit 1
+          fi
+          echo "KEITH_SECURITY_RELEASE_PATH=$release_directory" >> "$GITHUB_ENV"
+          echo "KEITH_SECURITY_TRUSTED_PUBLIC_KEY=$KEITH_RELEASE_PUBLIC_KEY" >> "$GITHUB_ENV"
+      - name: Run signed Keith security gate
+        if: github.event_name == 'push'
         run: cargo security-gate
 
   container:

@@ -11,6 +11,7 @@ import {
   useState,
 } from 'react'
 import { Streamdown } from 'streamdown'
+import { ConnectedAppsPanel } from '@/components/apps/ConnectedAppsPanel'
 import { ComputerStage, screenProjection } from '@/components/computer/ComputerStage'
 import {
   TeachTaskPanel,
@@ -69,10 +70,12 @@ import {
   integrationOperationCommand,
   integrationsFromResult,
   mergeSessions,
+  uploadComposerAttachment,
   visibleUserText,
   type BootstrapData,
   type Command,
   type CommandResult,
+  type ComposerAttachment,
   type EvolutionProjection,
   type MemoryResult,
   type MessageProjection,
@@ -144,6 +147,8 @@ export function KeithApp() {
   const [splitRatio, setSplitRatio] = useState(42)
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([])
   const [creating, setCreating] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [memoryResults, setMemoryResults] = useState<MemoryResult[]>([])
@@ -327,6 +332,7 @@ export function KeithApp() {
     setCreating(true)
     setSelectedSession(null)
     setDraft('')
+    setAttachments([])
     setProjection((current) => ({
       ...current,
       snapshot: null,
@@ -366,6 +372,7 @@ export function KeithApp() {
     if (selectedSession) draftBySession.current.set(selectedSession, draft)
     setSelectedSession(sessionId)
     setDraft(draftBySession.current.get(sessionId) ?? '')
+    setAttachments([])
     setProjection((current) => ({
       ...current,
       snapshot:
@@ -383,11 +390,13 @@ export function KeithApp() {
   const submitPrompt = useCallback(
     async (delivery: 'immediate' | 'next_turn_boundary' = 'immediate') => {
       const text = draft.trim()
-      if (!text || sending || creating) return
+      if ((!text && attachments.length === 0) || sending || creating || uploading) return
+      const outgoingAttachments = attachments
       setSending(true)
       setNotice(null)
       setPendingPrompt(text)
       setDraft('')
+      setAttachments([])
       let sessionId = selectedSession
       if (!sessionId) sessionId = await createConversation()
       if (!sessionId) {
@@ -401,7 +410,7 @@ export function KeithApp() {
         parameters: {
           session_id: sessionId,
           text,
-          artifacts: [],
+          artifacts: outgoingAttachments.map((attachment) => attachment.artifactId),
           delivery,
           reply_route: null,
         },
@@ -412,13 +421,50 @@ export function KeithApp() {
         draftBySession.current.set(sessionId, '')
       } else {
         setDraft(text)
+        setAttachments(outgoingAttachments)
         draftBySession.current.set(sessionId, text)
       }
       setPendingPrompt(null)
       setSending(false)
     },
-    [createConversation, creating, draft, runCommand, selectedSession, sending],
+    [attachments, createConversation, creating, draft, runCommand, selectedSession, sending, uploading],
   )
+
+  const addAttachments = useCallback(async (files: File[]) => {
+    if (!bootstrap || !selectedProfile || uploading || files.length === 0) return
+    const accepted = files.slice(0, Math.max(0, 10 - attachments.length))
+    if (accepted.some((file) => file.size === 0 || file.size > 25 * 1_024 * 1_024)) {
+      setNotice('Each attachment must be between 1 byte and 25 MB.')
+      return
+    }
+    setUploading(true)
+    setNotice(null)
+    let sessionId = selectedSession
+    if (!sessionId) sessionId = await createConversation()
+    if (!sessionId) {
+      setUploading(false)
+      return
+    }
+    try {
+      const uploaded: ComposerAttachment[] = []
+      for (const file of accepted) {
+        uploaded.push(await uploadComposerAttachment(bootstrap, selectedProfile.id, sessionId, file))
+      }
+      setAttachments((current) => [...current, ...uploaded].slice(0, 10))
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Keith could not upload the attachment.')
+    } finally {
+      setUploading(false)
+    }
+  }, [attachments.length, bootstrap, createConversation, selectedProfile, selectedSession, uploading])
+
+  const removeAttachment = useCallback((artifactId: string) => {
+    setAttachments((current) => {
+      const removed = current.find((attachment) => attachment.artifactId === artifactId)
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl)
+      return current.filter((attachment) => attachment.artifactId !== artifactId)
+    })
+  }, [])
 
   const steer = useCallback(async () => {
     if (!selectedSession || !draft.trim() || sending) return
@@ -488,6 +534,10 @@ export function KeithApp() {
     void runCommand(null, integrationListCommand(selectedProfile.id))
   }, [runCommand, selectedProfile])
 
+  useEffect(() => {
+    if (screenProjection(projection.snapshot?.computer)) setWorkspaceOpen(true)
+  }, [projection.snapshot?.computer])
+
   const resize = (event: ReactPointerEvent<HTMLDivElement>) => {
     const bounds = rootRef.current?.getBoundingClientRect()
     if (!bounds) return
@@ -504,7 +554,6 @@ export function KeithApp() {
 
   const snapshot = projection.snapshot
   const active = Boolean(snapshot?.active_action || projection.liveRun)
-  const hasWork = Boolean(snapshot)
 
   return (
     <main
@@ -538,12 +587,12 @@ export function KeithApp() {
         <TopBar
           connection={connection}
           active={active}
-          hasWork={hasWork}
           workspaceOpen={workspaceOpen}
           busy={creating}
           onMenu={() => setSidebarOpen(true)}
           onNew={() => void createConversation()}
           onStop={() => void stop()}
+          onApps={() => setSheet('apps')}
           onWork={() => setWorkspaceOpen((value) => !value)}
         />
         <Conversation
@@ -551,6 +600,8 @@ export function KeithApp() {
           pendingPrompt={pendingPrompt}
           liveRun={projection.liveRun}
           draft={draft}
+          attachments={attachments}
+          uploading={uploading}
           sending={sending || creating}
           connection={connection}
           notice={notice}
@@ -560,6 +611,8 @@ export function KeithApp() {
             setDraft(value)
             if (selectedSession) draftBySession.current.set(selectedSession, value)
           }}
+          onAttach={(files) => void addAttachments(files)}
+          onRemoveAttachment={removeAttachment}
           onSubmit={() => void submitPrompt()}
           onSteer={() => void steer()}
           onQueue={() => void submitPrompt('next_turn_boundary')}
@@ -783,22 +836,22 @@ function Sidebar({
 function TopBar({
   connection,
   active,
-  hasWork,
   workspaceOpen,
   busy,
   onMenu,
   onNew,
   onStop,
+  onApps,
   onWork,
 }: {
   connection: ConnectionState
   active: boolean
-  hasWork: boolean
   workspaceOpen: boolean
   busy: boolean
   onMenu: () => void
   onNew: () => void
   onStop: () => void
+  onApps: () => void
   onWork: () => void
 }) {
   return (
@@ -808,12 +861,12 @@ function TopBar({
       <div className="topbar-actions">
         <span className={`state-pill ${connection}`}>{connectionLabel(connection, active)}</span>
         {active ? <button className="text-button danger" onClick={onStop}><Stop size={13} /> Stop</button> : null}
+        <button className="icon-button" onClick={onApps} aria-label="Connected Apps" title="Connected Apps"><Tools /></button>
         <button className="icon-button" onClick={onNew} aria-label="New conversation" disabled={busy}><Plus /></button>
         <button
           className={`icon-button work-toggle ${workspaceOpen ? 'is-active' : ''}`}
           onClick={onWork}
           aria-label={workspaceOpen ? "Hide Keith's Computer" : "Show Keith's Computer"}
-          disabled={!hasWork}
         ><Monitor /></button>
       </div>
     </header>
@@ -825,12 +878,16 @@ function Conversation({
   pendingPrompt,
   liveRun,
   draft,
+  attachments,
+  uploading,
   sending,
   connection,
   notice,
   active,
   workspaceOpen,
   onDraft,
+  onAttach,
+  onRemoveAttachment,
   onSubmit,
   onSteer,
   onQueue,
@@ -843,12 +900,16 @@ function Conversation({
   pendingPrompt: string | null
   liveRun: LiveRunProjection | null
   draft: string
+  attachments: ComposerAttachment[]
+  uploading: boolean
   sending: boolean
   connection: ConnectionState
   notice: string | null
   active: boolean
   workspaceOpen: boolean
   onDraft: (value: string) => void
+  onAttach: (files: File[]) => void
+  onRemoveAttachment: (artifactId: string) => void
   onSubmit: () => void
   onSteer: () => void
   onQueue: () => void
@@ -943,7 +1004,7 @@ function Conversation({
       ) : (
         <div className="idle-home">
           <h1>What can I help you get done?</h1>
-          <div className="idle-composer"><Composer {...{ draft, sending, active, onDraft, onSubmit, onSteer, onQueue, onStop }} /></div>
+          <div className="idle-composer"><Composer {...{ draft, attachments, uploading, sending, active, onDraft, onAttach, onRemoveAttachment, onSubmit, onSteer, onQueue, onStop }} /></div>
           <div className="quick-grid" aria-label="Suggested prompts">
             {QUICK_ACTIONS.map(({ title, description, prompt, icon: Icon }) => (
               <button key={title} onClick={() => onQuickAction(prompt)}>
@@ -957,7 +1018,7 @@ function Conversation({
       )}
       {isConversation ? (
         <div className="composer-dock">
-          <Composer {...{ draft, sending, active, onDraft, onSubmit, onSteer, onQueue, onStop }} />
+          <Composer {...{ draft, attachments, uploading, sending, active, onDraft, onAttach, onRemoveAttachment, onSubmit, onSteer, onQueue, onStop }} />
           <div className="composer-footer">
             <span>{snapshot ? `${snapshot.messages.filter((message) => message.role === 'user').length} turns` : ''}</span>
             <span>Keith is AI and can make mistakes. Double-check important information.</span>
@@ -1040,24 +1101,33 @@ function Message({ message }: { message: MessageProjection }) {
 
 function Composer({
   draft,
+  attachments,
+  uploading,
   sending,
   active,
   onDraft,
+  onAttach,
+  onRemoveAttachment,
   onSubmit,
   onSteer,
   onQueue,
   onStop,
 }: {
   draft: string
+  attachments: ComposerAttachment[]
+  uploading: boolean
   sending: boolean
   active: boolean
   onDraft: (value: string) => void
+  onAttach: (files: File[]) => void
+  onRemoveAttachment: (artifactId: string) => void
   onSubmit: () => void
   onSteer: () => void
   onQueue: () => void
   onStop: () => void
 }) {
   const input = useRef<HTMLTextAreaElement>(null)
+  const fileInput = useRef<HTMLInputElement>(null)
   useEffect(() => {
     const element = input.current
     if (!element) return
@@ -1065,7 +1135,15 @@ function Composer({
     element.style.height = `${Math.min(160, element.scrollHeight)}px`
   }, [draft])
   return (
-    <div className="keith-composer" data-layout={draft.includes('\n') ? 'expanded' : 'compact'}>
+    <div
+      className="keith-composer"
+      data-layout={draft.includes('\n') ? 'expanded' : 'compact'}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => {
+        event.preventDefault()
+        onAttach(Array.from(event.dataTransfer.files))
+      }}
+    >
       {active && draft.trim() ? (
         <div className="live-actions">
           <button onClick={onSteer}><strong>Steer current work</strong><span>Apply this now</span></button>
@@ -1073,8 +1151,30 @@ function Composer({
           <button onClick={onStop}><strong>Stop current work</strong><span>Then send when ready</span></button>
         </div>
       ) : null}
+      {attachments.length || uploading ? (
+        <div className="composer-attachments" aria-label="Message attachments">
+          {attachments.map((attachment) => (
+            <div className="composer-attachment" key={attachment.artifactId}>
+              {attachment.previewUrl ? <img src={attachment.previewUrl} alt="" /> : <File size={18} />}
+              <span><strong>{attachment.name}</strong><small>{formatBytes(attachment.byteLength)}</small></span>
+              <button type="button" onClick={() => onRemoveAttachment(attachment.artifactId)} aria-label={`Remove ${attachment.name}`}><X size={14} /></button>
+            </div>
+          ))}
+          {uploading ? <div className="composer-attachment is-uploading"><span className="status-dot running" /><span><strong>Uploading…</strong><small>Securing your files</small></span></div> : null}
+        </div>
+      ) : null}
       <div className="composer-row">
-        <button className="composer-tool" aria-label="Keith tools" title="Keith chooses the right tools"><Tools size={18} /></button>
+        <input
+          ref={fileInput}
+          className="sr-only"
+          type="file"
+          multiple
+          onChange={(event) => {
+            onAttach(Array.from(event.target.files ?? []))
+            event.target.value = ''
+          }}
+        />
+        <button type="button" className="composer-tool" aria-label="Add images or files" title="Add images or files" disabled={sending || uploading} onClick={() => fileInput.current?.click()}><Plus size={18} /></button>
         <textarea
           ref={input}
           id="keith-composer"
@@ -1084,22 +1184,29 @@ function Composer({
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault()
-              if (active) onSteer()
+              if (active && attachments.length) onQueue()
+              else if (active) onSteer()
               else onSubmit()
             }
           }}
           placeholder={active ? 'Write an instruction for the active work…' : 'Ask Keith'}
           aria-label="Ask Keith"
-          disabled={sending}
+          disabled={sending || uploading}
         />
         {active && !draft.trim() ? (
           <button className="composer-send" onClick={onStop} aria-label="Stop Keith"><Stop size={14} /></button>
         ) : (
-          <button className="composer-send" onClick={active ? onSteer : onSubmit} disabled={!draft.trim() || sending} aria-label={active ? 'Steer Keith' : 'Send'}><ArrowUp size={18} /></button>
+          <button className="composer-send" onClick={active ? (attachments.length ? onQueue : onSteer) : onSubmit} disabled={(!draft.trim() && attachments.length === 0) || sending || uploading} aria-label={active ? (attachments.length ? 'Queue for Keith' : 'Steer Keith') : 'Send'}><ArrowUp size={18} /></button>
         )}
       </div>
     </div>
   )
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`
+  if (bytes < 1_024 * 1_024) return `${Math.round(bytes / 1_024)} KB`
+  return `${(bytes / (1_024 * 1_024)).toFixed(1)} MB`
 }
 
 function WorkStage({
@@ -1257,6 +1364,7 @@ function ControlSheet({
         <div className="sheet-body">
           {sheet === 'sessions' ? <SessionsPanel sessions={sessions} selected={sessionId} onSelect={onSelect} onNew={onNew} /> : null}
           {sheet === 'work' ? <WorkPanel snapshot={snapshot} onCommand={onCommand} /> : null}
+          {sheet === 'apps' ? <ConnectedAppsPanel profileId={profileId} onCommand={onCommand} /> : null}
           {integrationService ? <IntegrationPanel profileId={profileId} sessionId={sessionId} service={integrationService} projection={integrations} onProjection={onIntegrations} onCommand={onCommand} /> : null}
           {sheet === 'harness' ? <HarnessSurface profileId={profileId} snapshot={snapshot} onCommand={onCommand} /> : null}
           {sheet === 'memory' ? <MemoryPanel results={memoryResults} onSearch={onQueryMemory} /> : null}
@@ -1271,7 +1379,7 @@ function ControlSheet({
 function integrationServiceForSheet(sheet: SheetName): IntegrationService | null {
   switch (sheet) {
     case 'channels': return 'channel_account'
-    case 'apps': return 'connected_app'
+    case 'apps': return null
     case 'plugins': return 'plugin'
     case 'acp': return 'acp_connection'
     case 'recordings': return 'recording'

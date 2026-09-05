@@ -906,7 +906,7 @@ fn sync_directory(path: &Path) -> Result<(), BuildError> {
     Ok(())
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "fault-injection")]
 fn debug_build_boundary(checkpoint: BuildCheckpoint) {
     let expected = serde_json::to_string(&checkpoint).expect("checkpoint serializes");
     let name = expected.trim_matches('"');
@@ -920,7 +920,7 @@ fn debug_build_boundary(checkpoint: BuildCheckpoint) {
     }
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "fault-injection"))]
 fn debug_build_boundary(_checkpoint: BuildCheckpoint) {}
 
 fn failure_kind(error: &RunError) -> GateFailureKind {

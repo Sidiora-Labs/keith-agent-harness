@@ -650,6 +650,26 @@ enum FindingStatus {
 }
 
 pub fn run(root: &Path) -> Result<(), String> {
+    validate_source_security(root)?;
+    let release = required_path("KEITH_SECURITY_RELEASE_PATH")?;
+    let trusted_key = required_text("KEITH_SECURITY_TRUSTED_PUBLIC_KEY")?;
+    verify_packaged_binaries(&release, &trusted_key)?;
+    run_source_probes(root)?;
+    println!(
+        "security gate passed: {} attacks, {} packaged binaries, {} real test probes",
+        REQUIRED_ATTACKS.len(),
+        PACKAGED_BINARIES.len(),
+        PROBES.len()
+    );
+    Ok(())
+}
+
+pub fn run_source(root: &Path) -> Result<(), String> {
+    validate_source_security(root)?;
+    run_source_probes(root)
+}
+
+fn validate_source_security(root: &Path) -> Result<(), String> {
     validate_corpus()?;
     validate_keith_everywhere_manifest(
         &fs::read(root.join("tests/security/keith_everywhere.json")).map_err(|error| {
@@ -659,11 +679,10 @@ pub fn run(root: &Path) -> Result<(), String> {
     validate_findings(
         &fs::read(root.join("security/findings.json"))
             .map_err(|error| format!("security finding ledger is unavailable: {error}"))?,
-    )?;
-    let release = required_path("KEITH_SECURITY_RELEASE_PATH")?;
-    let trusted_key = required_text("KEITH_SECURITY_TRUSTED_PUBLIC_KEY")?;
-    verify_packaged_binaries(&release, &trusted_key)?;
+    )
+}
 
+fn run_source_probes(root: &Path) -> Result<(), String> {
     let mut packages = BTreeMap::<&str, Vec<&str>>::new();
     for probe in PROBES {
         packages.entry(probe.package).or_default().push(probe.test);
@@ -691,9 +710,8 @@ pub fn run(root: &Path) -> Result<(), String> {
         )?;
     }
     println!(
-        "security gate passed: {} attacks, {} packaged binaries, {} real test probes",
+        "security source probes passed: {} attacks, {} real test probes",
         REQUIRED_ATTACKS.len(),
-        PACKAGED_BINARIES.len(),
         PROBES.len()
     );
     Ok(())
@@ -718,7 +736,27 @@ fn validate_keith_everywhere_manifest(bytes: &[u8]) -> Result<(), String> {
         &manifest.privileged_transitions,
         PRIVILEGED_TRANSITIONS,
     )?;
+    validate_manifest_attacks(&manifest)?;
+    validate_manifest_authority_boundaries(&manifest)?;
+    validate_manifest_durable_boundaries(&manifest)?;
+    validate_manifest_data_control(&manifest)?;
+    exact_strings(
+        "forbidden audit fields",
+        &manifest.forbidden_audit_fields,
+        FORBIDDEN_AUDIT_FIELDS,
+    )?;
+    validate_audit_records(&manifest.audit_records)?;
+    if manifest
+        .unavailable_credentialed_services
+        .iter()
+        .any(|service| service.trim().is_empty())
+    {
+        return Err("credential availability contains an empty service name".into());
+    }
+    Ok(())
+}
 
+fn validate_manifest_attacks(manifest: &KeithEverywhereSecurityManifest) -> Result<(), String> {
     let attacks = manifest
         .attacks
         .iter()
@@ -732,7 +770,12 @@ fn validate_keith_everywhere_manifest(bytes: &[u8]) -> Result<(), String> {
     for coverage in &manifest.attacks {
         validate_probe_references(&coverage.probes, &format!("attack {}", coverage.class))?;
     }
+    Ok(())
+}
 
+fn validate_manifest_authority_boundaries(
+    manifest: &KeithEverywhereSecurityManifest,
+) -> Result<(), String> {
     let authority_surfaces = manifest
         .authority_boundaries
         .iter()
@@ -755,7 +798,12 @@ fn validate_keith_everywhere_manifest(bytes: &[u8]) -> Result<(), String> {
             &format!("{} authority boundary", coverage.source_surface),
         )?;
     }
+    Ok(())
+}
 
+fn validate_manifest_durable_boundaries(
+    manifest: &KeithEverywhereSecurityManifest,
+) -> Result<(), String> {
     let durable_surfaces = manifest
         .durable_boundaries
         .iter()
@@ -799,7 +847,12 @@ fn validate_keith_everywhere_manifest(bytes: &[u8]) -> Result<(), String> {
     if observed_recovery != required_recovery {
         return Err("durable boundary suite does not cover every required recovery outcome".into());
     }
+    Ok(())
+}
 
+fn validate_manifest_data_control(
+    manifest: &KeithEverywhereSecurityManifest,
+) -> Result<(), String> {
     let data_classes = manifest
         .data_control
         .iter()
@@ -821,20 +874,6 @@ fn validate_keith_everywhere_manifest(bytes: &[u8]) -> Result<(), String> {
             std::slice::from_ref(&coverage.probe),
             &format!("{} data control", coverage.class),
         )?;
-    }
-
-    exact_strings(
-        "forbidden audit fields",
-        &manifest.forbidden_audit_fields,
-        FORBIDDEN_AUDIT_FIELDS,
-    )?;
-    validate_audit_records(&manifest.audit_records)?;
-    if manifest
-        .unavailable_credentialed_services
-        .iter()
-        .any(|service| service.trim().is_empty())
-    {
-        return Err("credential availability contains an empty service name".into());
     }
     Ok(())
 }

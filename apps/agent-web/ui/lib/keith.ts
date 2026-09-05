@@ -108,6 +108,14 @@ export interface MemoryResult {
   score_micros: number
 }
 
+export interface ComposerAttachment {
+  artifactId: string
+  name: string
+  mediaType: string
+  byteLength: number
+  previewUrl?: string
+}
+
 export const INTEGRATION_SERVICES = [
   'channel_account',
   'acp_connection',
@@ -480,6 +488,39 @@ export async function executeCommand(
     )
   }
   return wire.payload
+}
+
+export async function uploadComposerAttachment(
+  bootstrap: BootstrapData,
+  profileId: string,
+  sessionId: string,
+  file: File,
+): Promise<ComposerAttachment> {
+  const response = await fetch(
+    `/api/profiles/${encodeURIComponent(profileId)}/sessions/${encodeURIComponent(sessionId)}/attachments?name=${encodeURIComponent(file.name)}`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        accept: 'application/json',
+        'content-type': file.type || 'application/octet-stream',
+        'x-keith-csrf': bootstrap.csrf,
+      },
+      body: file,
+    },
+  )
+  if (!response.ok) throw new KeithApiError(response.status, await safeError(response))
+  const payload = (await response.json()) as { artifact_id?: unknown }
+  if (typeof payload.artifact_id !== 'string' || !payload.artifact_id) {
+    throw new KeithApiError(502, 'Keith returned an invalid attachment response.')
+  }
+  return {
+    artifactId: payload.artifact_id,
+    name: file.name,
+    mediaType: file.type || 'application/octet-stream',
+    byteLength: file.size,
+    previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
+  }
 }
 
 export function dataFromResult<T>(result: CommandResult, kind: string): T | undefined {

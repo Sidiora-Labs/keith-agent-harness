@@ -36,12 +36,13 @@ fn main() -> ExitCode {
             &workspace_root(),
             matches!(env::args().nth(2).as_deref(), Some("--write")),
         ),
+        Some("security-probes") => security::run_source(&workspace_root()),
         Some("security-gate") => security::run(&workspace_root()),
         Some("platform-gate") => platform::run(&workspace_root()),
         Some("release") => release(&workspace_root()),
         Some("verify-release") => verify_release_command(),
         _ => Err(
-            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]|protocol-doc [--write]|provider-metadata [--write]|security-gate|platform-gate|release [OUTPUT]|verify-release PATH EXPECTED_PUBLIC_KEY_HEX>".into(),
+            "usage: cargo xtask <ci|clean-checkout|dependency-policy|schema-doc [--write]|protocol-doc [--write]|provider-metadata [--write]|security-probes|security-gate|platform-gate|release [OUTPUT]|verify-release PATH EXPECTED_PUBLIC_KEY_HEX>".into(),
         ),
     };
 
@@ -504,7 +505,7 @@ fn ci() -> Result<(), String> {
     schema_document(&root, false)?;
     protocol_document(&root, false)?;
     provider_metadata_document(&root, false)?;
-    security::run(&root)?;
+    security::run_source(&root)?;
     run(
         &root,
         "cargo",
@@ -611,6 +612,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
 
 fn dependency_policy(root: &Path) -> Result<(), String> {
     let manifests = manifests(root)?;
+    require_private_packages(&manifests)?;
     let graph = dependency_graph(&manifests)?;
     let forbidden_layers = BTreeSet::from([
         "keith-daemon-core",
@@ -662,15 +664,18 @@ fn dependency_policy(root: &Path) -> Result<(), String> {
             "keith-worker-runtime",
         ]),
     )?;
-    reject_reachable(
+    reject_reachable_except_via(
         &graph,
         "keith-daemon-core",
-        &BTreeSet::from([
-            "keith-agent-loop",
-            "keith-provider-adapters",
-            "keith-tool-runner-core",
-            "keith-sandbox",
-            "keith-plugin-host",
+        &BTreeMap::from([
+            ("keith-agent-loop", BTreeSet::new()),
+            ("keith-provider-adapters", BTreeSet::new()),
+            (
+                "keith-tool-runner-core",
+                BTreeSet::from(["keith-self-evolution"]),
+            ),
+            ("keith-sandbox", BTreeSet::from(["keith-self-evolution"])),
+            ("keith-plugin-host", BTreeSet::new()),
         ]),
     )?;
 
@@ -684,17 +689,58 @@ fn dependency_policy(root: &Path) -> Result<(), String> {
 fn manifests(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut result = Vec::new();
     for parent in [root.join("crates"), root.join("apps")] {
-        for entry in fs::read_dir(parent).map_err(|error| error.to_string())? {
-            let path = entry
-                .map_err(|error| error.to_string())?
-                .path()
-                .join("Cargo.toml");
-            if path.is_file() {
-                result.push(path);
+        collect_manifests(&parent, &mut result)?;
+    }
+    result.sort();
+    Ok(result)
+}
+
+fn collect_manifests(directory: &Path, manifests: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            if path.file_name().is_some_and(|name| name == "target") {
+                continue;
             }
+            collect_manifests(&path, manifests)?;
+        } else if path.file_name().is_some_and(|name| name == "Cargo.toml") {
+            manifests.push(path);
         }
     }
-    Ok(result)
+    Ok(())
+}
+
+fn require_private_packages(manifests: &[PathBuf]) -> Result<(), String> {
+    for manifest in manifests {
+        let content = fs::read_to_string(manifest).map_err(|error| error.to_string())?;
+        if !package_publish_is_disabled(&content) {
+            return Err(format!(
+                "workspace package {} must set publish = false",
+                manifest.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn package_publish_is_disabled(content: &str) -> bool {
+    let mut in_package = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+        } else if in_package && trimmed.starts_with("publish") {
+            return trimmed
+                .split_once('=')
+                .is_some_and(|(_, value)| value.trim() == "false");
+        }
+    }
+    false
 }
 
 fn dependency_graph(manifests: &[PathBuf]) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
@@ -801,6 +847,36 @@ fn reject_reachable(
     Ok(())
 }
 
+fn reject_reachable_except_via(
+    graph: &BTreeMap<String, BTreeSet<String>>,
+    start: &str,
+    forbidden: &BTreeMap<&str, BTreeSet<&str>>,
+) -> Result<(), String> {
+    let mut pending = graph
+        .get(start)
+        .into_iter()
+        .flatten()
+        .map(|dependency| (dependency.as_str(), dependency.as_str()))
+        .collect::<VecDeque<_>>();
+    let mut visited = BTreeSet::new();
+    while let Some((package, first_hop)) = pending.pop_front() {
+        if !visited.insert((package, first_hop)) {
+            continue;
+        }
+        if let Some(approved_bridges) = forbidden.get(package)
+            && !approved_bridges.contains(first_hop)
+        {
+            return Err(format!(
+                "prohibited dependency path: {start} reaches {package} via {first_hop}"
+            ));
+        }
+        for dependency in graph.get(package).into_iter().flatten() {
+            pending.push_back((dependency, first_hop));
+        }
+    }
+    Ok(())
+}
+
 fn run(root: &Path, program: &str, args: &[&str]) -> Result<(), String> {
     let status = Command::new(program)
         .args(args)
@@ -852,5 +928,66 @@ mod tests {
             .filter_map(dependency_name)
             .collect::<Vec<_>>();
         assert_eq!(dependencies, ["keith-runtime", "keith-windows"]);
+    }
+
+    #[test]
+    fn dependency_policy_requires_private_workspace_packages() {
+        assert!(package_publish_is_disabled(
+            "[package]\nname = \"private\"\npublish = false\n"
+        ));
+        assert!(!package_publish_is_disabled(
+            "[package]\nname = \"public\"\npublish = true\n"
+        ));
+        assert!(!package_publish_is_disabled(
+            "[package]\nname = \"implicit-public\"\n"
+        ));
+    }
+
+    #[test]
+    fn daemon_executor_access_requires_the_self_evolution_bridge() {
+        let allowed = BTreeMap::from([
+            (
+                "keith-daemon-core".into(),
+                BTreeSet::from(["keith-self-evolution".into()]),
+            ),
+            (
+                "keith-self-evolution".into(),
+                BTreeSet::from(["keith-sandbox".into(), "keith-tool-runner-core".into()]),
+            ),
+            ("keith-sandbox".into(), BTreeSet::new()),
+            ("keith-tool-runner-core".into(), BTreeSet::new()),
+        ]);
+        let forbidden = BTreeMap::from([
+            ("keith-sandbox", BTreeSet::from(["keith-self-evolution"])),
+            (
+                "keith-tool-runner-core",
+                BTreeSet::from(["keith-self-evolution"]),
+            ),
+        ]);
+        reject_reachable_except_via(&allowed, "keith-daemon-core", &forbidden).unwrap();
+
+        let direct = BTreeMap::from([
+            (
+                "keith-daemon-core".into(),
+                BTreeSet::from(["keith-sandbox".into()]),
+            ),
+            ("keith-sandbox".into(), BTreeSet::new()),
+        ]);
+        assert!(reject_reachable_except_via(&direct, "keith-daemon-core", &forbidden).is_err());
+
+        let wrong_bridge = BTreeMap::from([
+            (
+                "keith-daemon-core".into(),
+                BTreeSet::from(["keith-runtime-api".into()]),
+            ),
+            (
+                "keith-runtime-api".into(),
+                BTreeSet::from(["keith-sandbox".into()]),
+            ),
+            ("keith-sandbox".into(), BTreeSet::new()),
+        ]);
+        assert!(
+            reject_reachable_except_via(&wrong_bridge, "keith-daemon-core", &forbidden).is_err()
+        );
     }
 }
