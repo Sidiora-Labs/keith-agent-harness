@@ -1,5 +1,10 @@
 #![forbid(unsafe_code)]
 
+mod bindings;
+mod memory_intake;
+#[cfg(test)]
+mod memory_intake_tests;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -20,7 +25,7 @@ use keith_agent_loop::{
     CompactionProgress, ContextCompactor, NoSteering,
 };
 use keith_agent_types::{
-    ActionId, CURRENT_SCHEMA_VERSION, ClientId, EntityId, EntryId, Generation, KernelId, MessageId,
+    ActionId, BindingTaskScope, CURRENT_SCHEMA_VERSION, ClientId, EntityId, EntryId, Generation, KernelId, MessageId,
     ProfileId, Revision, RootTreeId, SessionId, TimeZoneName, ToolEffectState, ToolFailure, TurnId,
     UtcTimestamp, WorkerId, WorkspaceId,
 };
@@ -134,10 +139,11 @@ use keith_self_evolution::{
     CandidateOutcome, CorpusError, ReplayOutcome, ReplayTape, ReplayVerdict, TraceReplay, TraceStep,
 };
 use keith_session_store::{
-    CompactionFailureStage, CompactionOutput, CompactionPolicy, CompactionRequest,
-    CompactionTrigger, ContentBlock as StoredContentBlock, MessageRole as StoredMessageRole,
-    NewSession, Sensitivity, SessionEntry, SessionEntryPayload, SessionKind, SessionManifest,
-    SessionStore, SessionStoreError, StoredMessage, TurnTerminalStatus, WriterIdentity,
+    CommittedSourceLimits, CompactionFailureStage, CompactionOutput, CompactionPolicy,
+    CompactionRequest, CompactionTrigger, ContentBlock as StoredContentBlock,
+    MessageRole as StoredMessageRole, NewSession, Sensitivity, SessionEntry, SessionEntryPayload,
+    SessionKind, SessionManifest, SessionStore, SessionStoreError, StoredMessage,
+    TurnTerminalStatus, WriterIdentity,
 };
 use keith_skills::{SkillLimits, SkillRegistry, SkillRoots, SkillSelectionRequest};
 use keith_state_store::{EmbeddedStore, FileBackupHook, StoreError};
@@ -309,6 +315,7 @@ pub struct LocalRuntime {
     owner_instance: EntityId,
     system_modules: SystemModules,
     profile_modules: Mutex<BTreeMap<ProfileId, Arc<ProfileModules>>>,
+    memory_intake: Mutex<memory_intake::MemoryIntakeState>,
 }
 
 /// Credential-free runtime used only by an isolated candidate worker.
@@ -1702,6 +1709,7 @@ impl LocalRuntime {
             owner_instance: config.owner_instance,
             system_modules,
             profile_modules: Mutex::new(BTreeMap::new()),
+            memory_intake: Mutex::new(memory_intake::MemoryIntakeState::default()),
         };
         runtime.bootstrap_default_profile(&config.workspace_root)?;
         for profile in runtime.registered_profiles()? {
@@ -1709,7 +1717,12 @@ impl LocalRuntime {
         }
         runtime.register_child_roots()?;
         runtime.children.recover_active()?;
-        runtime.recover_unfinished_turn_obligations()?;
+        let sessions = runtime.sessions()?;
+        runtime.recover_unfinished_turn_obligations(&sessions)?;
+        runtime.replay_memory_intake(
+            &sessions,
+            UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
+        );
         Ok(runtime)
     }
 
@@ -1847,7 +1860,10 @@ impl LocalRuntime {
         let source_entries = source
             .active_leaf
             .as_ref()
-            .map(|leaf| self.sessions.load_index(source_session_id)?.ancestry(leaf))
+            .map(|leaf| {
+                self.sessions
+                    .committed_ancestry(&source.profile_id, source_session_id, leaf)
+            })
             .transpose()?
             .unwrap_or_default();
         let profile = self.profile(&source.profile_id)?;
@@ -1877,10 +1893,7 @@ impl LocalRuntime {
             )?;
             for source_entry in source_entries {
                 let parent = writer.manifest().active_leaf.clone();
-                if let Some(payload) = fork_context_payload(&source_entry.payload, parent.as_ref())
-                {
-                    writer.append(parent, source_entry.timestamp, payload)?;
-                }
+                writer.append_source_copy(parent, &source_entry)?;
             }
             Ok::<(), LocalRuntimeError>(())
         })();
@@ -1903,6 +1916,7 @@ impl LocalRuntime {
             let _ = self.sessions.delete_archived(session_id);
             return Err(error.into());
         }
+        self.schedule_memory_intake(session_id);
         self.sessions.manifest(session_id).map_err(Into::into)
     }
 
@@ -1973,13 +1987,6 @@ impl LocalRuntime {
         let profile = self.profile(&manifest.profile_id)?;
         self.prepare_model_route(&profile)?;
         self.adapt_model_route(&profile, text)?;
-        let tools = self.tool_manager(&profile, session_id, text)?;
-        let definitions = tools
-            .discover()?
-            .available
-            .into_iter()
-            .map(|definition| definition.model_definition())
-            .collect();
         let identity = self.writer_identity(generation, UtcTimestamp::now()?);
         let mut writer = self.sessions.acquire_writer(session_id, identity)?;
         let (ingress_source_id, action_id, assigned_turn_id, assigned_accepted_at) = match ingress {
@@ -2001,10 +2008,19 @@ impl LocalRuntime {
                 .finalized_turn_outbox_for_action(session_id, action_id)?
                 .is_some()
         {
+            self.schedule_memory_intake(session_id);
             return self.snapshot(session_id, generation, SessionState::Ready);
         }
         let turn_id = assigned_turn_id.clone().unwrap_or_else(TurnId::new);
         let obligation_action_id = action_id.clone().unwrap_or_else(ActionId::new);
+        let binding_scope = self.binding_task_scope(&manifest, &obligation_action_id)?;
+        let tools = self.tool_manager(&profile, session_id, text, &binding_scope)?;
+        let definitions = tools
+            .discover()?
+            .available
+            .into_iter()
+            .map(|definition| definition.model_definition())
+            .collect();
         let accepted_at = assigned_accepted_at.unwrap_or(UtcTimestamp::now()?);
         let cancellation = CancellationToken::default();
         {
@@ -2041,7 +2057,7 @@ impl LocalRuntime {
         } else {
             None
         };
-        let ingress_entry = if let Some(existing) = existing_ingress {
+        let (ingress_entry, ingress_source) = if let Some(existing) = existing_ingress {
             let SessionEntryPayload::UserMessage { message } = &existing.payload else {
                 unreachable!("existing ingress selector only returns user messages")
             };
@@ -2053,7 +2069,14 @@ impl LocalRuntime {
                     "accepted action conflicts with its durable user ingress".into(),
                 ));
             }
-            existing
+            let source = writer
+                .committed_source_entry(
+                    &manifest.profile_id,
+                    &existing.id,
+                    CommittedSourceLimits::default(),
+                )
+                .ok();
+            (existing, source)
         } else {
             let mut provider_metadata = BTreeMap::from([
                 ("ingress_source_id".into(), ingress_source_id.clone()),
@@ -2065,7 +2088,7 @@ impl LocalRuntime {
                     obligation_action_id.to_string(),
                 );
             }
-            match writer.append(
+            match writer.append_committed_source(
                 writer.manifest().active_leaf.clone(),
                 accepted_at,
                 match ingress {
@@ -2089,7 +2112,7 @@ impl LocalRuntime {
                     }
                 },
             ) {
-                Ok(entry) => entry,
+                Ok(source) => (source.entry().clone(), Some(source)),
                 Err(error) => {
                     let _ = self.finish_turn_lease(session_id, &lease_id);
                     return Err(error.into());
@@ -2105,6 +2128,14 @@ impl LocalRuntime {
             let _ = self.finish_turn_lease(session_id, &lease_id);
             return Err(error.into());
         }
+        if let Some(source) = &ingress_source
+            && let Ok(modules) = self.profile_modules(&profile)
+        {
+            // Exact current-user attribution is independent of historical replay progress.
+            // An optional intake failure cannot reject an accepted turn.
+            let _ = modules.memory.ingest_committed_entry(source, accepted_at);
+        }
+        self.schedule_memory_intake(session_id);
         let request = match self.model_request(
             &profile,
             session_id,
@@ -2117,7 +2148,12 @@ impl LocalRuntime {
                 TurnIngress::Controller { .. } => None,
             },
             matches!(ingress, TurnIngress::User { .. }).then_some(ingress_source_id.as_str()),
-        ) {
+        ).and_then(|mut request| {
+            self.prepare_binding_context(
+                &profile, &binding_scope, &turn_id, &mut writer, &mut request, text,
+            )?;
+            Ok(request)
+        }) {
             Ok(request) => request,
             Err(error) => {
                 return self.finalize_accepted_failure(
@@ -2165,17 +2201,20 @@ impl LocalRuntime {
             active_user_source_id: matches!(ingress, TurnIngress::User { .. })
                 .then_some(ingress_source_id.as_str()),
         };
+        let binding_executor = bindings::BindingExecutor::new(
+            binding_scope.clone(), self.profile_modules(&profile)?, &tools,
+        );
         let mut agent_loop = AgentLoop::new(
             &self.models,
             &manifest.profile_id,
             &resolver,
-            &tools,
+            &binding_executor,
             &spill,
             &compactor,
             &NoSteering,
             &mut writer,
             AgentLoopConfig::default(),
-        );
+        ).with_tool_admission(&binding_executor);
         agent_loop.subscribe(|event: &AgentEvent| {
             last_event_sequence = event.sequence;
             let kind =
@@ -2314,6 +2353,7 @@ impl LocalRuntime {
                 return Err(error.into());
             }
         };
+        self.schedule_memory_intake(session_id);
 
         let mut maintenance_failures = Vec::new();
         match self.apply_kernel_effects(session_id, &mut writer) {
@@ -2485,6 +2525,7 @@ impl LocalRuntime {
             artifact_ids,
             Some(failures.join("; ")),
         )?;
+        self.schedule_memory_intake(session_id);
         if let Err(error) = self.finish_turn_lease(session_id, lease_id) {
             let parent = writer.manifest().active_leaf.clone();
             let _ = writer.append(
@@ -2543,6 +2584,7 @@ impl LocalRuntime {
             }
         };
         let emission = writer.commit_compaction(&request, output, UtcTimestamp::now()?)?;
+        self.schedule_memory_intake(&writer.manifest().session_id);
         if let Err(error) = self.profile_modules(profile)?.memory.apply_compaction(
             &writer.manifest().session_id,
             emission,
@@ -4088,6 +4130,7 @@ impl LocalRuntime {
             let Some(finalized) = finalized else {
                 continue;
             };
+            self.schedule_memory_intake(session_id);
             let delivery = self
                 .enqueue_action_delivery(&record.action, &finalized)
                 .and_then(|()| {
@@ -4107,8 +4150,11 @@ impl LocalRuntime {
             .transpose()
     }
 
-    fn recover_unfinished_turn_obligations(&self) -> Result<(), LocalRuntimeError> {
-        for manifest in self.sessions()? {
+    fn recover_unfinished_turn_obligations(
+        &self,
+        sessions: &[SessionManifest],
+    ) -> Result<(), LocalRuntimeError> {
+        for manifest in sessions {
             self.sessions.recover(
                 &manifest.session_id,
                 UtcTimestamp::now().unwrap_or(UtcTimestamp::UNIX_EPOCH),
@@ -4205,6 +4251,7 @@ impl LocalRuntime {
                 artifact_ids,
                 Some(detail.into()),
             )?;
+            self.schedule_memory_intake(&manifest.session_id);
         }
         Ok(())
     }
@@ -4330,6 +4377,7 @@ impl LocalRuntime {
             artifact_ids,
             Some(detail.into()),
         )?;
+        self.schedule_memory_intake(&action.session_id);
         Ok(true)
     }
 
@@ -5106,6 +5154,7 @@ impl LocalRuntime {
             .reclaim_idle(now)
             .map_err(module_error)?;
         let sessions = self.sessions()?;
+        self.replay_memory_intake(&sessions, now);
         {
             let mut mcp = self
                 .system_modules
@@ -5903,7 +5952,6 @@ impl LocalRuntime {
         let modules = self.profile_modules(profile)?;
         let now = UtcTimestamp::now()?;
         let _ = modules.workspace.scan_external_changes(now);
-        modules.memory.enqueue_session_entries(session_id, entries);
         if active_user_source_id.is_some() {
             push_system_context(
                 &mut system,
@@ -6212,6 +6260,7 @@ impl LocalRuntime {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn provider_history(
         &self,
         entries: &[SessionEntry],
@@ -6388,6 +6437,7 @@ impl LocalRuntime {
         profile: &RegisteredProfile,
         session_id: &SessionId,
         task: &str,
+        binding_scope: &BindingTaskScope,
     ) -> Result<ToolManager, LocalRuntimeError> {
         let installation = ExecutionRules {
             default: ExecutionDecision::Allow,
@@ -6483,7 +6533,7 @@ impl LocalRuntime {
         manager.register(Arc::new(ListTool::new(Arc::clone(&workspace))))?;
         manager.register(Arc::new(SearchTool::new(Arc::clone(&workspace))))?;
         manager.register(Arc::new(BashTool::new(&profile.resources.workspace_root)?))?;
-        for memory_tool in MemoryTool::all(Arc::clone(&modules), session_id.clone()) {
+        for memory_tool in MemoryTool::all(Arc::clone(&modules), binding_scope.clone()) {
             manager.register(Arc::new(memory_tool))?;
         }
         manager.register(Arc::new(SkillManageTool::new(
@@ -7938,6 +7988,17 @@ fn memory_write_source(
     invocation: &ToolInvocation,
 ) -> Result<MemoryWriteSource, ToolExecutionError> {
     Ok(MemoryWriteSource {
+        evidence_id: invocation
+            .arguments
+            .get("source_evidence_id")
+            .map(|value| {
+                value
+                    .as_str()
+                    .ok_or_else(|| ToolExecutionError::new("source_evidence_id must be a string"))?
+                    .parse::<EntityId>()
+                    .map_err(tool_error)
+            })
+            .transpose()?,
         source_entry_id: string_argument(invocation, "source_entry_id")?
             .parse::<EntryId>()
             .map_err(tool_error)?,
@@ -8343,13 +8404,13 @@ enum MemoryToolKind {
 struct MemoryTool {
     definition: ToolDefinition,
     modules: Arc<ProfileModules>,
-    session_id: SessionId,
+    scope: BindingTaskScope,
     kind: MemoryToolKind,
 }
 
 impl MemoryTool {
     #[allow(clippy::needless_pass_by_value)]
-    fn all(modules: Arc<ProfileModules>, session_id: SessionId) -> Vec<Self> {
+    fn all(modules: Arc<ProfileModules>, scope: BindingTaskScope) -> Vec<Self> {
         [
             MemoryToolKind::Create,
             MemoryToolKind::Search,
@@ -8362,7 +8423,7 @@ impl MemoryTool {
         .map(|kind| Self {
             definition: memory_tool_definition(kind),
             modules: Arc::clone(&modules),
-            session_id: session_id.clone(),
+            scope: scope.clone(),
             kind,
         })
         .collect()
@@ -8401,12 +8462,7 @@ impl ManagedTool for MemoryTool {
                     facets,
                     sensitivity: memory_sensitivity_argument(invocation, Sensitivity::Personal)?,
                 };
-                let record = self
-                    .modules
-                    .memory
-                    .memory_create(request, now)
-                    .map_err(tool_error)?;
-                serde_json::to_vec(&record).map_err(tool_error)
+                bindings::create_memory(&self.modules.memory, &self.scope, request, invocation, now)
             }
             MemoryToolKind::Search => {
                 let query = string_argument(invocation, "query")?;
@@ -8450,12 +8506,7 @@ impl ManagedTool for MemoryTool {
                     facets: memory_facets_argument(invocation)?,
                     sensitivity: optional_memory_sensitivity_argument(invocation)?,
                 };
-                let record = self
-                    .modules
-                    .memory
-                    .memory_correct(request, now)
-                    .map_err(tool_error)?;
-                serde_json::to_vec(&record).map_err(tool_error)
+                bindings::correct_memory(&self.modules.memory, &self.scope, request, invocation, now)
             }
             MemoryToolKind::Forget => {
                 let evidence_id = string_argument(invocation, "evidence_id")?
@@ -8478,11 +8529,16 @@ impl ManagedTool for MemoryTool {
                 .map_err(tool_error)
             }
             MemoryToolKind::Context => {
+                if invocation.arguments.get("required_bindings").is_some() {
+                    return bindings::required_memory_context(
+                        &self.modules.memory, &self.scope, invocation, now,
+                    );
+                }
                 let bundle = self
                     .modules
                     .memory
                     .memory_context(
-                        &self.session_id,
+                        &self.scope.session_id,
                         &string_argument(invocation, "query")?,
                         u64_argument(invocation, "token_budget", 2_400, 128, 16_000)?,
                         self.modules.memory.max_automatic_sensitivity(),
@@ -8500,6 +8556,7 @@ impl ManagedTool for MemoryTool {
 #[allow(clippy::too_many_lines)]
 fn memory_tool_definition(kind: MemoryToolKind) -> ToolDefinition {
     let write_source = serde_json::json!({
+        "source_evidence_id": {"type": "string", "description": "Optional exact evidence ID when quoting a derived record instead of the direct source entry"},
         "source_entry_id": {"type": "string", "description": "Exact committed source entry ID"},
         "evidence_quote": {"type": "string", "description": "Exact verbatim quote contained in that source entry"}
     });
@@ -8534,7 +8591,8 @@ fn memory_tool_definition(kind: MemoryToolKind) -> ToolDefinition {
                     "kind": {"type": "string", "enum": ["preference", "personal_fact", "project_context", "routine", "relationship", "commitment", "procedure", "preferred_name"]},
                     "preferred_name": {"type": "string", "description": "For kind preferred_name only: the exact user-chosen name and nothing else"},
                     "facets": facets,
-                    "sensitivity": sensitivity
+                    "sensitivity": sensitivity,
+                    "binding": bindings::draft_schema()
                 }),
             ),
             &["source_entry_id", "evidence_quote", "text", "kind"],
@@ -8568,7 +8626,9 @@ fn memory_tool_definition(kind: MemoryToolKind) -> ToolDefinition {
                     "evidence_id": {"type": "string"},
                     "replacement": {"type": "string"},
                     "facets": facets,
-                    "sensitivity": sensitivity
+                    "sensitivity": sensitivity,
+                    "binding": bindings::correction_schema(),
+                    "expected_binding": bindings::reference_schema()
                 }),
             ),
             &[
@@ -10182,52 +10242,6 @@ fn runtime_session(session: &SessionManifest) -> RuntimeSession {
     }
 }
 
-fn fork_context_payload(
-    payload: &SessionEntryPayload,
-    current_leaf: Option<&EntryId>,
-) -> Option<SessionEntryPayload> {
-    match payload {
-        SessionEntryPayload::UserMessage { message } => Some(SessionEntryPayload::UserMessage {
-            message: message.clone(),
-        }),
-        SessionEntryPayload::AssistantMessage { message }
-        | SessionEntryPayload::AssistantActivity { message, .. }
-        | SessionEntryPayload::AssistantFinal { message, .. } => {
-            Some(SessionEntryPayload::AssistantMessage {
-                message: message.clone(),
-            })
-        }
-        SessionEntryPayload::ToolCall {
-            call_id,
-            name,
-            arguments,
-        } => Some(SessionEntryPayload::ToolCall {
-            call_id: call_id.clone(),
-            name: name.clone(),
-            arguments: arguments.clone(),
-        }),
-        SessionEntryPayload::ToolResult {
-            call_id,
-            content,
-            is_error,
-            failure,
-        } => Some(SessionEntryPayload::ToolResult {
-            call_id: call_id.clone(),
-            content: content.clone(),
-            is_error: *is_error,
-            failure: failure.clone(),
-        }),
-        SessionEntryPayload::Compaction { summary, .. }
-        | SessionEntryPayload::CompactionCheckpoint { summary, .. } => {
-            current_leaf.map(|compacted_through| SessionEntryPayload::Compaction {
-                summary: summary.clone(),
-                compacted_through: compacted_through.clone(),
-            })
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -10241,14 +10255,14 @@ mod tests {
 
     use super::*;
 
-    struct ProviderServer {
-        base_url: String,
+    pub(super) struct ProviderServer {
+        pub(super) base_url: String,
         requests: mpsc::Receiver<String>,
         thread: Option<thread::JoinHandle<()>>,
     }
 
     impl ProviderServer {
-        fn start(responses: Vec<String>) -> Self {
+        pub(super) fn start(responses: Vec<String>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             let (sender, requests) = mpsc::channel();
@@ -10268,7 +10282,7 @@ mod tests {
             }
         }
 
-        fn request(&self) -> String {
+        pub(super) fn request(&self) -> String {
             self.requests.recv_timeout(Duration::from_secs(5)).unwrap()
         }
     }
@@ -10831,44 +10845,50 @@ mod tests {
                 Some("Earlier database choice".into()),
             )
             .unwrap();
-        let source_entry = SessionEntry::new(
-            EntryId::new(),
-            None,
-            UtcTimestamp::from_unix_millis(1),
-            SessionEntryPayload::UserMessage {
-                message: StoredMessage {
-                    role: StoredMessageRole::User,
-                    content: vec![StoredContentBlock::Text {
-                        text: "We chose Postgres for the routing database".into(),
-                    }],
-                    provider_metadata: BTreeMap::new(),
-                },
-            },
-        )
-        .unwrap();
-        let unrelated_entry = SessionEntry::new(
-            EntryId::new(),
-            Some(source_entry.id.clone()),
-            UtcTimestamp::from_unix_millis(2),
-            SessionEntryPayload::UserMessage {
-                message: StoredMessage {
-                    role: StoredMessageRole::User,
-                    content: vec![StoredContentBlock::Text {
-                        text: "Tomatoes grow in the sunny garden".into(),
-                    }],
-                    provider_metadata: BTreeMap::new(),
-                },
-            },
-        )
-        .unwrap();
-        modules
-            .memory
-            .ingest_session_entries(
+        let mut source_writer = runtime
+            .sessions
+            .acquire_writer(
                 &source_session.session_id,
-                &[source_entry, unrelated_entry],
-                UtcTimestamp::from_unix_millis(3),
+                runtime.writer_identity(Generation::new(1), UtcTimestamp::UNIX_EPOCH),
             )
             .unwrap();
+        let source_entry = source_writer
+            .append_committed_source(
+                None,
+                UtcTimestamp::from_unix_millis(1),
+                SessionEntryPayload::UserMessage {
+                    message: StoredMessage {
+                        role: StoredMessageRole::User,
+                        content: vec![StoredContentBlock::Text {
+                            text: "We chose Postgres for the routing database".into(),
+                        }],
+                        provider_metadata: BTreeMap::new(),
+                    },
+                },
+            )
+            .unwrap();
+        let unrelated_entry = source_writer
+            .append_committed_source(
+                Some(source_entry.entry().id.clone()),
+                UtcTimestamp::from_unix_millis(2),
+                SessionEntryPayload::UserMessage {
+                    message: StoredMessage {
+                        role: StoredMessageRole::User,
+                        content: vec![StoredContentBlock::Text {
+                            text: "Tomatoes grow in the sunny garden".into(),
+                        }],
+                        provider_metadata: BTreeMap::new(),
+                    },
+                },
+            )
+            .unwrap();
+        drop(source_writer);
+        for source in [source_entry, unrelated_entry] {
+            modules
+                .memory
+                .ingest_committed_entry(&source, UtcTimestamp::from_unix_millis(3))
+                .unwrap();
+        }
         let target = runtime
             .create_session(
                 &profile.profile.id,
@@ -11373,6 +11393,23 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(
+            runtime
+                .replay_memory_intake(&runtime.sessions().unwrap(), UtcTimestamp::UNIX_EPOCH)
+                .failed_sessions,
+            0
+        );
+        assert!(
+            runtime
+                .profile_modules(&profile)
+                .unwrap()
+                .memory
+                .observatory()
+                .evidence_snapshot()
+                .unwrap()
+                .values()
+                .any(|record| record.source_entries.contains(&finals[0].id))
+        );
     }
 
     #[test]
@@ -11596,6 +11633,24 @@ mod tests {
                 .filter(|entry| matches!(entry.payload, SessionEntryPayload::TerminalTurn { .. }))
                 .count(),
             1
+        );
+        assert_eq!(
+            restarted
+                .replay_memory_intake(&restarted.sessions().unwrap(), UtcTimestamp::UNIX_EPOCH)
+                .failed_sessions,
+            0
+        );
+        let final_id = &snapshot.terminal.as_ref().unwrap().final_id;
+        assert!(
+            restarted
+                .profile_modules(&profile)
+                .unwrap()
+                .memory
+                .observatory()
+                .evidence_snapshot()
+                .unwrap()
+                .values()
+                .any(|record| record.source_entries.contains(final_id))
         );
     }
 
@@ -12061,14 +12116,11 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn admitted_child_runs_the_real_provider_loop_and_returns_a_parent_action() {
         let models = r#"{"data":[{"id":"gpt-4.1-mini"}]}"#;
-        let child_turn = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Child runtime completed the delegated analysis.\"},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":9}}\n\n",
-            "data: [DONE]\n\n"
-        );
+        let child_turn =
+            responses_text_stream("Child runtime completed the delegated analysis.", 17, 9);
         let server = ProviderServer::start(vec![
             response("application/json", models),
-            response("text/event-stream", child_turn),
+            response("text/event-stream", &child_turn),
         ]);
         let root = tempfile::tempdir().unwrap();
         let data_root = root.path().join("data");
@@ -12198,7 +12250,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let user_messages = body["messages"]
+        let user_messages = body["input"]
             .as_array()
             .unwrap()
             .iter()
@@ -12243,14 +12295,29 @@ mod tests {
         String::from_utf8(bytes).unwrap()
     }
 
-    fn response(content_type: &str, body: &str) -> String {
+    pub(super) fn responses_text_stream(
+        text: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> String {
+        let delta = serde_json::json!({"type": "response.output_text.delta", "delta": text});
+        let completed = serde_json::json!({"type": "response.completed", "response": {"usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}}});
+        format!("data: {delta}\n\ndata: {completed}\n\n")
+    }
+
+    pub(super) fn response(content_type: &str, body: &str) -> String {
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
     }
 
-    fn seed_provider_credential(root: &Path, key: [u8; 32], provider: &str, secret: &str) {
+    pub(super) fn seed_provider_credential(
+        root: &Path,
+        key: [u8; 32],
+        provider: &str,
+        secret: &str,
+    ) {
         EncryptedCredentialStore::open(root, MasterKey::from_bytes(key))
             .unwrap()
             .put(
@@ -12270,20 +12337,16 @@ mod tests {
     fn clean_install_runs_real_provider_tool_turn_and_resumes_after_restart() {
         let models = r#"{"data":[{"id":"gpt-4.1-mini"}]}"#;
         let tool_turn = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"I'll write and verify that now.\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_write\",\"function\":{\"name\":\"write\",\"arguments\":\"{\\\"path\\\":\\\"provider-proof.txt\\\",\\\"content\\\":\\\"real provider tool turn\\\\n\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n",
-            "data: [DONE]\n\n"
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"I'll write and verify that now.\"}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"write\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"write\",\"arguments\":\"{\\\"path\\\":\\\"provider-proof.txt\\\",\\\"content\\\":\\\"real provider tool turn\\\\n\\\"}\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":11,\"output_tokens\":7}}}\n\n"
         );
-        let final_turn = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"The provider wrote the proof file.\"},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":19,\"completion_tokens\":8}}\n\n",
-            "data: [DONE]\n\n"
-        );
+        let final_turn = responses_text_stream("The provider wrote the proof file.", 19, 8);
         let server = ProviderServer::start(vec![
             response("application/json", models),
             response("text/event-stream", tool_turn),
-            response("text/event-stream", final_turn),
+            response("text/event-stream", &final_turn),
         ]);
         let root = tempfile::tempdir().unwrap();
         let data_root = root.path().join("data");
@@ -12353,9 +12416,9 @@ mod tests {
         let second_turn_request = server.request();
         assert!(discovery_request.starts_with("GET /v1/models "));
         assert!(discovery_request.contains("authorization: Bearer provider-integration-secret"));
-        assert!(first_turn_request.starts_with("POST /v1/chat/completions "));
+        assert!(first_turn_request.starts_with("POST /v1/responses "));
         assert!(first_turn_request.contains("\"name\":\"write\""));
-        assert!(second_turn_request.contains("\"role\":\"tool\""));
+        assert!(second_turn_request.contains("\"type\":\"function_call_output\""));
         assert!(second_turn_request.contains("I'll write and verify that now."));
         assert!(
             !first_turn_request
@@ -12391,36 +12454,24 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn context_overflow_retries_only_after_a_durable_continuation_checkpoint() {
         let models = r#"{"data":[{"id":"gpt-4.1-mini"}]}"#;
-        let primary_turn = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Primary answer before overflow.\"},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":8}}\n\n",
-            "data: [DONE]\n\n"
+        let primary_turn = responses_text_stream("Primary answer before overflow.", 1200, 8);
+        let second_primary_turn = responses_text_stream("Second answer before overflow.", 1300, 7);
+        let overflow_turn = "data: {\"type\":\"error\",\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"maximum context length exceeded\"}}\n\n";
+        let checkpoint_turn = responses_text_stream(
+            "Progress: retain lighthouse-731. Next: continue from the exact retained tail.",
+            1300,
+            26,
         );
-        let second_primary_turn = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Second answer before overflow.\"},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1300,\"completion_tokens\":7}}\n\n",
-            "data: [DONE]\n\n"
-        );
-        let overflow_turn = "data: {\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"maximum context length exceeded\"}}\n\n";
-        let checkpoint_turn = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Progress: retain lighthouse-731. Next: continue from the exact retained tail.\"},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1300,\"completion_tokens\":26}}\n\n",
-            "data: [DONE]\n\n"
-        );
-        let retry_turn = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Recovered after durable compaction.\"},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":6}}\n\n",
-            "data: [DONE]\n\n"
-        );
+        let retry_turn = responses_text_stream("Recovered after durable compaction.", 900, 6);
         let server = ProviderServer::start(vec![
             response("application/json", models),
-            response("text/event-stream", primary_turn),
+            response("text/event-stream", &primary_turn),
             response("application/json", models),
-            response("text/event-stream", second_primary_turn),
+            response("text/event-stream", &second_primary_turn),
             response("application/json", models),
             response("text/event-stream", overflow_turn),
-            response("text/event-stream", checkpoint_turn),
-            response("text/event-stream", retry_turn),
+            response("text/event-stream", &checkpoint_turn),
+            response("text/event-stream", &retry_turn),
         ]);
         let root = tempfile::tempdir().unwrap();
         let data_root = root.path().join("data");
@@ -12594,12 +12645,12 @@ mod tests {
         let compaction_request = server.request();
         let retry_request = server.request();
         assert!(discovery_request.starts_with("GET /v1/models "));
-        assert!(primary_request.starts_with("POST /v1/chat/completions "));
+        assert!(primary_request.starts_with("POST /v1/responses "));
         assert!(restarted_discovery_request.starts_with("GET /v1/models "));
         assert!(second_primary_request.contains("comet-884"));
         assert!(third_discovery_request.starts_with("GET /v1/models "));
         assert!(overflow_request.contains("nova-992"));
-        assert!(compaction_request.starts_with("POST /v1/chat/completions "));
+        assert!(compaction_request.starts_with("POST /v1/responses "));
         assert!(compaction_request.contains("context checkpoint"));
         assert!(compaction_request.contains("\"tools\":[]"));
         assert!(!compaction_request.contains("nova-992"));
@@ -12861,11 +12912,21 @@ mod tests {
             .unwrap();
         assert!(matches!(schedule, CommandResult::Data(_)));
 
+        let source = runtime
+            .sessions
+            .committed_source_entry(
+                &profile.profile.id,
+                &session.session_id,
+                &first_entry.id,
+                CommittedSourceLimits::default(),
+            )
+            .unwrap();
         runtime
             .profile_modules(&profile)
             .unwrap()
             .memory
-            .enqueue_session_entries(&session.session_id, std::slice::from_ref(&first_entry));
+            .ingest_committed_entry(&source, UtcTimestamp::UNIX_EPOCH)
+            .unwrap();
         let memory = runtime
             .execute_feature(
                 &client_id,

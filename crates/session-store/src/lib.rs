@@ -1,5 +1,18 @@
 #![forbid(unsafe_code)]
 
+mod committed;
+mod bindings;
+
+pub use bindings::{
+    FrozenBindingAdmission, FrozenObjectBindingUse, MAX_REQUIRED_OBJECT_BINDINGS,
+    RequiredObjectBinding, RequiredObjectBindings, binding_arguments_digest,
+};
+
+pub use committed::{
+    CommittedSourceCursor, CommittedSourceEntry, CommittedSourceLimits, CommittedSourcePage,
+    CommittedSourceReference,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
@@ -312,6 +325,12 @@ pub enum SessionEntryPayload {
         name: String,
         arguments: serde_json::Value,
     },
+    RequiredObjectBindings {
+        record: RequiredObjectBindings,
+    },
+    BindingAdmission {
+        admission: FrozenBindingAdmission,
+    },
     ToolResult {
         call_id: ToolCallId,
         content: Vec<ContentBlock>,
@@ -430,6 +449,8 @@ pub struct SessionEntry {
     pub parent_id: Option<EntryId>,
     pub timestamp: UtcTimestamp,
     pub payload: SessionEntryPayload,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_from: Option<CommittedSourceReference>,
     pub checksum: String,
 }
 
@@ -440,6 +461,8 @@ struct ChecksumInput<'a> {
     parent_id: &'a Option<EntryId>,
     timestamp: UtcTimestamp,
     payload: &'a SessionEntryPayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copied_from: &'a Option<CommittedSourceReference>,
 }
 
 impl SessionEntry {
@@ -458,6 +481,7 @@ impl SessionEntry {
             parent_id,
             timestamp,
             payload,
+            copied_from: None,
             checksum: String::new(),
         };
         entry.checksum = entry.expected_checksum()?;
@@ -472,6 +496,9 @@ impl SessionEntry {
             || self.version.minor > CURRENT_SCHEMA_VERSION.minor
         {
             return Err(SessionStoreError::UnsupportedVersion(self.version));
+        }
+        if let Some(source) = &self.copied_from {
+            source.validate()?;
         }
         let expected = self.expected_checksum()?;
         if self.checksum == expected {
@@ -488,6 +515,7 @@ impl SessionEntry {
             parent_id: &self.parent_id,
             timestamp: self.timestamp,
             payload: &self.payload,
+            copied_from: &self.copied_from,
         })?;
         let digest = Sha256::digest(bytes);
         let mut checksum = String::with_capacity(64);
@@ -1088,6 +1116,18 @@ pub enum SessionStoreError {
     StaleProfileSnapshot,
     #[error("legacy session export exceeded its configured bound")]
     LegacyExportLimit,
+    #[error("committed source profile or session does not match the requested scope")]
+    SourceScopeMismatch,
+    #[error("committed source cursor no longer matches canonical history")]
+    InvalidSourceCursor,
+    #[error("committed source page exceeds its configured bound")]
+    SourceReadLimit,
+    #[error("committed source lookup did not find the entry within its configured bound")]
+    SourceLookupLimit,
+    #[error("copied source reference is invalid")]
+    InvalidSourceReference,
+    #[error("binding admission is invalid: {0}")]
+    InvalidBindingAdmission(String),
 }
 
 #[derive(Clone, Debug)]
@@ -1668,6 +1708,16 @@ impl SessionWriter {
         timestamp: UtcTimestamp,
         payload: SessionEntryPayload,
     ) -> Result<SessionEntry, SessionStoreError> {
+        self.append_attributed(parent_id, timestamp, payload, None)
+    }
+
+    fn append_attributed(
+        &mut self,
+        parent_id: Option<EntryId>,
+        timestamp: UtcTimestamp,
+        payload: SessionEntryPayload,
+        copied_from: Option<CommittedSourceReference>,
+    ) -> Result<SessionEntry, SessionStoreError> {
         self.ensure_writable()?;
         let history_path = self.directory.join(HISTORY_FILE);
         let mut index = parse_complete_history(&history_path)?;
@@ -1684,7 +1734,9 @@ impl SessionWriter {
                 return Err(SessionStoreError::MissingEntry(parent.clone()));
             }
         }
-        let entry = SessionEntry::new(EntryId::new(), parent_id, timestamp, payload)?;
+        let mut entry = SessionEntry::new(EntryId::new(), parent_id, timestamp, payload)?;
+        entry.copied_from = copied_from;
+        entry.checksum = entry.expected_checksum()?;
         index.insert(entry.clone())?;
         let mut bytes = canonical_json_bytes(&entry)?;
         bytes.push(b'\n');
@@ -2787,8 +2839,11 @@ fn validate_new_session(session: &NewSession) -> Result<(), SessionStoreError> {
 }
 
 fn read_manifest(directory: &Path) -> Result<SessionManifest, SessionStoreError> {
-    let manifest: SessionManifest =
-        serde_json::from_slice(&fs::read(directory.join(MANIFEST_FILE))?)?;
+    decode_manifest(&fs::read(directory.join(MANIFEST_FILE))?)
+}
+
+fn decode_manifest(bytes: &[u8]) -> Result<SessionManifest, SessionStoreError> {
+    let manifest: SessionManifest = serde_json::from_slice(bytes)?;
     if manifest.version.major != CURRENT_SCHEMA_VERSION.major
         || manifest.version.minor > CURRENT_SCHEMA_VERSION.minor
     {

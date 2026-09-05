@@ -1,5 +1,14 @@
 #![forbid(unsafe_code)]
 
+mod bindings;
+mod world;
+
+pub use bindings::{
+    BindingContractError, BindingTargetKind, BindingTargetSlot, BindingTaskScope, ObjectBindingKey,
+    ObjectBindingReference,
+};
+pub use world::{CURRENT_WORLD_VERSION, WorldVersion, WorldVersionError};
+
 use std::fmt::{self, Display};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -259,6 +268,7 @@ macro_rules! monotonic_counter {
 monotonic_counter!(Generation);
 monotonic_counter!(Revision);
 monotonic_counter!(Sequence);
+monotonic_counter!(CapabilityEpoch);
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum TimestampError {

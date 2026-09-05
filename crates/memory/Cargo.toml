@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+fs2.workspace = true
 keith-agent-types = { path = "../agent-types" }
 keith-platform = { path = "../platform" }
 keith-provider-core = { path = "../provider-core" }

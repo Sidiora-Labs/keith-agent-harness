@@ -1,14 +1,31 @@
 #![forbid(unsafe_code)]
 
 mod activation;
+mod bindings;
+pub use bindings::{BindingAliasCandidate, BindingAliasCandidates, BindingAssociationOrigin, BindingCorrectionDraft, BindingDraft, BindingEntityTarget, BindingError, BindingFreshness, BindingLookupRequest, BindingMutation, BindingQuery, BindingResolution, BindingResolutionReason, BindingSourceSpan, BindingUsePolicy, BindingWriteReceipt, RequiredBindingResolution, ResolvedBinding};
+mod causal;
+mod ingestion;
 mod observatory;
 mod recall;
 mod relationship;
+mod semantic;
+#[cfg(test)]
+mod test_sources;
 mod unified;
 
 pub use activation::{
     ACTIVATION_SELECTOR_VERSION, ActivationError, ActivationPolicy, ActivationRequest,
     select_activation, validate_activation,
+};
+pub use causal::{
+    EVIDENCE_CAUSAL_VERSION, EvidenceCausalMetadata, EvidenceEffectiveInterval,
+    EvidenceMetadataError, EvidenceSourceRoot, SourceLineageGap, SourceLineageGapReason,
+};
+pub use ingestion::{CommittedIngestionReceipt, IngestionProjectionStatus};
+pub use semantic::{
+    CandidateEvidenceReference, SEMANTIC_CANDIDATE_VERSION, SemanticCandidate,
+    SemanticCandidateBatch, SemanticCandidateError, SemanticCandidateLane, SemanticCandidateQuery,
+    SemanticCandidateSource, SemanticDegradedReason, SemanticIndexIdentity,
 };
 
 pub use observatory::{
@@ -132,6 +149,16 @@ impl MemoryLedger {
 
 #[derive(Debug, Error)]
 pub enum MemoryError {
+    #[error("binding failed: {0}")]
+    Binding(#[from] BindingError),
+    #[error("memory ingestion is busy; retry the same committed source")]
+    IngestionBusy,
+    #[error("memory ingestion checkpoint or committed-source scope is invalid")]
+    InvalidIngestion,
+    #[error("memory ingestion cursor changed; reload it before replay")]
+    IngestionCursorChanged,
+    #[error("memory ingestion exceeds its pending-source or checkpoint bound")]
+    IngestionLimit,
     #[error("memory I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("memory JSON failed: {0}")]
@@ -180,7 +207,6 @@ pub struct MemoryService {
     observatory: MemoryObservatory,
     recall: RecallService,
     relationship: Option<RelationshipService>,
-    pending_ingestion: Mutex<unified::PendingIngestionQueue>,
     hot_cache: Mutex<unified::HotMemoryCache>,
 }
 
@@ -230,7 +256,6 @@ impl MemoryService {
             observatory,
             recall,
             relationship,
-            pending_ingestion: Mutex::new(unified::PendingIngestionQueue::default()),
             hot_cache: Mutex::new(unified::HotMemoryCache::default()),
         })
     }
@@ -246,13 +271,13 @@ impl MemoryService {
         emission: CompactionEmission,
         now: UtcTimestamp,
     ) -> Result<ConsolidationOutcome, MemoryError> {
-        let compacted_through = match &emission.boundary.payload {
+        let source_entries = match &emission.boundary.payload {
             SessionEntryPayload::Compaction {
                 compacted_through, ..
+            } => vec![compacted_through.clone()],
+            SessionEntryPayload::CompactionCheckpoint { source_entries, .. } => {
+                source_entries.clone()
             }
-            | SessionEntryPayload::CompactionCheckpoint {
-                compacted_through, ..
-            } => compacted_through.clone(),
             _ => return Err(MemoryError::InvalidEmission),
         };
         let boundary = emission.boundary.id.clone();
@@ -279,7 +304,7 @@ impl MemoryService {
             emission,
             AdmissionContext {
                 session_id,
-                compacted_through: &compacted_through,
+                source_entries: &source_entries,
                 boundary: &boundary,
                 now,
             },
@@ -433,22 +458,6 @@ impl MemoryService {
         self.relationship.as_ref()
     }
 
-    /// Projects committed session evidence without making the atlas authoritative.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when source evidence is invalid or the append-only vault cannot persist.
-    pub fn ingest_session_entries(
-        &self,
-        session_id: &SessionId,
-        entries: &[keith_session_store::SessionEntry],
-        now: UtcTimestamp,
-    ) -> Result<u64, MemoryError> {
-        self.observatory
-            .ingest_session_entries(session_id, entries, now)
-            .map_err(Into::into)
-    }
-
     fn commit_ledger(&self, next: &mut MemoryLedger, now: UtcTimestamp) -> Result<(), MemoryError> {
         self.workspace.scan_external_changes(now)?;
         let snapshot = self
@@ -535,7 +544,7 @@ fn validate_policy(policy: MemoryPolicy) -> Result<(), MemoryError> {
 #[derive(Clone, Copy)]
 struct AdmissionContext<'a> {
     session_id: &'a SessionId,
-    compacted_through: &'a EntryId,
+    source_entries: &'a [EntryId],
     boundary: &'a EntryId,
     now: UtcTimestamp,
 }
@@ -575,7 +584,7 @@ fn admit_emission(
                 text,
                 RetentionClass::Daily,
                 context.session_id,
-                context.compacted_through,
+                context.source_entries,
                 context.boundary,
                 context.now,
             ),
@@ -611,7 +620,7 @@ fn admit_emission(
                 text,
                 RetentionClass::CurrentState,
                 context.session_id,
-                context.compacted_through,
+                context.source_entries,
                 context.boundary,
                 context.now,
             ),
@@ -626,7 +635,7 @@ fn derived_record(
     text: String,
     retention: RetentionClass,
     session_id: &SessionId,
-    compacted_through: &EntryId,
+    source_entries: &[EntryId],
     boundary: &EntryId,
     now: UtcTimestamp,
 ) -> MemoryRecord {
@@ -636,7 +645,7 @@ fn derived_record(
         kind,
         text,
         source_session: session_id.clone(),
-        source_entries: vec![compacted_through.clone()],
+        source_entries: source_entries.to_vec(),
         source_boundary: boundary.clone(),
         proposed_at: now,
         sensitivity: Sensitivity::Personal,
@@ -1045,6 +1054,32 @@ mod tests {
         (session_id, emission)
     }
 
+    fn ingest_history(
+        service: &MemoryService,
+        root: &Path,
+        profile: &ProfileId,
+        session: &SessionId,
+    ) {
+        let store = SessionStore::open(root).unwrap();
+        loop {
+            let cursor = service.committed_source_cursor(session).unwrap();
+            let page = store
+                .committed_source_page(
+                    profile,
+                    session,
+                    cursor.as_ref(),
+                    keith_session_store::CommittedSourceLimits::default(),
+                )
+                .unwrap();
+            service
+                .ingest_committed_page(&page, UtcTimestamp::UNIX_EPOCH)
+                .unwrap();
+            if page.caught_up() {
+                break;
+            }
+        }
+    }
+
     #[test]
     fn committed_output_routes_separately_and_survives_restart() {
         let directory = tempdir().unwrap();
@@ -1060,6 +1095,7 @@ mod tests {
         let (session_id, emission) = committed_emission(&session_root, profile_id.clone());
         let service =
             MemoryService::open(workspace.clone(), &profile_id, MemoryPolicy::default()).unwrap();
+        ingest_history(&service, &session_root, &profile_id, &session_id);
         let outcome = service
             .apply_compaction(&session_id, emission.clone(), UtcTimestamp::UNIX_EPOCH)
             .unwrap();
@@ -1104,6 +1140,321 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
+    fn committed_compaction_and_consolidation_keep_context_roots_without_fact_promotion() {
+        let root = tempdir().unwrap();
+        let profile = ProfileId::new();
+        let sessions = root.path().join("sessions");
+        let (session, emission) = committed_emission(&sessions, profile.clone());
+        let source_entries = match &emission.boundary.payload {
+            SessionEntryPayload::CompactionCheckpoint { source_entries, .. } => {
+                source_entries.clone()
+            }
+            _ => panic!("fixture must use the real committed checkpoint"),
+        };
+        let service = MemoryService::open(
+            PersonalWorkspace::open(
+                root.path().join("workspace"),
+                keith_workspace::PersonalWorkspaceLimits::default(),
+                UtcTimestamp::UNIX_EPOCH,
+            )
+            .unwrap(),
+            &profile,
+            MemoryPolicy::default(),
+        )
+        .unwrap();
+        // The durable ledger accepts the already committed emission; evidence
+        // projection waits for original source intake rather than making digests.
+        service
+            .apply_compaction(&session, emission, UtcTimestamp::UNIX_EPOCH)
+            .unwrap();
+        assert!(
+            service
+                .observatory()
+                .evidence_snapshot()
+                .unwrap()
+                .is_empty()
+        );
+        ingest_history(&service, &sessions, &profile, &session);
+        let snapshot = service.observatory().evidence_snapshot().unwrap();
+        let summary = snapshot
+            .values()
+            .find(|record| record.source_kind == EvidenceSourceKind::CompactionSummary)
+            .unwrap();
+        let expected = snapshot
+            .values()
+            .filter(|record| {
+                record.source_entries.len() == 1
+                    && source_entries.contains(&record.source_entries[0])
+                    && record.source_identity.starts_with("session:")
+            })
+            .flat_map(|record| record.causal.as_ref().unwrap().source_roots.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(!expected.is_empty());
+        assert!(snapshot.values().any(|record| {
+            record.authority == EvidenceAuthority::AssistantGenerated
+                && expected
+                    .iter()
+                    .any(|root| record.source_entries.contains(&root.source_entry))
+        }));
+        assert_eq!(
+            summary
+                .causal
+                .as_ref()
+                .unwrap()
+                .source_roots
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        assert_eq!(summary.authority, EvidenceAuthority::DerivedInference);
+        let daily_memory = service
+            .records()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.kind == MemoryKind::DailySummary)
+            .unwrap();
+        assert_eq!(daily_memory.source_entries, source_entries);
+        let daily = snapshot
+            .values()
+            .find(|record| record.source_identity == format!("memory:{}", daily_memory.id))
+            .unwrap();
+        assert_eq!(daily.authority, EvidenceAuthority::DerivedInference);
+        assert_eq!(
+            daily
+                .causal
+                .as_ref()
+                .unwrap()
+                .source_roots
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        assert!(
+            daily
+                .source_digests
+                .iter()
+                .all(|digest| crate::causal::valid_digest(digest))
+        );
+        let quoted = service
+            .memory_create(
+                MemoryCreateRequest {
+                    source: MemoryWriteSource {
+                        evidence_id: Some(summary.id.clone()),
+                        source_entry_id: summary.source_entries[0].clone(),
+                        evidence_quote: summary.text.clone(),
+                    },
+                    text: summary.text.clone(),
+                    kind: AgentMemoryKind::ProjectContext,
+                    facets: vec![],
+                    sensitivity: Sensitivity::Personal,
+                },
+                UtcTimestamp::UNIX_EPOCH,
+            )
+            .unwrap();
+        assert_eq!(quoted.authority, EvidenceAuthority::DerivedInference);
+        assert_eq!(
+            quoted
+                .causal
+                .unwrap()
+                .source_roots
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        let store = SessionStore::open(&sessions).unwrap();
+        let page = store
+            .committed_source_page(
+                &profile,
+                &session,
+                None,
+                keith_session_store::CommittedSourceLimits::default(),
+            )
+            .unwrap();
+        let checkpoint_id = page
+            .entries()
+            .iter()
+            .find(|entry| {
+                matches!(
+                    entry.payload,
+                    SessionEntryPayload::CompactionCheckpoint { .. }
+                )
+            })
+            .unwrap()
+            .id
+            .clone();
+        let checkpoint = store
+            .committed_source_entry(
+                &profile,
+                &session,
+                &checkpoint_id,
+                keith_session_store::CommittedSourceLimits::default(),
+            )
+            .unwrap();
+        let user_id = page
+            .entries()
+            .iter()
+            .find(|entry| matches!(entry.payload, SessionEntryPayload::UserMessage { .. }))
+            .unwrap()
+            .id
+            .clone();
+        let user = store
+            .committed_source_entry(
+                &profile,
+                &session,
+                &user_id,
+                keith_session_store::CommittedSourceLimits::default(),
+            )
+            .unwrap();
+        let fork = SessionId::new();
+        store
+            .create(NewSession {
+                kind: SessionKind::Root,
+                session_id: fork.clone(),
+                root_tree_id: RootTreeId::new(),
+                parent_session_id: None,
+                profile_id: profile.clone(),
+                workspace_id: page.workspace_id().clone(),
+                created_at: UtcTimestamp::UNIX_EPOCH,
+                label: None,
+                profile_snapshot: None,
+            })
+            .unwrap();
+        let mut writer = store
+            .acquire_writer(
+                &fork,
+                WriterIdentity {
+                    worker_id: WorkerId::new(),
+                    owner_instance: EntityId::new(),
+                    generation: Generation::new(1),
+                    acquired_at: UtcTimestamp::UNIX_EPOCH,
+                },
+            )
+            .unwrap();
+        let copied_user = writer.append_source_copy(None, &user).unwrap().unwrap();
+        let copied_checkpoint = writer
+            .append_source_copy(Some(copied_user.entry().id.clone()), &checkpoint)
+            .unwrap()
+            .unwrap();
+        service
+            .ingest_committed_entry(&copied_user, UtcTimestamp::UNIX_EPOCH)
+            .unwrap();
+        service
+            .ingest_committed_entry(&copied_checkpoint, UtcTimestamp::UNIX_EPOCH)
+            .unwrap();
+        let after_copy = service.observatory().evidence_snapshot().unwrap();
+        let copied =
+            crate::ingestion::direct_source(&after_copy, &fork, &copied_checkpoint.entry().id)
+                .unwrap();
+        assert_eq!(copied.authority, EvidenceAuthority::DerivedInference);
+        assert_eq!(
+            copied
+                .causal
+                .as_ref()
+                .unwrap()
+                .source_roots
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        // These are context parents, not independently assessed claim supports.
+    }
+
+    #[test]
+    fn legacy_summary_identity_is_repaired_in_place_from_actual_committed_history() {
+        let root = tempdir().unwrap();
+        let profile = ProfileId::new();
+        let sessions = root.path().join("sessions");
+        let (session, _) = committed_emission(&sessions, profile.clone());
+        let store = SessionStore::open(&sessions).unwrap();
+        let page = store
+            .committed_source_page(
+                &profile,
+                &session,
+                None,
+                keith_session_store::CommittedSourceLimits::default(),
+            )
+            .unwrap();
+        let summary_entry = page
+            .entries()
+            .iter()
+            .find(|entry| matches!(entry.payload, SessionEntryPayload::CompactionSummary { .. }))
+            .unwrap();
+        let SessionEntryPayload::CompactionSummary {
+            summary,
+            source_entries,
+            ..
+        } = &summary_entry.payload
+        else {
+            unreachable!()
+        };
+        let legacy = EvidenceRecord::new(
+            profile.clone(),
+            session.clone(),
+            source_entries.clone(),
+            source_entries
+                .iter()
+                .map(|id| format!("{}:{id}", summary_entry.checksum))
+                .collect(),
+            format!("session:{session}:compaction-summary:{}", summary_entry.id),
+            summary_entry.parent_id.clone(),
+            EvidenceSourceKind::CompactionSummary,
+            EvidenceAuthority::DerivedInference,
+            summary.clone(),
+            summary_entry.timestamp,
+            Sensitivity::Personal,
+            RetentionClass::CurrentState,
+            vec![],
+        );
+        let legacy_id = legacy.id.clone();
+        let workspace = root.path().join("workspace");
+        let service = MemoryService::open(
+            PersonalWorkspace::open(
+                &workspace,
+                keith_workspace::PersonalWorkspaceLimits::default(),
+                UtcTimestamp::UNIX_EPOCH,
+            )
+            .unwrap(),
+            &profile,
+            MemoryPolicy::default(),
+        )
+        .unwrap();
+        service
+            .observatory()
+            .apply(
+                vec![ObservatoryMutation::Observe(legacy)],
+                UtcTimestamp::UNIX_EPOCH,
+            )
+            .unwrap();
+        let old_bytes = fs::read(workspace.join(".keith/memory-vault.jsonl")).unwrap();
+        ingest_history(&service, &sessions, &profile, &session);
+        let snapshot = service.observatory().evidence_snapshot().unwrap();
+        let repaired = snapshot.get(&legacy_id).unwrap();
+        assert_eq!(repaired.authority, EvidenceAuthority::DerivedInference);
+        assert!(!repaired.causal.as_ref().unwrap().source_roots.is_empty());
+        assert!(
+            repaired
+                .causal
+                .as_ref()
+                .unwrap()
+                .source_roots
+                .iter()
+                .all(|root| root.source_entry != summary_entry.id)
+        );
+        assert!(!snapshot.values().any(|record| record.source_identity
+            == format!("session:{session}:entry:{}", summary_entry.id)));
+        assert!(
+            fs::read(workspace.join(".keith/memory-vault.jsonl"))
+                .unwrap()
+                .starts_with(&old_bytes)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
     fn correction_and_deletion_preserve_auditable_metadata_and_bounds() {
         let directory = tempdir().unwrap();
         let workspace_root = directory.path().join("workspace");
@@ -1125,6 +1476,7 @@ mod tests {
             },
         )
         .unwrap();
+        ingest_history(&service, &session_root, &profile_id, &session_id);
         service
             .apply_compaction(&session_id, emission, UtcTimestamp::UNIX_EPOCH)
             .unwrap();
@@ -1257,9 +1609,14 @@ mod tests {
                 )
                 .is_err()
         );
-        service
-            .ingest_session_entries(&SessionId::new(), &[entry], UtcTimestamp::UNIX_EPOCH)
-            .unwrap();
-        assert_eq!(service.observatory().revision().unwrap(), 1);
+        crate::test_sources::ingest(
+            &workspace_root,
+            &profile_id,
+            &SessionId::new(),
+            &[entry],
+            UtcTimestamp::UNIX_EPOCH,
+        );
+        assert_eq!(service.observatory().evidence_snapshot().unwrap().len(), 1);
+        assert_eq!(service.observatory().revision().unwrap(), 2);
     }
 }

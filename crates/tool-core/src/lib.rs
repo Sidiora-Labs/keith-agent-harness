@@ -1,5 +1,11 @@
 #![forbid(unsafe_code)]
 
+mod world;
+
+pub use world::{
+    CausalRuleOrigin, ObjectRevision, PendingEffectReference, WorldFrame, WorldFrameError,
+};
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread;

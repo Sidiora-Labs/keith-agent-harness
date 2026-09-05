@@ -1,5 +1,13 @@
 #![forbid(unsafe_code)]
 
+mod embeddings;
+
+pub use embeddings::{
+    EMBEDDING_CONTRACT_VERSION, EmbeddingContractError, EmbeddingDescriptor, EmbeddingDistance,
+    EmbeddingInput, EmbeddingLimits, EmbeddingNormalization, EmbeddingProvider, EmbeddingRequest,
+    EmbeddingResponse, EmbeddingRole, EmbeddingSpaceIdentity, EmbeddingUsage, EmbeddingVector,
+};
+
 use std::collections::BTreeMap;
 use std::fmt::{self, Debug, Display};
 use std::sync::atomic::{AtomicBool, Ordering};

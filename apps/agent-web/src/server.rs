@@ -18,7 +18,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt, stream};
 use keith_agent_types::{
-    CURRENT_PROTOCOL_VERSION, ClientId, CommandId, ProfileId, Sequence, SessionId, UtcTimestamp,
+    CURRENT_PROTOCOL_VERSION, ClientId, CommandId, EntityId, ProfileId, Sequence, SessionId,
+    UtcTimestamp,
 };
 use keith_connection::{
     AgentTransport, FramedTransport, LocalStream, connect_local, set_local_read_timeout,
@@ -634,14 +635,11 @@ async fn upload_attachment(
         return safe_error(StatusCode::BAD_REQUEST, "attachment media type is invalid");
     }
     let staging_file = EntityId::new().to_string();
-    let path = match write_browser_attachment(&state.attachment_root, &staging_file, &body) {
-        Ok(path) => path,
-        Err(_) => {
-            return safe_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "attachment staging is unavailable",
-            );
-        }
+    let Ok(path) = write_browser_attachment(&state.attachment_root, &staging_file, &body) else {
+        return safe_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "attachment staging is unavailable",
+        );
     };
     let byte_length = u64::try_from(body.len()).unwrap_or(u64::MAX);
     let sha256 = hex_sha256(&body);
@@ -665,18 +663,17 @@ async fn upload_attachment(
         tokio::task::spawn_blocking(move || bridge.execute_scoped(&profile, envelope)).await;
     match result {
         Ok(Ok(result)) => match result.result {
-            keith_protocol::CommandResult::Data(payload) => match *payload {
-                ResponsePayload::Artifact(artifact_id) => {
+            keith_protocol::CommandResult::Data(payload) => {
+                if let ResponsePayload::Artifact(artifact_id) = *payload {
                     Json(serde_json::json!({"artifact_id": artifact_id})).into_response()
-                }
-                _ => {
+                } else {
                     let _ = std::fs::remove_file(path);
                     safe_error(
                         StatusCode::BAD_GATEWAY,
                         "Keith returned an invalid attachment response",
                     )
                 }
-            },
+            }
             keith_protocol::CommandResult::Rejected(error) => {
                 let _ = std::fs::remove_file(path);
                 safe_error(StatusCode::CONFLICT, &error.error.message)
@@ -746,10 +743,7 @@ fn write_browser_attachment(root: &FsPath, token: &str, body: &[u8]) -> std::io:
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 async fn command(

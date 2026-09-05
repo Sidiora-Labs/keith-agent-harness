@@ -1,0 +1,1107 @@
+# Keith causal intelligence and capability breadth
+# Authoritative proposed implementation contract. KVX Dialect B only.
+# Activated by explicit user request; spec/workflow.kvx selects this feature.
+# Task state below records implementation and qualification progress.
+# Generated Markdown mirrors are subordinate to this file.
+
+[meta]
+feature = "keith-causal-intelligence"
+title = "Keith: stable world, causal learning, reconstructive memory, and capability breadth"
+status = "in_progress"
+spec_version = "1.0.0"
+date = "2026-09-05"
+intro = "Build one persistent Keith that retrieves dependable evidence across sessions, predicts consequential actions, observes their outcomes, revises failed strategies, learns conditional procedures, and reconstructs useful connections without inventing facts. Add Gideon capabilities through low-effort reuse under Keith-owned authority and state. This specification authorizes no implementation or deployment by itself; it defines the implementation requested next. All tasks start pending."
+
+[design]
+overview = "Extend Keith's current domains and ordinary turn path. Canonical evidence and operational state remain authoritative; indexes, relations, summaries, and user-pattern models are subordinate projections or explicitly inferential records. A versioned world supplies stable action semantics, while observations update state and test conditional expectations. One admission owner dispatches effects, one lifecycle owner governs convergence, and one finalization owner commits answers. Reusable Python functions and adapted skill content broaden capability without importing another agent runtime."
+
+[design.authority]
+title = "Authority, scope, and milestones"
+source_of_truth = "This spec.kvx is the implementation contract for this proposed feature. Its design sections and acceptance criteria are normative. Earlier research supplies rationale; where language differs, this consolidated spec controls this feature. Existing security and dependency invariants still apply. Generated requirements.md, design.md, and tasks.md are views."
+location = "Canonical source is spec/keith-causal-intelligence/spec.kvx, activated by explicit user request on 2026-09-05. Generated views live beside it. Research rationale remains under .research; there is no second editable spec copy. Other feature task statuses remain unchanged."
+milestones = ["M1: real teaching loop plus three to five usable skills, four document writers, and the representative artifact journey; an equivalent existing projection may satisfy the projection requirement", "M2: conditional transfer, evaluated reconstruction, evaluated latent retention, readers, a search adapter, source monitoring, speech, and one inbox/channel integration", "M3: complete corpus, provider, migration, packaged-runtime, cross-client, and handoff qualification; all required tasks have evidence"]
+completion = "M1 is a usable milestone, not completion of this whole spec. Experimental layers may remain disabled after a completed and reported inconclusive or negative evaluation; unimplemented layers are not completed experiments. A capability may be satisfied by a proved Keith equivalent. Deferred implementations remain pending and are named in the handoff."
+non_goals = ["Model weight training or claims of AGI", "A second brain, memory authority, gateway, session loop, approval service, or finalization controller", "Unconditional physical predictions or universal exactly-once guarantees for arbitrary shell/browser effects", "Wholesale Neo/Cortex or Gideon platform import", "A graph database, multiple embedding vendors, general MCP administration, or an app marketplace as prerequisites", "Full meeting-minutes/Growth product UIs, workflow editor, sync platform, and device companions in this feature", "Runtime-cost minimization as the meaning of cheap; prioritize useful behavior per integration boundary changed"]
+
+[design.sources]
+title = "Research and evidence basis"
+research = ["../../.research/keith-world-and-reconstructive-memory.md", "../../.research/keith-causal-memory-implementation-plan.md", "../../.research/keith-causal-memory-evidence.md", "../../.research/keith-gideon-capability-breadth.md"]
+papers = ["https://compiled-world.sites.paxeer.app/", "https://latent-relatedness.sites.paxeer.app/", "https://arxiv.org/abs/2410.10813", "https://arxiv.org/abs/2303.11366"]
+embedding_reference = "https://docs.voyageai.com/docs/embeddings documents an initial benchmark candidate. Recheck model availability and terms at implementation; no provider, dimension, price, or purchase is fixed by this spec."
+evidence_limits = "The evidence ledger distinguishes historical author reports H01-H11, current source observations K01-K08, and research proposals R01-R05. It does not prove the exact deployment where Cortex embeddings were lost, or that all Neo defects had a single demonstrated cause. Source inspection is not runtime qualification."
+source_baseline = "Inspected automatic recall follows local-runtime -> select_activation -> MemoryObservatory::search with lexical/trigram scoring. The separate retrieval Embedder and LocalHashEmbedder do not establish trained semantic recall in that path. Reconfirm these seams at task 1.1; older Keith paths in memory are not substitutes for this checkout."
+
+[design.ownership]
+title = "Existing owners and dependency direction"
+contracts = "agent-types owns shared IDs and revisions; protocol, framing, provider-core, tool-core, kernel-protocol, runtime-api, and platform-contracts own values that cross their existing boundaries. A record used only within memory stays in memory. Task 1.3 maps fields before introducing types; names below are logical contracts, not instructions to duplicate existing types."
+memory = "memory owns source authority, anchor validity, canonical corrections, hypothesis and relationship policy, required-binding resolution, selection, and the semantic-candidate port. Preserve existing authorities by record family: memory-ledger.json owns consolidation MemoryRecords, memory-vault.jsonl owns EvidenceRecord mutations, and relationship-events.jsonl owns explicit onboarding/name state. Atlas, caches, and indexes are rebuildable; the vault is not disposable. retrieval implements the memory candidate port through an allowed dependency. provider-adapters implements provider-core transport and must not acquire a transitive session-store dependency through retrieval."
+runtime = "action-store owns whole SessionAction lifecycle; session-store history owns committed tool call/result records. tool-core owns admission and effect-aware retry; agent-loop owns convergence and finalization; local-runtime composes services and context. daemon-core already has OperationJournal recovery, currently disconnected from ordinary tool dispatch; extend/wire existing ownership through lower contracts rather than adding a competing journal. Its heterogeneous ActiveOperations collection needs record-kind discrimination before general use. Existing scheduler/waiting owns durable jobs. framing is byte transport only; world frames belong at the tool admission contract and activation manifests remain in session-store."
+learning = "evolution, task-recipe, and skills own experience reuse and reviewed procedure adoption. meta-harness and self-evolution remain the independently governed route for code changes. This feature does not relax any existing protected surface."
+capabilities = "kernel-broker/tool-runner execute bounded Python work; artifacts/workspace own artifact and path access; web/provider-adapters own network adapters; credentials/profile/data-control own access; scheduler/initiative own monitors; channel-core/channel-adapters/delivery own inbox and send state; ui-model and existing apps render projections."
+dependency_check = "Use cargo dependency-policy for new edges. If the existing layer policy prevents a proposed adapter, move the interface to its proper existing contract layer and document the resolution; do not suppress the check or make a domain depend on an application."
+
+[design.world]
+title = "Stable causal semantics and durable transitions"
+laws = "The same action under equivalent relevant preconditions has the same declared semantics. Incidental differences can transfer; relevant conditions, object revisions, grants, external uncertainty, and adapter guarantees may change the outcome. Runtime laws are enforced; adapter promises are versioned; learned regularities are conditional and revisable."
+versions = "WorldVersion identifies native action schemas, legal transitions, and outcome vocabulary. CapabilityEpoch identifies installed binding versions and available grants. WorldFrame names those versions plus task, object revisions, active commitments, and pending effects. Changing the selected context subset of existing tools does not itself change their semantics."
+upgrade = "Native semantic changes require an explicit world transition; binding installation/removal/version or grant changes require an explicit capability transition. An admitted action retains its original contract and operation identity. Dispatch rechecks current grants and revisions; incompatible unexecuted attempts are rejected or re-admitted with recorded lineage. Unknown executed effects remain subject to their original reconciliation rules."
+effect_path = "Use the existing ToolEffectState transition vocabulary. Conceptually: proposal -> admitted and durably linked prediction -> dispatch -> observed not-committed, committed, or unknown effect -> reconciliation when supported. Persist a dispatch marker before handing control to the adapter; a crash in the dispatch window is conservatively unknown unless non-execution is established. Neither timeout nor evaluator error supplies proof of non-commitment."
+equivalence = "Derive operation equivalence from typed task, canonical target, intended effect, mechanism, and adapter key where available. Route changes and superficial argument changes cannot intentionally bypass known equivalence. Do not claim equivalence detection across arbitrary code; record unsupported reconciliation explicitly and prohibit an automatic repeat of the same unresolved write."
+
+[design.records]
+title = "Minimum record contracts"
+anchor = "EvidenceAnchor extends existing evidence ID, source entry/digest, profile, sensitivity, authority, observation and recording times, validity/correction lineage with effective interval and source-root identity where absent. An anchor proves an attributable statement or observation, not every interpretation of it."
+binding = "TaskObjectBinding = task/scope + canonical entity + property + current evidence ID/revision + freshness requirement + resolved/missing/stale/conflicting status. Resolve corrections by identity and effective time; an ambiguous entity remains ambiguous."
+hypothesis = "Hypothesis = claim + anchor roots + conditions + alternatives + counterevidence + generator/model/representation version + proposed/supported/disputed/retired state. Supported is inferential status, never a change into observed provenance."
+relationship = "Relationship = typed endpoints + temporal/entity/task/evidential/causal/procedural/analogical type + asserted/observed/inferred origin + scope + independent support roots + counterevidence + validity/revision. Causal and analogical proposals start inferential."
+prediction = "Prediction = immutable ID/revision + task/attempt/operation linkage + WorldVersion/CapabilityEpoch + target and precondition revisions + evidence/hypothesis references + bounded expected predicates + observation deadlines + uncertainty. Freeze before dispatch; superseding an unexecuted prediction creates a new linked record."
+assessment = "Assessment = prediction/predicate ID + supported/contradicted/pending/unresolvable/not_executed + observation IDs/revisions + evaluator/version + time + unresolved reason. Later evidence appends a revision. Effect, process, transport, and goal statuses are separate."
+strategy = "StrategyRecord = task/target/intended effect/mechanism/preconditions + attempts + source roots + failed expectations + remaining existing budgets + revision lineage. Model-generated strategy names cannot reset it."
+procedure = "ProcedureExperience = conditional strategy + expected outcomes + adapter/world compatibility + independent supporting episodes + failures/counterexamples + applicability and adoption history. Executable adoption remains a separate reviewed transition."
+manifest = "RetrievalManifest = profile/task + query representation digest + canonical source revision + encoder/index generation + candidate lanes + selected IDs/revisions + required coverage/gaps + actual included IDs + degraded reasons. Record use from downstream observations separately from selection and inclusion."
+pattern = "UserPatternHypothesis = scoped interpretation + attributable user-signal roots + alternatives/counterexamples + time window + explicit correction/rejection + expiry/review + measured later utility + self-caused interaction markers."
+jobs = "Projection and assessment jobs carry profile, source/revision or prediction ID, deterministic job identity, lease/attempt state, retry/backoff, and watermark. Canonical commit plus job intent is transactional where the existing store allows; otherwise replay by source revision closes the explicitly documented window."
+
+[design.retrieval]
+title = "Embedding, relationships, and context assembly"
+provider = "Configure chat and embeddings independently. Start with one trained encoder selected on development evidence; a permitted trained local encoder is acceptable. Benchmark a hosted and local candidate when available, reporting unavailable candidates. Hash/trigram features remain a lexical baseline. Do not silently export existing local memory to a hosted service."
+space_identity = "A vector belongs to encoder identity/revision, dimensions, distance/normalization, input role, representation version, and index generation. Query and document roles must be compatible. A second model uses its own populated generation even when dimensions match. Fuse ranks over canonical IDs, not raw scores from unrelated spaces."
+indexing = "Canonical writes immediately support exact lookup. Durable jobs build optional projections with bounded recent-unindexed lexical retrieval. On outage preserve sources and jobs, back off, and report lag. Build new generations side by side, validate before atomic active-pointer switch, and retain a compatible prior generation within retention policy."
+views = "Begin with observation-meaning and action/precondition/outcome representations. Enable further goal, procedure, hypothesis, or modality views only after measured incremental value. Generated representations retain inferred origin. Multiple hits from one source root count as one observation."
+frame_order = ["Current task, authority, capability/object revisions, pending effects, and relevant commitments", "Required exact bindings and applicable corrections", "Optional related anchors from exact, lexical, trained semantic, and bounded relation retrieval", "Conditional procedures with counterexamples and scoped optional patterns", "Optional labeled generated reconstruction with unresolved alternatives"]
+budgets = "Initial experiment defaults: required frame target ceiling 4000 tokens; optional recollection ceiling 8000 tokens, both constrained by remaining model context. Required state cannot be silently dropped: narrow the active subtask or fetch bounded detail before dependent dispatch. Optional graph traversal is at most two hops and 200 visited nodes; required correction closure must still resolve or expose a gap/cycle."
+health = "semantic_ready requires current compatible encoder, acceptable coverage, and a successful actual-turn probe. semantic_lagging denotes useful semantic service with backlog/partial coverage. lexical_only denotes no usable permitted semantic path. unavailable denotes required underlying service unavailable. Report encoder, backlog, projection, and actual inclusion independently."
+
+[design.learning]
+title = "Prediction, convergence, and conditional learning"
+predicates = ["Object exists in a named authoritative scope", "Object revision or digest equals the admitted expected value", "Operation receipt matches the durable operation identity", "Typed property satisfies an explicit bounded predicate", "Process terminated with an observed result", "Answer committed; transport acknowledgement is a separate predicate"]
+assessment = "Consequential actions carry compact predictions and runtime-defined success requirements. Diagnostic probes name the hypothesis and distinguishing observation. Routine reads use lightweight observation intent without mandatory extra model calls. Subjective goal assessments cite existing review or explicit user feedback; the model cannot redefine success after seeing results."
+repeat_defaults = "Immediately reconcile an unknown consequential effect; reject known invalid preconditions before dispatch. For otherwise admissible same-mechanism failures without useful information, initially require revision after three unsuccessful attempts, with at most two revision rounds and five additional diagnostic probes total, all within existing task/turn budgets. These are experiment parameters, never permission to repeat an unsafe action three times."
+revision = "A revision names the failed expectation, relevant evidence, alternative explanation, and authorized discriminating next step. Relevant disconfirmation counts as information. Different error strings, rephrasing, or repeated observations alone do not. Stop or durable wait when no informative authorized step remains."
+ladder = "An episode is experience immediately. One attributable episode permits tentative conditional advice. Broader reuse initially requires at least three independent relevant episodes, a changed-condition test, and considered counterexamples; this is an experimental minimum rather than statistical certainty. Contradiction narrows/suspends immediately. Recipe adoption and source evolution use their existing stronger gates."
+finality = "Optional reflection, indexing, reconstruction, and personalization failures cannot suppress an already valid answer. Predictions/assessments return typed findings to the existing lifecycle owner. Preserve candidate, committed final, and delivery acknowledgement states through restart and all clients."
+
+[design.reconstruction]
+title = "Generated connective memory without evidence laundering"
+generation = "Generate possible connections among selected anchors on demand, with anchor IDs, alternatives, missing evidence, and generator/version. Keep reconstruction ephemeral by default; retained text is a hypothesis. Exact dates, quotes, identifiers, events, and action states require source support."
+validation = "Deterministic checks establish valid references, exact quotation, allowed classes, and compatible revisions. They cannot establish arbitrary prose entailment. Bounded claim checking and held-out unsupported-claim evaluation supplement structural checks. On failure discard the optional reconstruction and retain the anchor answer."
+closure = "Summaries, compaction, replay, embedding views, and consolidation preserve inferential origin and original source roots. Re-ingesting a quote from an assistant transcript does not create independent external evidence. Corrections/deletions invalidate dependent narrative and indexes."
+
+[design.importance]
+title = "Latent relatedness and optional retention"
+classes = "Operational obligations are retained by their owning lifecycle. Explicit remember requests, corrections, decisive exceptions, and active-lesson sources receive protected priority within user retention rules. Optional experience is selected under a budget. Protection never means undeletable; a forget request removes memory content while minimal unresolved operation state remains with its lifecycle owner."
+capture = "Initial recent-signal buffer limit is seven days or 50 MiB of sanitized text, whichever is reached first, with stricter profile policy taking precedence. Do not duplicate secrets, screenshots, or full transcripts by default. Expired sources remain gaps."
+patterns = "Generate at most three competing scoped patterns per consolidation group initially, using distinct user-signal roots, alternatives, and counterexamples. A work topic does not imply a personal preference. Current requests and explicit corrections outrank inferred preferences. Record feedback caused by Keith itself."
+score = "For optional candidates only, normalize features to [0,1] and start S = 4*goal + 3*explicit_importance + 2*measured_usefulness + 2*novelty + 3*exception_value - storage_cost. Unknown measured usefulness is zero. Freeze coefficients before the experiment; no self-modifying scorer in the first version."
+exploration = "Initially reserve 20 percent of optional retention for rare events, counterexamples, and unexplained novel signals. Redistribution and ties must be deterministic and logged when eligible candidates are insufficient. Neither exposure nor silence establishes usefulness."
+correction = "A rejected preference stops influencing behavior immediately. Retain only the correction permitted by policy to prevent re-inference from remaining signals; stronger deletion requests prevail. Deleting a signal invalidates dependent patterns and resets unsupported utility/support counts."
+
+[design.capabilities]
+title = "Gideon breadth through bounded reuse"
+donor = "Inspect /root/Gideon/Gideon-ai and /root/Gideon/Gideon-ai-apps at recorded revisions. Record exact donor files, license/dependency provenance, Keith equivalent, missing user behavior, changed imports/boundaries, platforms, artifact size, and real proof. Package counts describe inventory only."
+extraction = "Classify candidates as content/pure function, IO adapter, or stateful controller. Reuse Python models/codecs/writers and pure projectors where practical. Replace IO through Keith-owned boundaries. Do not import Gideon stores, gateway, approvals, updater, installer, shared virtual environment, or another agent loop."
+shared_path = "Use existing tool admission -> bounded Python capability function -> structured result/output artifact -> Keith persistence and normal UI. The host owns credentials, path resolution, side effects, cancellation, and finalization. A worker cannot access session/memory stores or declare task completion. Use MCP only when it reduces this slice's work; its general configuration product is not a prerequisite."
+first_batch = "Adapt three to five skills for document authoring, grounded research, work checking, and browser verification where tools exist. Extract one writer first, then DOCX, XLSX, PPTX, and PDF. Include a projection only when it adds missing behavior. Demonstrate a real downloadable document reopened after restart."
+formats = "Gideon YAML-frontmatter skills are not Keith TOML +++ SkillManifest files. Map required_tools and references, fix the Keith scaffold/runtime mismatch and profile selection gap, then prove real turn selection. Writers return bytes from structured models; reading requires separate path/format/source-coordinate treatment. Spreadsheet formula preservation is not formula evaluation; conversion is not universally lossless."
+extensions = "After the shared slice, provide representative document readers, one additional search/extraction adapter, source-monitoring recipes, transcription/speech, and one inbox/channel path. Each family has explicit readiness, dependency, authority, cancellation, malformed-input, and restart behavior. Existing equivalents may satisfy the family with real-path evidence."
+deferred = "Inventory full Minutes/Growth apps, workflow editor, synchronization, device companions, remaining native/external apps, and specialized providers. Give each a destination, gap, dependency, and follow-on scope. These higher-effort products are not silently called implemented and do not become prerequisites for a writer."
+
+[design.verification]
+title = "Verification contract and evidence levels"
+bootstrap = "Task 1.1 introduces scripts/qualification/causal_intelligence.py with baseline execution; task 1.2 extends its versioned case manifests under tests/causal-intelligence. Every task verify_cmd refers to that PLANNED runner, not an existing or already passing command. The runner must reject missing cases, zero tests, stale artifacts, skipped required journeys, failed subprocesses, and source/version mismatches. It must not accept a hand-written pass file as proof."
+runner = "The runner maps --task to explicit unit/transport/process/browser cases, executes them, asserts nonzero expected case counts, and writes bounded evidence keyed by current source/binary/config versions. Rust tasks run focused cargo test --locked and strict clippy --all-targets --no-deps --locked with CARGO_INCREMENTAL=0 and a disposable external CARGO_TARGET_DIR cleaned on exit. New dependency edges run cargo dependency-policy. UI changes run package checks plus real interactions."
+runtime_proof = "Use genuine Keith orchestration and owning stores. Fault injection is allowed at an unavoidable external boundary, including a separate durable test service that commits then drops an acknowledgement. Internal canned success collaborators do not qualify wiring. Unit tests, deterministic process evidence, live provider evidence, packaged runtime, and release qualification are distinct."
+live_limits = "Use isolated profiles, sanitized data, disposable resources, and existing approval boundaries. If provider credentials or an external target are unavailable, report blocked and return non-success for the corresponding qualification; never replace it with a fake success. This spec does not authorize external deployment or production mutation."
+corpus = "C01-C20 below are required regressions. B01-B10 cover capability acquisition. Every case records initial state, canonical/source/contract versions, stimulus or injected fault, expected observations, actual evidence, result, and remaining ambiguity."
+ablation = "Compare A current Keith, B stable truth plus exact/lexical anchors, C B plus trained semantic activation and predictions, D C plus conditional lessons, E D plus reconstruction, and F chosen accepted configuration plus pattern retention. Add semantic-only versus prediction-only arms when attributing C improvements. Evaluate latent selectors separately with retrieval/reasoning fixed."
+splits = "Hold chat model, task families, context ceiling, and total work budgets fixed; split chronologically and by task/entity family. Keep held-out data out of lesson generation, prompt tuning, self-evolution, and gate tuning. Initially run at least three replicates per stochastic case and report every run. Full-context diagnostics are labeled as unequal-budget references."
+metrics = "Report required-binding resolution and actual inclusion, recall@K, counterexample coverage, freshness, verified task success, duplicate effects, false completion, unsupported factual claims, stale/cross-profile use, invalid proposals, repeated actions, useful probes, revisions, interruptions, conditional transfer/negative transfer, later usefulness, repeated questions, p50/p95 latency, tokens, embedding spend, storage, and recovery time. Calibration is measured only on resolved predictions; unresolved and delayed rates are separate."
+gates = "Initial gates: zero protected-invariant violations in tested cases; 100 percent actual inclusion for resolved required test bindings; semantic recall@10 at least 95 percent on a frozen 200-query low-overlap paraphrase set; ordinary-task success loss no greater than two percentage points against baseline. Record counts and uncertainty, and withhold a positive conclusion when uncertainty prevents it. Freeze development-selected thresholds before held-out evaluation; no relaxation to pass a failed candidate."
+optional = "Reconstruction and latent retention each need improvement on a predeclared target at matched budget without material unsupported-claim, success, or intervention regression. An inconclusive result retains the simpler accepted configuration. Optional disabling cannot remove provenance, exact truth, authority, or pending-effect protections."
+
+[design.corpus]
+title = "Required causal and memory cases"
+C01 = "Missing encoder: canonical writes survive, exact recall works, health degrades honestly, and no hashed fallback reports semantic readiness."
+C02 = "Chat-provider switch: independent embedding identity, credentials references, index, and actual automatic recall survive."
+C03 = "Space mismatch: wrong encoder/revision/dimensions/input role/representation is rejected without contaminated writes or search."
+C04 = "Unindexed fresh memory: required fact resolves immediately, optional recent lane is bounded, and lag is reported."
+C05 = "Crowded recall: corrected required binding survives 10000 distractors and reaches the actual proposed action."
+C06 = "Plausible wrong identifier: known binding is checked; a guessed domain and plausible page cannot establish that the real service is defunct."
+C07 = "Corrected endpoint and removed capability: new binding wins; old procedure and tool assumptions trigger refresh and cannot recreate a removed tool."
+C08 = "Rejected final: uncommitted candidate is never delivered history or evidence that the user was answered."
+C09 = "Lost acknowledgement and restart: scoped idempotent/readback adapter produces one actual effect; unknown persists until authoritative reconciliation."
+C10 = "Shell exit zero plus application error: process success, effect, and goal outcomes remain distinct."
+C11 = "Assessor timeout/malformed output: unresolved assessment, no automatic confirmation or discharged obligation."
+C12 = "Alternating argument/route variants and compaction: same failed mechanism consumes durable strategy allowance and causes useful revision."
+C13 = "Useful disconfirmation: relevant contrary evidence counts as information while repeated observations do not."
+C14 = "Repeated reconstruction/quotation/consolidation: inferred origin and source-root count remain unchanged."
+C15 = "Correction and forgetting: dependent patterns, summaries, caches, vectors, restart, rebuild, and supported backup restore cannot revive stale/deleted content."
+C16 = "Preference reversal: explicit correction overrides earlier repeated signals; counterexamples survive optional selection."
+C17 = "Conditional transfer: incidental changes permit reuse; changed causal preconditions require narrowing or abstention."
+C18 = "Ordinary successful turn: no needless reflection, permission ceremony, global tool stripping, or suppressed valid final."
+C19 = "Isolation and hostile content: no other-profile result, cache hit, batch leakage, credential exposure, or authority from retrieved instructions."
+C20 = "Stop/disconnect/reopen/resume: stop halts new dispatch; in-flight effects, commitments, and committed answers remain truthful and consistent."
+
+[design.breadth_corpus]
+title = "Required capability cases"
+B01 = "Curated skill selects in a real turn only when profile-enabled and its required tools are actually ready; incompatible manifest fails visibly."
+B02 = "Generate DOCX/XLSX/PPTX/PDF from structured input, inspect actual content/rendering, download through normal UI, and reopen after daemon restart."
+B03 = "Missing Python dependency/model or unsupported platform reports unavailable; timeout/cancel kills bounded work and leaves no falsely committed artifact."
+B04 = "Malformed/traversal/symlink/oversized/compressed document input is rejected within limits; readers preserve source coordinates and mark extraction gaps."
+B05 = "Projection is smaller and useful while full permitted output and decisive error/correction evidence remain retrievable under Keith access rules."
+B06 = "Search adapter uses opaque credentials, bounded network access, attributed URLs/times and errors; hostile snippets do not become instructions."
+B07 = "Source monitor detects meaningful new items, resumes from durable cursor, avoids duplicate delivery after restart, and honors pause/removal."
+B08 = "Transcription and speech work with real audio, report model/version and platform readiness, cancel correctly, and preserve profile-scoped artifacts."
+B09 = "Inbox/channel account and thread ownership hold; duplicate ingress and lost send acknowledgement recover through existing delivery contracts without unsupported exactly-once claims."
+B10 = "Donor package works in packaged Keith without a Gideon daemon, memory database, approval service, updater, or shared-venv installer."
+
+[design.history]
+title = "Historical failure to requirement mapping"
+H01 = "Missing StartEmbedder/deployment activation -> requirements 9, 10, 12, 24, 40; cases C01-C04."
+H02 = "Provider/hosting transitions -> requirements 9, 11, 24, 39; case C02 and migration qualification."
+H03 = "Fresh required fact omitted by lag/top-K -> requirements 6, 10, 12, 14; cases C04-C06."
+H04 = "Guessed domain and poisoned durable inference -> requirements 5, 6, 13, 19; cases C06, C14-C15."
+H05 = "Rejected finals and close-loop/provider grammar defects -> requirements 17, 23, 25, 38; cases C08, C18, C20."
+H06 = "Pinned removed tool -> requirements 3, 4, 18, 29; case C07."
+H07 = "Teaching intent without dependable assessment -> requirements 15-18, 26; cases C09-C13, C17."
+H08 = "Package code disconnected from runtime and over-restricted tool visibility -> requirements 1, 12, 25, 26, 38, 40; ordinary turn proofs."
+H09 = "Ungrounded extraction, dedup-as-new, top-eight loss -> requirements 5, 6, 14, 18, 20-22; cases C05, C14-C16."
+H10 = "Process status confused with application success -> requirements 7, 16, 23; case C10."
+H11 = "Rigor must preserve natural useful behavior -> requirements 1, 17, 38, 40; cases C18, C20."
+
+[design.migration]
+title = "Migration, controls, and evidence handoff"
+schema = "Start with additive versioned records and explicit reader compatibility. Backfill only attributable sources. Use resumable checkpoints including canonical revisions and deletion state. Never upgrade historical assistant statements into observations. Do not enable new durable writes until downgrade behavior is known."
+rollback = "Retain prior compatible index generation and config. Rollback can disable optional retrieval/assessment generation/reconstruction/pattern scoring, but preserves immutable predictions already dispatched, pending effects, assessments, provenance, corrections, grants, and delivery state. If an old binary cannot read new records, block unsafe downgrade and use the documented compatible restoration path."
+switches = "Use independent scoped configuration for semantic retrieval, prediction assessment, reconstruction, and optional pattern retention. Prediction recording and core truth protections remain enforced for admitted effects once migrated; disabling optional assessment work leaves those outcomes explicitly pending/unresolved. Capability packages have their own readiness/enablement."
+sequence = "Local baseline -> isolated daemon proof -> full first teaching and artifact slices -> shadow optional inference -> bounded adoption using existing controls -> packaged qualification. No production deployment is implied. Export only bounded redacted metadata for diagnostics."
+handoff = "For every task, record owning call path, source/binary/schema versions, exact commands and case counts/results, failed/skipped/blocked cases, migration/rollback state, and next dependencies. Code implemented, focused tests passed, real runtime exercised, packaged runtime qualified, and production released are separate claims."
+
+# REQUIREMENTS
+
+[req.1]
+title = "One Keith with natural, persistent intelligence"
+story = "As the user, I want one capable Keith that carries understanding across clients and sessions."
+ac_1 = "The implementation SHALL extend the existing daemon, stores, and turn loop and SHALL NOT create a second agent, session owner, approval service, or terminal controller."
+ac_2 = "Web, TUI, API, channel, scheduled, and other clients SHALL consume the same durable state and typed commands within their existing supported surfaces."
+ac_3 = "Routine reads and straightforward successful tasks SHALL remain usable without mandatory reflective essays, extra model calls, or new permission ceremonies."
+ac_4 = "Each milestone SHALL include an ordinary Keith turn that exercises its new behavior; source presence and task labels alone SHALL NOT satisfy acceptance."
+
+[req.2]
+title = "Domain ownership and canonical truth"
+story = "As the maintainer, I want one owner for each state transition and a rebuildable retrieval layer."
+ac_1 = "Task 1.3 SHALL assign each logical record/transition to an existing domain/store and reuse current types before introducing a new type or table."
+ac_2 = "Canonical memory SHALL preserve existing record-family owners: consolidation ledger, evidence vault, and explicit relationship event log. Vectors, caches, and materialized retrieval views SHALL be rebuildable from their permitted canonical revisions; the evidence vault SHALL NOT be treated as a disposable projection."
+ac_3 = "Domain-owned ports SHALL separate selection policy from embedding transport and index implementation, with allowed inward dependency direction."
+ac_4 = "Admission, convergence, finalization, and recovery SHALL each have one authoritative existing owner; additional analyses SHALL return typed findings to that owner."
+
+[req.3]
+title = "Versioned world laws"
+story = "As Keith, I need dependable semantics that distinguish incidental changes from relevant conditions."
+ac_1 = "WorldVersion SHALL identify native schemas, legal transitions, and outcome vocabulary, fixed for admitted operations within that version."
+ac_2 = "Runtime laws, adapter guarantees, and learned regularities SHALL be represented distinctly; learned claims SHALL NOT modify runtime laws."
+ac_3 = "Actions SHALL name relevant preconditions and object revisions; stale or known-invalid preconditions SHALL be rejected before dependent dispatch."
+ac_4 = "Native semantic upgrades SHALL preserve pending attempt identities and original reconciliation contracts, with an explicit compatibility transition."
+
+[req.4]
+title = "Capability epochs and fresh authority"
+story = "As the user, I want remembered procedures to respect what Keith can currently do."
+ac_1 = "Installed binding/version and grant changes SHALL produce a capability transition reflected in WorldFrame and procedure applicability."
+ac_2 = "Dispatch SHALL recheck current profile, workspace, principal, grants, and relevant revisions; a prior frame SHALL NOT preserve revoked authority."
+ac_3 = "Removed/replaced tools SHALL invalidate dependent assumptions and trigger context refresh; instructions and remembered names SHALL NOT recreate them."
+ac_4 = "Selecting a subset of installed tools for context SHALL NOT silently mutate native semantics or reset pending effect/strategy state."
+
+[req.5]
+title = "Evidence anchors with permanent provenance"
+story = "As the user, I want to know which memories came from observations and which came from Keith."
+ac_1 = "Anchors SHALL retain source identity/digest, profile/sensitivity, authority, observed/recorded/effective times, source roots, revision, and correction/validity state."
+ac_2 = "RuntimeFact, ToolObserved, ExternalObserved, UserAsserted, AssistantGenerated, and DerivedInference distinctions SHALL survive ingestion, quote attribution, summaries, compaction, and re-ingestion."
+ac_3 = "Source attribution SHALL NOT imply that an interpretation is established; quoting assistant text SHALL preserve its generated origin."
+ac_4 = "Independent support SHALL be counted by attributable originating episodes/signals, not repeated summaries, embedding views, or exposure."
+ac_5 = "Malformed, missing, deleted, or cross-profile source references SHALL be rejected or represented as gaps, never repaired by invented evidence."
+
+[req.6]
+title = "Exact operational bindings and correction closure"
+story = "As the user, I want corrections and essential identifiers remembered even when optional retrieval is crowded."
+ac_1 = "Task-bound entity/property facts, current identifiers, commitments, and unresolved attempts SHALL have exact lookup independent of optional top-K."
+ac_2 = "Correction/supersession resolution SHALL use canonical entity/property and effective time when known, preserve historical queries, and expose ambiguous identity or unresolved conflicts."
+ac_3 = "A resolved required binding SHALL reach actual context and dependent action at its current permitted revision, including before embedding completes and with 10000 distractors."
+ac_4 = "Correction closure SHALL detect cycles and missing links; vector proximity SHALL NOT decide whether two properties refer to the same object."
+ac_5 = "Guessed identifiers SHALL NOT override known bindings or establish absence/nonexistence of the bound service from observations of a different object."
+
+[req.7]
+title = "Durable action identity and honest effects"
+story = "As the user, I want interruptions and ambiguous replies handled without repeating consequential work blindly."
+ac_1 = "Every admitted consequential action SHALL persist attempt, operation identity, prediction linkage, contract versions, and dispatch state before handing control to its adapter."
+ac_2 = "Failure to persist that state SHALL block dependent dispatch; crash in an ambiguous dispatch window SHALL preserve unknown effect unless non-execution is established."
+ac_3 = "Unknown effects SHALL enter existing reconciliation immediately and SHALL NOT become retryable through timeout, compaction, another client, or superficial route/argument changes."
+ac_4 = "Retry/readback guarantees SHALL be explicitly adapter-scoped; unsupported shell/browser effects SHALL remain honestly unresolved rather than receiving universal exactly-once claims."
+ac_5 = "Supported operation-key/readback adapters SHALL prove one actual effect after lost acknowledgement and restart, with stop preventing new dispatch while preserving in-flight state."
+
+[req.8]
+title = "Versioned durable records and resumable projection work"
+story = "As the operator, I want new learning state to survive crashes without creating two competing truths."
+ac_1 = "The record fields in design.records SHALL be mapped to versioned serializable types with explicit ownership and compatibility. Legacy optional fields SHALL preserve absent-field serialization and original session/vault checksums rather than corrupting old chains through newly serialized defaults."
+ac_2 = "Canonical commit and projection-job intent SHALL be atomic where supported; otherwise source-ID/revision reconciliation SHALL close a documented bounded consistency window."
+ac_3 = "Projection and assessment jobs SHALL be idempotent, profile-scoped, restartable, cancellable where appropriate, and bounded by existing resource controls."
+ac_4 = "Duplicate jobs, interrupted backfill, out-of-order results, and stale revisions SHALL NOT overwrite newer canonical state or inflate independent evidence."
+
+[req.9]
+title = "Independent trained embedding capability"
+story = "As the user, I want meaning-based memory to survive chat-model and hosting changes."
+ac_1 = "Embedding configuration, model identity, credential references, and lifecycle SHALL be independent of chat configuration, with permitted local and hosted adapter support."
+ac_2 = "The provider contract SHALL declare query/document roles, model/revision, dimensions, distance/normalization, representation version, input and batch limits, timeout/cancellation, and usage."
+ac_3 = "Response validation SHALL check count/order or identity mapping, dimensions, finite nonzero vectors, and errors; oversized input SHALL be chunked with provenance or rejected visibly, never silently truncated."
+ac_4 = "A trained semantic encoder SHALL serve the automatic memory path when available; hash/trigram features SHALL NOT satisfy semantic readiness."
+ac_5 = "Provider selection SHALL use development recall/latency evidence and profile data policy; upgrading SHALL NOT silently export existing local memories or select multiple vendors solely because calls are inexpensive."
+
+[req.10]
+title = "Fresh indexing and honest degraded recall"
+story = "As the user, I want newly learned facts usable immediately and failures visible."
+ac_1 = "Each indexed view SHALL identify source ID/revision, representation version, encoder identity, and index generation."
+ac_2 = "Canonical writes SHALL be immediately exactly retrievable; recent unindexed optional evidence SHALL have a bounded lexical lane."
+ac_3 = "Outages SHALL preserve data and durable retry jobs with backoff; backlog, failed jobs, coverage, and query-encoder readiness SHALL be exposed."
+ac_4 = "semantic_ready, semantic_lagging, lexical_only, and unavailable SHALL describe observed capability state; only actions depending on an unresolved fact SHALL wait."
+ac_5 = "Corrupt or incompatible projections SHALL be quarantined and rebuilt without corrupting canonical memory or claiming healthy semantic recall."
+
+[req.11]
+title = "Compatible vector spaces and reversible index generations"
+story = "As the operator, I want model changes to improve recall without mixing incompatible vectors."
+ac_1 = "Reads and writes SHALL enforce encoder/revision, dimensions, distance/normalization, input-role compatibility, representation version, and generation identity."
+ac_2 = "Model changes SHALL build a separate generation, compare compatible document/query retrieval, and switch an atomic active pointer only after validation."
+ac_3 = "Fallback to another model SHALL use that model's compatible populated index; equal dimensions SHALL NOT establish compatibility."
+ac_4 = "Correction, deletion, or revoked access SHALL be filtered against canonical state before inclusion in every generation, including rollback and restore."
+ac_5 = "A compatible previous generation SHALL remain available within retention policy, and interrupted generation rebuild/switch SHALL recover deterministically."
+
+[req.12]
+title = "Semantic recall in the actual automatic turn path"
+story = "As the user, I want Keith to recall relevant experience without me asking it to call a memory tool."
+ac_1 = "Automatic activation SHALL combine exact, lexical, trained semantic, and bounded related candidates through the memory-owned selection policy."
+ac_2 = "A committed anchor SHALL be indexed, retrieved by a fresh low-overlap paraphrase without an entity ID, revision-checked, and visibly included in the next real provider context."
+ac_3 = "The same semantic case with the semantic lane disabled SHALL demonstrate the measured contribution of semantic retrieval; exact-binding success alone SHALL NOT qualify it."
+ac_4 = "Fresh sessions, scheduled wakes, compaction, and daemon restart SHALL use the same implemented memory policy, with surface-specific gaps explicitly blocked."
+ac_5 = "A manual recall tool or a vector-enabled workspace search SHALL NOT substitute for this automatic path."
+
+[req.13]
+title = "Multidimensional retrieval and typed relationships"
+story = "As Keith, I want to connect experiences by meaning, context, evidence, and conditions."
+ac_1 = "Observation-meaning and action/precondition/outcome views SHALL resolve to canonical source IDs and preserve their source or inferential class."
+ac_2 = "Typed temporal, entity, task, evidential, procedural, causal, and analogical relations SHALL retain scope, provenance, support roots, counterevidence, and revision."
+ac_3 = "Unrelated vector spaces SHALL combine by calibrated rank fusion or separately validated fusion, never raw-score averaging or named meanings assigned to coordinates."
+ac_4 = "Optional traversal SHALL initially respect two-hop/200-node limits with coverage reporting, while required correction closure resolves or exposes a gap."
+ac_5 = "Additional embedding views SHALL require incremental held-out benefit; one episode found through multiple views SHALL count once."
+
+[req.14]
+title = "Required context and inspectable activation manifests"
+story = "As the user, I want critical state present even when the model context is small."
+ac_1 = "Context SHALL follow design.retrieval.frame_order, with required state scoped to the active task and imminent action."
+ac_2 = "Required bindings, current grants, and unresolved effects SHALL NOT be silently evicted by optional ranking or reconstruction."
+ac_3 = "Initial 4000/8000 required/optional token ceilings SHALL respect the actual model context; insufficient required capacity SHALL trigger narrowing or bounded fetching before dependent dispatch."
+ac_4 = "Manifests SHALL distinguish candidates, selected records, actual included records, downstream use, revisions, lanes, gaps, and degradation."
+ac_5 = "New dependencies or invalidated revisions SHALL refresh the frame; historical inferred preferences SHALL NOT outrank current user instructions."
+
+[req.15]
+title = "Predictions frozen before action"
+story = "As the user, I want Keith to commit to an expectation before seeing what happens."
+ac_1 = "Consequential actions SHALL carry a compact prediction and runtime-defined completion requirements before dispatch, linked to immutable attempt/operation identity."
+ac_2 = "Predictions SHALL include preconditions, supporting references, world/capability/target revisions, bounded predicates, deadlines, and uncertainty."
+ac_3 = "Meaningful experiments SHALL name the tested hypothesis and distinguishing observation; routine reads SHALL need only lightweight observation intent."
+ac_4 = "Predictions SHALL NOT be rewritten after execution; superseding unexecuted proposals SHALL preserve lineage, and admission rejection SHALL be assessed not_executed."
+ac_5 = "The model SHALL NOT lower user-goal or runtime success criteria to match an observed result."
+
+[req.16]
+title = "Evidence-based assessment and delayed outcomes"
+story = "As the user, I want actual results compared with predictions, including uncertainty."
+ac_1 = "The initial typed predicate vocabulary SHALL cover authoritative existence, revision/digest, receipt identity, bounded property, process result, final commitment, and separate acknowledgement."
+ac_2 = "Each predicate SHALL receive supported, contradicted, pending, unresolvable, or not_executed with observation references, evaluator/version, time, and unresolved reason."
+ac_3 = "Evaluator failure, malformed output, timeout, or missing observation SHALL NOT default to success or absence; failed latency prediction SHALL remain distinct from unknown external effect."
+ac_4 = "Assessment SHALL occur after meaningful actions and at task closure; delayed results SHALL use durable bounded existing scheduler/wait facilities and append new assessment revisions."
+ac_5 = "Subjective goals SHALL cite actual review/user feedback; deterministic reference checks SHALL NOT be claimed to prove arbitrary semantic entailment."
+
+[req.17]
+title = "Durable convergence and useful investigation"
+story = "As the user, I want Keith to stop repeating mistakes and investigate a real alternative."
+ac_1 = "One existing lifecycle owner SHALL persist strategy identity, mechanism, preconditions, attempts, evidence roots, and remaining budgets across compaction/restart."
+ac_2 = "Superficial arguments, alternate known-equivalent routes, new conversations, and model strategy names SHALL NOT reset accounting."
+ac_3 = "Unknown effects SHALL reconcile immediately; otherwise initially three unsuccessful same-mechanism attempts without information SHALL require revision, bounded to two rounds and five additional probes within existing budgets."
+ac_4 = "A revision SHALL identify failed expectation, relevant evidence, an alternative, and an authorized discriminating step; relevant disconfirmation SHALL count as information but different strings alone SHALL NOT."
+ac_5 = "No useful authorized step SHALL yield honest incomplete status or durable wait; stop SHALL halt new work immediately without discarding in-flight truth or suppressing a valid final."
+
+[req.18]
+title = "Conditional lessons and governed procedure adoption"
+story = "As the user, I want Keith to learn from experience and transfer only what the evidence supports."
+ac_1 = "Episodes SHALL retain conditions, outcomes, versions, independent roots, failures, and applicability limits for later retrieval."
+ac_2 = "One episode MAY support tentative advice; broader reuse SHALL initially require three independent relevant episodes, a changed-condition test, and counterexample consideration."
+ac_3 = "Changed causal conditions or contradictions SHALL narrow, dispute, or suspend a lesson; incidental variation alone SHALL NOT require relearning an otherwise applicable procedure."
+ac_4 = "Executable recipe/skill adoption SHALL use existing review/authority; source changes SHALL use existing independent self-evolution controls without modifying protected policy or evaluation."
+ac_5 = "Retrieval frequency, repeated summaries, invocation counts, and fluent reflection SHALL NOT establish learning success; later correct behavior SHALL supply utility evidence."
+
+[req.19]
+title = "Explicitly labeled reconstructive memory"
+story = "As the user, I want creative connections between memories without fabricated recollections."
+ac_1 = "Generated reconstruction SHALL reference anchors and expose inferential origin, alternatives, unsupported claims, generator/version, and missing evidence."
+ac_2 = "Reconstruction SHALL be ephemeral by default; retained reconstruction SHALL remain a hypothesis through indexing, summaries, compaction, and re-ingestion."
+ac_3 = "Invented events, exact quotes, dates, identifiers, tool results, and action states SHALL NOT be promoted to observed facts or authoritative action parameters."
+ac_4 = "Reference/quote/revision checks and bounded claim checks SHALL fall back to anchor-only output on failure; arbitrary prose entailment SHALL remain an evaluated limitation."
+ac_5 = "Anchor-only versus reconstruction evaluation SHALL determine default enablement; correction/deletion SHALL invalidate dependent reconstruction."
+
+[req.20]
+title = "Attributable recent signals and revisable user patterns"
+story = "As the user, I want Keith to notice what matters over time while remaining correctable."
+ac_1 = "A profile-scoped recent buffer SHALL initially retain at most seven days or 50 MiB of sanitized text, whichever first, under stricter existing policy."
+ac_2 = "Consolidation SHALL preserve attributable independent signal roots and initially propose at most three scoped competing patterns with alternatives and counterexamples."
+ac_3 = "Generated narratives, silence, and interactions caused by Keith's recommendations SHALL NOT count as independent confirming user signals."
+ac_4 = "Current user instructions and explicit correction SHALL immediately override inferred preferences; work/project patterns SHALL NOT silently become global personal preferences."
+ac_5 = "Expired/deleted signals SHALL remain gaps and invalidate unsupported dependents; missing history SHALL NOT be reconstructed as observed evidence."
+
+[req.21]
+title = "Importance-based optional retention with counterexamples"
+story = "As the user, I want useful memory chosen by later value, including rare corrective events."
+ac_1 = "Operational state, protected evidence within retention policy, and optional experience SHALL have distinct lifecycle/selection handling."
+ac_2 = "Optional selection SHALL implement the fixed interpretable baseline in design.importance.score with normalized features, unknown utility zero, and recorded selection reasons."
+ac_3 = "Initially 20 percent of optional retention SHALL be reserved for counterexamples, rare events, and unexplained novelty with deterministic bounded redistribution."
+ac_4 = "Measured usefulness SHALL derive from later correct fact use, avoided failures/questions, and supported personalization; exposure and lack of complaint SHALL NOT be utility labels."
+ac_5 = "Chronological equal-budget comparison against explicit-priority, recency, and frequency baselines SHALL govern adoption; the first scorer SHALL NOT modify its own weights."
+
+[req.22]
+title = "Profile isolation, forgetting, and derived-data invalidation"
+story = "As the user, I want control of my data across every memory and capability path."
+ac_1 = "Profile, sensitivity, retention, and provider-export rules SHALL apply before retrieval/embedding work and again before final inclusion or artifact access."
+ac_2 = "Embedding batches, indexes, caches, hypotheses, relationships, reconstructions, credentials, jobs, and artifacts SHALL NOT leak across profiles."
+ac_3 = "Corrections, forgetting, and revocation SHALL invalidate all active derived views; supported restart, rebuild, migration, and restore SHALL respect deletion state."
+ac_4 = "Protection from optional eviction SHALL NOT override user deletion; minimal unresolved operation state SHALL remain in its operational owner without retaining unnecessary deleted memory content."
+ac_5 = "Rejected inferred preferences SHALL stop influencing behavior; retain only permitted rejection state and honor stronger underlying-data deletion requests."
+
+[req.23]
+title = "Truthful final commitment and delivery"
+story = "As the user, I want Keith's account of completion to match what happened and what I received."
+ac_1 = "Candidate, rejected candidate, committed final, and transport acknowledgement SHALL remain separate durable states across transcripts, evidence, and client projections."
+ac_2 = "A rejected candidate SHALL NOT establish that an answer was committed or delivered; disconnect SHALL NOT erase an already committed answer."
+ac_3 = "Process exit, application result, external effect, goal satisfaction, and delivery SHALL be represented separately; shell exit zero SHALL NOT turn structured application failure into success."
+ac_4 = "Optional indexing/reflection/reconstruction failure after success SHALL queue bounded follow-up and SHALL NOT create a new terminal veto."
+ac_5 = "One finalization owner SHALL consume typed evidence and preserve answer identity through restart/reconnect without unsupported channel delivery guarantees."
+
+[req.24]
+title = "Observable semantic and learning health"
+story = "As the operator, I want to detect disconnected or degraded memory before it causes another incident."
+ac_1 = "Health SHALL expose independent chat, embedding query, ingestion backlog, source/index revision coverage, active generation, and actual-turn probe status."
+ac_2 = "A semantic-ready claim SHALL require a real attributable anchor-to-paraphrase-to-context probe, not only endpoint connectivity or vector presence."
+ac_3 = "Bounded correlation metadata SHALL link evidence commit, index job, activation, provider context, attempt, assessment, lesson, final commitment, and delivery."
+ac_4 = "Diagnostics SHALL preserve privacy and avoid raw secrets, unbounded transcripts, or hidden reasoning dumps; operators SHALL see precise degraded and blocked reasons."
+
+[req.25]
+title = "Baseline, conformance, and test infrastructure"
+story = "As the implementer, I want a baseline and executable proof that prevent disconnected work from looking complete."
+ac_1 = "Before behavioral changes, record current ingestion, activation, dispatch, assessment/recovery, finalization, and client paths with exact owners and source revisions."
+ac_2 = "The planned qualification runner SHALL execute task-specific cases, enforce expected nonzero counts, current-source evidence, and non-success on required skipped/blocked cases."
+ac_3 = "C01-C20 and B01-B10 SHALL use genuine orchestration/persistence with only explicitly bounded external fault injection; code declarations or canned internal successes SHALL NOT qualify runtime wiring."
+ac_4 = "Provider conformance SHALL exercise actual multi-turn tools, malformed responses, cancellation, and finalization through supported production adapters."
+ac_5 = "Baseline results, including existing failures and missing credentials, SHALL be preserved rather than relabeled as new-feature passes."
+
+[req.26]
+title = "First complete teaching demonstration"
+story = "As the user, I want one concrete demonstration of remembering, predicting, recovering, and learning."
+ac_1 = "Create an attributable task-bound initial endpoint and explicit correction, add 10000 distractors, restart, and issue a paraphrased request in a fresh conversation."
+ac_2 = "The real turn SHALL retrieve and include the corrected current anchor, persist a prediction, and dispatch one authorized operation to a separately running durable test service."
+ac_3 = "The service SHALL commit then lose acknowledgement; after compaction and daemon restart Keith SHALL reconcile by operation identity and observe exactly one effect."
+ac_4 = "Existence/content and acknowledgement timing SHALL be assessed separately, a conditional lesson SHALL retain its evidence, and a truthful final SHALL reach the ordinary client."
+ac_5 = "Later incidental variation SHALL exercise appropriate transfer; an adapter lacking authoritative readback SHALL cause narrowing or uncertainty rather than blind reuse."
+
+[req.27]
+title = "Low-effort donor selection and provenance"
+story = "As the user, I want Gideon's breadth through practical reuse rather than another platform rewrite."
+ac_1 = "Each candidate SHALL record exact donor revision/files, license/dependencies, Keith equivalent and missing behavior, changed imports, ownership, readiness, platform/package footprint, and remaining scope."
+ac_2 = "Candidates SHALL be classified as content/pure function, IO adapter, or stateful controller and ranked by useful behavior per integration boundary changed; cost minimization SHALL NOT define cheap."
+ac_3 = "Self-contained Python implementations SHALL be reused when this reduces work; no general Rust rewrite or Gideon SDK/marketplace emulation SHALL be required."
+ac_4 = "Imported code SHALL NOT bring Gideon memory/session stores, gateway, approvals, updater, shared-venv installer, or another agent loop into Keith."
+ac_5 = "An existing Keith equivalent MAY satisfy a capability only after the missing-behavior review and real user-path proof; package counts SHALL NOT imply functionality."
+
+[req.28]
+title = "Shared bounded Python capability adapter"
+story = "As the implementer, I want one small host path that makes several reusable capabilities useful."
+ac_1 = "Use existing tool admission, kernel-broker/tool-runner, and artifact facilities with typed bounded inputs and structured output/error contracts."
+ac_2 = "The host SHALL enforce profile-scoped artifact/path access, time/resource/output bounds, cancellation, dependency identity, and truthful result commitment."
+ac_3 = "A worker SHALL NOT own credentials, approvals, session/memory state, overall completion, or undeclared effects; direct SDK networking SHALL require explicit containment rather than manifest-only assurances."
+ac_4 = "Missing dependencies, unsupported platforms, failed worker startup, and interrupted execution SHALL report unavailable/failed and SHALL NOT leave falsely committed artifacts or orphan processes."
+ac_5 = "Package and isolated-runtime proof SHALL run without a Gideon daemon or shared environment; MCP SHALL be optional unless its measured integration benefit justifies its additional setup."
+
+[req.29]
+title = "Curated skills with real runtime selection"
+story = "As the user, I want Keith to gain useful procedures immediately from existing Gideon content."
+ac_1 = "Adapt three to five supported document-authoring, grounding/research, work-check, or browser-verification skills into complete Keith TOML +++ SkillManifest files."
+ac_2 = "Required tools, steps, inputs, validation, known failures, stop conditions, references, and platforms SHALL map to actual Keith capabilities; prose SHALL NOT create missing tools."
+ac_3 = "The scaffold/registry format mismatch and per-profile enabled_skills selection SHALL be resolved or proved already resolved through the actual selection path."
+ac_4 = "Real turns SHALL select only enabled, ready, applicable skills within existing bounds; malformed metadata, disabled profile skill, unavailable tool, and hostile content SHALL be covered."
+ac_5 = "Skills SHALL supply bounded procedures without overriding authority, evidence, finalization, or self-evolution protections."
+
+[req.30]
+title = "Reusable document creation and durable artifacts"
+story = "As the user, I want Keith to create useful documents and return files I can open."
+ac_1 = "Extract the minimum donor document/sheet/deck models, codecs, registry, and writers as a pinned package, starting with one pure writer then supporting DOCX, XLSX, PPTX, and PDF."
+ac_2 = "Structured input SHALL produce real validated bytes through the shared adapter and Keith-owned artifact commitment; output limits, MIME/type, digest, and provenance SHALL be checked."
+ac_3 = "Each format SHALL receive real content and render/round-trip inspection as applicable; formula preservation SHALL NOT be represented as formula calculation or universal lossless conversion."
+ac_4 = "The normal Web journey SHALL download the actual artifact and reopen it after daemon restart with profile access enforced."
+ac_5 = "Malformed input, missing library, cancellation, output overflow, and attempted path escape SHALL fail honestly without replacing valid existing artifacts."
+
+[req.31]
+title = "Document readers with attributable extraction"
+story = "As the user, I want Keith to reason from documents while preserving where extracted information came from."
+ac_1 = "Provide representative DOCX, XLSX, PPTX, and PDF extraction through existing equivalents or adapted donor parsers and explicit format dependencies."
+ac_2 = "Extraction SHALL preserve source artifact/revision and page, sheet/cell, slide, or paragraph coordinates where supported, with unsupported content and gaps identified."
+ac_3 = "Malformed, oversized, compressed, traversal, symlink, and hostile embedded content SHALL be bounded at the actual file/worker boundary."
+ac_4 = "Extracted text SHALL remain attributable external content and SHALL NOT acquire instruction authority; lossy conversion SHALL be disclosed in structured results."
+
+[req.32]
+title = "Useful projections without a second result store"
+story = "As the user, I want large results made usable without losing decisive evidence."
+ac_1 = "Review existing Keith output behavior and adapt at least one missing useful log/diff/JSON/CSV projector, or prove an equivalent already satisfies this requirement."
+ac_2 = "Raw output ownership and access SHALL remain in Keith; donor LRU stores or content hashes SHALL NOT become an independent authority or access-control mechanism."
+ac_3 = "Projected output SHALL retain error/correction/required-evidence access and an authorized route to the full result, with truncation explicitly labeled."
+ac_4 = "A real large-output turn SHALL demonstrate useful bounded preview and subsequent full-evidence retrieval, including restart and cross-profile denial."
+
+[req.33]
+title = "Additional search and extraction adapter"
+story = "As the user, I want broader research reach through a usable connected capability."
+ac_1 = "Select and implement one additional useful search/extraction provider, or prove an existing equivalent meets the selected behavior without duplicate integration."
+ac_2 = "The adapter SHALL use existing credential/network/configuration boundaries with opaque references, cancellation, bounded results, rate/error handling, and truthful readiness."
+ac_3 = "Results SHALL carry source URL, retrieval time, provider identity, and extraction limitations; retrieved instructions SHALL remain untrusted."
+ac_4 = "A real turn SHALL configure/select the available capability and use an attributed result; missing credentials, provider errors, hostile snippets, and disallowed destinations SHALL be exercised."
+
+[req.34]
+title = "Source-monitoring recipes on Keith scheduling"
+story = "As the user, I want Keith to follow relevant sources and remember what it already delivered."
+ac_1 = "Translate at least two useful source recipes, including one structured release/feed source, onto existing scheduler/initiative/fetch owners."
+ac_2 = "Durable profile-scoped cursors and meaningful item identities SHALL distinguish actual changes from volatile page decoration."
+ac_3 = "Restart, duplicate fetch, transient failure, and missed wake SHALL preserve progress and avoid duplicate committed notifications within existing delivery guarantees."
+ac_4 = "The normal user path SHALL create, inspect, pause, resume, and remove a monitor; recipes SHALL NOT import Gideon's trigger/workflow controller."
+
+[req.35]
+title = "Transcription and speech through bounded workers"
+story = "As the user, I want usable audio capabilities with honest model and platform readiness."
+ac_1 = "Provide one transcription and one speech-output path through existing equivalents or selected provider bundles with explicit model/runtime versions and licenses."
+ac_2 = "Model download/install readiness, artifact sizes, native dependencies, supported platforms, and unavailable states SHALL be explicit and governed by existing controls."
+ac_3 = "Real audio input/output SHALL pass the ordinary Keith path with profile-scoped artifacts, input/output bounds, cancellation, and restart behavior."
+ac_4 = "Models and third-party dependencies SHALL NOT inherit the donor repository's license by assumption; missing resources SHALL NOT be hidden behind placeholder output."
+
+[req.36]
+title = "One complete inbox/channel integration"
+story = "As the user, I want Keith to handle a connected inbox without losing account or delivery truth."
+ac_1 = "Reuse transport/parsing logic for one selected inbox/channel under existing external-account, credential, thread, channel, and delivery owners."
+ac_2 = "Ingress identity, account/profile ownership, threading, deduplication, and untrusted message content SHALL be enforced at the real boundary."
+ac_3 = "Read and authorized send/reply SHALL follow existing admission/prediction/effect rules, with connection readiness, cancellation, restart, and lost-ack reconciliation tested."
+ac_4 = "External sends in qualification SHALL use an authorized disposable target; unavailable authority or credentials SHALL remain blocked, never a simulated pass."
+
+[req.37]
+title = "Complete breadth inventory and explicit deferred products"
+story = "As the user, I want a complete map of Gideon's value without hidden claims of full parity."
+ac_1 = "Inventory donor native/external apps, bundled skills/workflows/recipes, document functions, projection, search, speech, and communication capabilities at a recorded revision."
+ac_2 = "Every candidate SHALL be classified as implemented here, existing equivalent, follow-on adapter, or stateful product migration with missing behavior and dependencies."
+ac_3 = "Minutes/Growth UIs, workflow editor, sync, device companions, and remaining provider/app breadth SHALL receive explicit follow-on boundaries; they SHALL NOT silently become writer prerequisites or completed work."
+ac_4 = "Final handoff SHALL report gained usable behavior and actual integration work, not equate manifest counts with working capabilities."
+
+[req.38]
+title = "Natural cross-client experience and inspectable evidence"
+story = "As the user, I want the reliability work to make Keith more useful while keeping ordinary interaction clear."
+ac_1 = "Current clients SHALL render daemon-owned committed answers, memory/capability readiness, artifacts, and pending outcomes consistently; unsupported controls SHALL be identified instead of invented locally."
+ac_2 = "Users SHALL be able to inspect supporting anchors, distinguish generated connections, correct a remembered fact/pattern, and access relevant artifacts through existing or minimal shared APIs/UI."
+ac_3 = "UI verification SHALL include real pending, streaming, completed, failed, cancelled, reconnect, restart, empty, and narrow-screen journeys where affected."
+ac_4 = "Routine successful tasks SHALL avoid needless interruptions, global tool restriction, and terminal loops; uncertainty SHALL be surfaced when it changes the answer or next action."
+ac_5 = "API, TUI, scheduled, and channel journeys SHALL prove shared state and at least representative real usage, rather than relying solely on Web component checks."
+
+[req.39]
+title = "Migration, rollback, and staged adoption"
+story = "As the operator, I want to adopt the architecture without losing memory, permissions, or pending work."
+ac_1 = "Additive schema migration and resumable backfill SHALL preserve source authority, corrections, deletion state, pending attempts, final/delivery identity, and reader compatibility."
+ac_2 = "Upgrade/interrupted migration/restart/rollback/restore SHALL be tested through real stores before new writes are enabled for adoption."
+ac_3 = "Independent feature controls SHALL allow optional semantic/assessment generation/reconstruction/pattern work to degrade or disable while core truth, prediction records, and authority remain enforced."
+ac_4 = "Chat/hosting configuration changes SHALL explicitly check embedding references, model/roles/dimensions, representation/generation, backlog, revision coverage, and persistent storage."
+ac_5 = "Adoption SHALL follow local, isolated-runtime, shadow, bounded-control, and packaged stages; this spec SHALL NOT be treated as deployment or production-mutation authorization."
+
+[req.40]
+title = "Measured qualification and honest completion"
+story = "As the user, I want evidence this makes Keith better and prevents the historical failures."
+ac_1 = "All C01-C20 and B01-B10 cases SHALL run at their required evidence level with case counts, versions, results, and remaining gaps; invariant gates require zero observed violations."
+ac_2 = "Matched-budget ablations and chronological/family-held-out transfer SHALL follow design.verification, initially with at least three stochastic replicates and all results reported."
+ac_3 = "Resolved required bindings SHALL achieve 100 percent actual inclusion, trained semantic recall@10 SHALL reach at least 95 percent on the frozen 200-query set, and ordinary success loss SHALL be no greater than two percentage points, with uncertainty reported."
+ac_4 = "Reconstruction and latent retention SHALL separately earn default enablement through predeclared later-decision metrics; inconclusive or negative outcomes SHALL retain the simpler accepted configuration."
+ac_5 = "Packaged binaries, real providers, isolated durable services, actual clients, and migration/recovery SHALL supply final qualification; missing credentials/journeys SHALL remain blocked or incomplete."
+ac_6 = "Handoff SHALL distinguish implementation, focused checks, runtime proof, packaged qualification, and release status and SHALL NOT mark pending work done to satisfy a milestone."
+
+[tasks]
+heading = "Keith causal intelligence implementation tasks"
+
+# Every verify_cmd references the runner introduced by 1.1, including its self-check.
+# requires is authoritative execution ordering; wave is a planning group.
+# Same-wave dependencies remain sequential. No task grants deployment authority.
+
+[task.1.1]
+title = "Capture the live baseline and bootstrap honest qualification"
+status = "done"
+wave = 1
+requires = []
+reqs = ["1.4", "25.1-25.2", "25.5"]
+touches = ["scripts/qualification/causal_intelligence.py", "tests/causal-intelligence/README.md", "tests/causal-intelligence/test_qualification_runner.py", "tests/causal-intelligence/test_runtime_baseline.py", "tests/causal-intelligence/manifests/1.1.json", "docs/architecture/causal-intelligence-baseline.md", "apps/agent-web/src/server.rs"]
+do_1 = "Trace existing ingestion, automatic activation, dispatch, retry, finalization, scheduled wake, and delivery through real entry points; record source revision, owners, stores, and gaps before behavioral changes."
+do_2 = "Create the qualification runner and baseline manifest; execute a real isolated Keith baseline with source IDs, actual provider context inclusion, ordinary success, and a paraphrase hit/miss. Preserve failures and unavailable-provider status."
+do_3 = "Make the runner capture exact commands/exits, expected nonzero case counts, versions and bounded evidence; self-check rejection of missing/empty tests, stale results, failed subprocesses, and required skipped cases."
+note = "Bootstrap infrastructure is implemented in this task. Baseline build exposed a pre-existing missing EntityId import and upload-handler lint failures; permit minimal behavior-preserving repairs and preserve those baseline failures. The source map lives in docs/architecture because evidence/ is excluded from Codify source tracking; generated run evidence remains under evidence/. No runtime proof is implied by spec authoring."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 1.1 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.1.2]
+title = "Freeze the regression corpus, metrics, and independent evaluation splits"
+status = "done"
+wave = 1
+requires = ["1.1"]
+reqs = ["25.2-25.5", "40.1-40.4"]
+touches = ["scripts/qualification/causal_intelligence.py", "tests/causal-intelligence/test_qualification_runner.py", "tests/causal-intelligence/corpus", "tests/causal-intelligence/test_corpus.py", "tests/causal-intelligence/operation_service.py", "tests/causal-intelligence/test_operation_service.py", "tests/causal-intelligence/manifests/1.1.json", "tests/causal-intelligence/manifests/1.2.json", "crates/test-support/tests/causal_corpus_boundary.rs", "crates/test-support/Cargo.toml"]
+do_1 = "Define C01-C20 and B01-B10 manifests with initial state, stimulus, authoritative observations, expected case counts, owning tests, and required evidence levels; map every task's verifier to cases and appropriate package/transport checks."
+do_2 = "Implement the separate durable operation-key test service with commit-then-drop-ack fault injection and an independently inspectable effect log; establish no canned internal success path."
+do_3 = "Freeze development and chronological/family-held-out sets, the 200-query semantic set, ordinary-task baseline, initial thresholds, ablation arms, three-run stochastic protocol, and privacy-safe metrics. Keep held-out cases inaccessible to candidates/tuning."
+note = "Qualification infrastructure self-tests pass here; feature regressions remain known failures or pending until their owning tasks implement them. Candidate snapshots copy repository contents, so held-out plaintext must live in a separate operator-owned evaluator bundle outside the checkout; the corpus contains only commitments and development inputs. The runner fingerprints this external fixture separately and missing bundles fail visibly. Cargo.lock is generated from the declared test-support dependencies and remains fingerprinted and dependency-checked by the verifier; Codify excludes this lockfile from source-graph touches."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 1.2 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.1.3]
+title = "Map record ownership and versioned compatibility contracts"
+status = "done"
+wave = 1
+requires = ["1.1"]
+reqs = ["1.1", "2.1-2.4", "3.1-3.2", "8.1"]
+touches = ["crates/agent-types", "crates/provider-core", "crates/tool-core", "crates/memory", "crates/session-store", "docs/architecture/causal-intelligence-contracts.md", "tests/causal-intelligence/manifests/1.3.json"]
+do_1 = "Map every design.records field to an existing schema/store/owner and propose additive changes only for missing fields; record exact canonical write and projection/recovery seams."
+do_2 = "Implement minimum shared version/ID and serialization contracts in existing owning layers, with old-record readers, explicit unknown versions, and migration fixtures from real serialized types."
+do_3 = "Define the memory-owned candidate port and provider-owned embedding contract placement; validate all introduced edges with dependency-policy before adapter work."
+note = "Proves contract round trips and ownership, not completed runtime wiring; later tasks carry actual-path acceptance."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 1.3 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.1.4]
+title = "Inventory Gideon and select minimal useful extraction slices"
+status = "done"
+wave = 1
+requires = []
+reqs = ["27.1-27.5", "37.1-37.3"]
+touches = ["docs/architecture/causal-intelligence-capability-ledger.md", "tests/causal-intelligence/test_donor_inventory.py", "tests/causal-intelligence/manifests/1.4.json", "tests/causal-intelligence/donor-inventory.json"]
+do_1 = "Record Gideon core/apps revisions; enumerate app manifests, skills, workflows, recipes, document readers/writers, projectors, search, speech, and channel donors without importing them."
+do_2 = "For each family, inspect Keith equivalents and classify content/function/IO/controller coupling, licenses/dependencies/platforms, missing behavior, adapter owner, and useful behavior gained per changed boundary."
+do_3 = "Choose three to five initial skills, one first writer, a projection gap if present, and representative reader/search/monitor/speech/channel targets. Assign all remaining candidates explicit follow-on or stateful-product destinations."
+note = "This source-only inventory is independent of the runtime baseline and may proceed alongside 1.1. Verify it against inspected trees and current Keith contracts. Counts are inventory, not functionality or calendar estimates."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 1.4 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.2.1]
+title = "Preserve anchor provenance and independent evidence through ingestion"
+status = "done"
+wave = 2
+requires = ["1.2", "1.3"]
+reqs = ["5.1-5.5", "8.1"]
+touches = ["crates/memory", "crates/session-store", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Extend existing evidence records only where effective time/source-root identity is missing; preserve the evidence vault, consolidation ledger, and explicit relationship log as authorities for their existing record families."
+do_2 = "Preserve authority and origin through committed-source intake, exact quotes, summaries, compaction, re-ingestion, and generated representations; reject invalid or cross-profile references."
+do_3 = "Exercise real store restart and repeated assistant quotation/consolidation; independent support must remain tied to originating episodes and observed claims must not be manufactured."
+note = "Cases C14, C19 and source-lineage fixtures; focused memory/session checks plus actual ingestion path. Session-store owns bounded, profile-checked committed-source pages. Context lineage does not establish per-claim positive support; quoted memory retains its original authority. Committed suffixes must be ingested without another prompt, with durable replay and retryable atlas repair. The vault records source-checksum commitments before incomplete finals/summaries enter disposable replay checkpoints; these commitments are not evidence votes. Catalogue discovery and vault refresh retain their existing full-scan cost; source-page work is bounded independently."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 2.1 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.2.2]
+title = "Resolve required object bindings and correction chains exactly"
+status = "in_progress"
+wave = 2
+requires = ["2.1"]
+reqs = ["6.1-6.5"]
+touches = ["crates/agent-types", "crates/memory", "crates/commitments", "crates/session-store", "crates/agent-loop", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Add task/entity/property bindings with freshness and resolved/missing/stale/conflicting statuses using existing canonical records and exact indexes."
+do_2 = "Resolve effective-time corrections and supersession by identity, preserving historical queries and exposing ambiguous identities, cycles, and missing links."
+do_3 = "Prove current binding retrieval before indexing and under 10000 distractors, plus guessed-domain rejection and durable restart; wire binding resolution into the task dependency path."
+note = "Cases C04-C07; final automatic-provider inclusion after complete retrieval selection is additionally required in tasks 4.2 and 5.1. Bindings cite both their original exact source and owning memory record; model-associated entity/property meaning remains inferred even when the quoted source is UserAsserted. Resolved means a unique current attributed value, not verified external truth. SessionWriter owns durable required keys and frozen binding-use references; an AgentLoop admission port supplies the held writer before worker-thread dispatch, avoiding a second writer or memory-owned task controller. Runtime scope comes from the actual action and optional goal. Omitting a model argument cannot erase an existing dependency. Only inspectable adapter target slots can attest use; generic shell/browser routes cannot silently bypass a known dependency."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 2.2 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.2.3]
+title = "Attach versioned world and capability frames to admission"
+status = "pending"
+wave = 2
+requires = ["1.3", "2.2"]
+reqs = ["3.1-3.4", "4.1-4.4"]
+touches = ["crates/agent-types", "crates/tool-core", "crates/plugin-host", "crates/profile", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Bind native semantic version, installed capability epoch, task/object revisions, grants, commitments, and pending effects into the existing admission frame."
+do_2 = "Record explicit installation/removal/version/grant transitions; recheck authority and target revisions at dispatch, invalidate stale procedures, and distinguish context tool selection from contract changes."
+do_3 = "Exercise revoked grants, removed tools, stale object revisions, and incompatible world upgrades around an admitted operation without resetting its identity or reconciliation."
+note = "Cases C07, C19, C20 and world-version transition checks at actual admission."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 2.3 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.2.4]
+title = "Persist effect attempts before dispatch and recover ambiguity"
+status = "pending"
+wave = 2
+requires = ["1.2", "2.3"]
+reqs = ["7.1-7.5", "8.2-8.4"]
+touches = ["crates/action-store", "crates/session", "crates/tool-core", "crates/daemon-core", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Extend the existing durable action path with operation identity, contract/revision and prediction linkage, and a persisted dispatch window before external handoff."
+do_2 = "Reuse typed effect/retry states and existing recovery; fail closed on persistence failure, preserve unknown after ambiguous dispatch, and require adapter-supported reconciliation."
+do_3 = "Kill/restart at pre-persist, post-persist, dispatch, response, and assessment boundaries against real stores and the separate durable service; exercise equivalent-route retries and unsupported shell/browser reconciliation."
+note = "Cases C09, C20; full prediction semantics arrive in 4.3 without replacing this action owner."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 2.4 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.2.5]
+title = "Preserve final, process, effect, and delivery distinctions"
+status = "pending"
+wave = 2
+requires = ["1.2", "2.1"]
+reqs = ["1.2", "23.1-23.5"]
+touches = ["crates/agent-loop", "crates/session-store", "crates/agent-types", "crates/tool-core", "crates/memory", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Trace candidate/rejection/commit/delivery through existing session and finalization owners; fix only missing distinctions and prevent rejected text from becoming delivered evidence."
+do_2 = "Normalize process exit, structured application result, effect, goal, and transport status without conflating them."
+do_3 = "Exercise rejected finals, optional-memory failure after success, client disconnect, reconnect, and daemon restart with actual committed answer identity and delivery states."
+note = "Cases C08, C10, C18, C20; no new finalization controller. Current audit found provider stop dispositions discarded by StreamAssembly, nonzero Bash exit treated as successful tool output, and post-commit maintenance failure paths. Preserve ContentRejected, MaxTokens, Cancelled and unknown dispositions explicitly; incomplete/rejected output cannot become an eligible final or a repaired-and-dispatched partial tool call. Session-store owns finalizer records; existing delivery/UI ownership needs real-path proof and only demonstrated-gap fixes. Coordinate committed-suffix ingestion and atlas repair with 2.1."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 2.5 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.2.6]
+title = "Establish deletion, retention, and profile invalidation contracts"
+status = "pending"
+wave = 2
+requires = ["2.1", "2.2"]
+reqs = ["22.1-22.5", "8.4"]
+touches = ["crates/memory", "crates/data-control", "crates/profile", "crates/credentials", "tests/causal-intelligence"]
+do_1 = "Implement canonical visibility/deletion revisions and dependency invalidation hooks shared by indexes, hypotheses, patterns, summaries, and caches."
+do_2 = "Preserve minimal operational obligations in their owner while obeying memory deletion; separate protected eviction priority from user retention authority."
+do_3 = "Prove scope and deletion checks before candidate export and at inclusion, including restart and denied cross-profile access; provide invalidation contracts for later projections."
+note = "Cases C15, C19; later layers must join this closure and rerun it before their acceptance."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 2.6 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.3.1]
+title = "Implement and select an independently configured trained encoder"
+status = "pending"
+wave = 3
+requires = ["1.2", "1.3", "2.6"]
+reqs = ["9.1-9.5"]
+touches = ["crates/provider-core", "crates/provider-adapters", "crates/configuration", "crates/credentials", "crates/retrieval", "tests/causal-intelligence"]
+do_1 = "Implement query/document-aware embedding transport with independent config and opaque credential references, explicit space metadata, bounded inputs/batches, cancellation, usage, and complete output validation."
+do_2 = "Add permitted local-encoder and hosted-adapter selection through the same contract; benchmark available candidates on development data and record unavailable candidates and selection rationale."
+do_3 = "Prove malformed/dimension/order/nonfinite/zero-vector failures, no silent truncation, policy-blocked export, missing encoder, and chat-provider switch without embedding loss."
+note = "Cases C01-C03, C19; provider adapter proof is distinct from automatic activation acceptance in 4.1."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 3.1 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.3.2]
+title = "Implement durable indexing jobs and fresh-memory fallback"
+status = "pending"
+wave = 3
+requires = ["2.1", "2.6", "3.1"]
+reqs = ["8.2-8.4", "10.1-10.5"]
+touches = ["crates/memory", "crates/retrieval", "crates/local-runtime", "crates/daemon-core", "tests/causal-intelligence"]
+do_1 = "Link canonical source/revision commits to idempotent projection jobs or an explicit reconciliation cursor; record source/view/model/generation for every result."
+do_2 = "Implement bounded backlog processing, leases/backoff, cancellation, watermark reporting, and recent-unindexed lexical candidates without delaying exact visibility."
+do_3 = "Exercise commit/index crashes, duplicates, stale responses, outage/recovery, corruption quarantine, and deletion during in-flight embedding; expose truthful readiness states."
+note = "Cases C01, C04, C15; jobs may never overwrite a newer revision or resurrect deleted content."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 3.2 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.3.3]
+title = "Build compatible index generations and reversible switching"
+status = "pending"
+wave = 3
+requires = ["3.2"]
+reqs = ["11.1-11.5"]
+touches = ["crates/retrieval", "crates/memory", "crates/configuration", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Enforce complete vector-space identity for queries and documents, including role compatibility, and reject same-dimension incompatible models."
+do_2 = "Build and evaluate new generations beside the active generation, switch an atomic pointer, and preserve a permitted previous generation for rollback."
+do_3 = "Fault-inject rebuild/switch/rollback and test deletion/revocation across all generations, corrupt indexes, incomplete fallback spaces, and out-of-order jobs."
+note = "Cases C03, C15 plus real-store generation migration; no mixing raw vectors or scores."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 3.3 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.3.4]
+title = "Extract the first Python package through the existing host boundary"
+status = "pending"
+wave = 3
+requires = ["1.4", "2.3", "2.6"]
+reqs = ["27.1-27.4", "28.1-28.5"]
+touches = ["crates/kernel-broker", "crates/kernel-protocol", "crates/tool-runner", "crates/artifacts", "crates/local-runtime", "packaging", "tests/causal-intelligence"]
+do_1 = "Extract the minimum pinned document model/codec/writer package with exact donor/dependency provenance; preserve Python behavior and avoid importing runtime controllers."
+do_2 = "Extend the existing tool/kernel/artifact route with the minimal typed capability entry point, dependency/readiness identity, bounded input/output, and host-owned path/artifact commitment."
+do_3 = "Exercise real process execution, dependency absence, cancellation, crash, timeout, path escape, profile denial, and clean process teardown; confirm no Gideon store/daemon/installer is needed."
+note = "Cases B03, B04, B10. Exact package destination is chosen within existing packaging conventions, documented in the donor ledger."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 3.4 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.3.5]
+title = "Adapt curated skills and repair selection/scaffolding gaps"
+status = "pending"
+wave = 3
+requires = ["1.4", "2.3"]
+reqs = ["29.1-29.5"]
+touches = ["crates/skills", "crates/profile", "crates/local-runtime", "packaging/builtins/skills", "docs/features/skills.md", "tests/causal-intelligence"]
+do_1 = "Convert three to five selected donor skills to complete Keith manifests with actual required tools, steps, validation, failures, stop conditions, platforms, and adapted references."
+do_2 = "Resolve scaffold/registry format mismatch and profile-enabled selection in the real activation path; preserve existing skill size/count and readiness limits."
+do_3 = "Prove selection in ordinary turns and rejection of disabled/malformed/unavailable/hostile skill content; defer tool-dependent procedures until the tool is ready without advertising false capability."
+note = "Case B01 and C07/C18; writer-dependent skill acceptance is repeated with documents in 5.4."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 3.5 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.4.1]
+title = "Wire trained semantic candidates into automatic memory activation"
+status = "pending"
+wave = 4
+requires = ["2.2", "3.2", "3.3"]
+reqs = ["12.1-12.5", "9.4", "10.4"]
+touches = ["crates/memory/src/activation.rs", "crates/memory/src/observatory.rs", "crates/retrieval", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Compose the memory-owned search port into select_activation and the real local-runtime path, combining exact/lexical/semantic/recent candidates with canonical validity checks."
+do_2 = "Commit an anchor, index it, query a fresh low-overlap paraphrase without an entity ID, and record the exact evidence revision in the actual provider context."
+do_3 = "Run semantic-disabled ablation, crowded corpus, provider outage/switch, fresh session, scheduled wake, and daemon restart without depending on an explicit recall tool."
+note = "Cases C01-C05, C19; genuine low-overlap contribution is required rather than an exact-lookup shortcut."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 4.1 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.4.2]
+title = "Assemble required context and record actual inclusion"
+status = "pending"
+wave = 4
+requires = ["2.2", "2.3", "2.4", "4.1"]
+reqs = ["6.3", "14.1-14.5"]
+touches = ["crates/session-store", "crates/provider-core", "crates/memory/src/activation.rs", "crates/local-runtime", "crates/agent-loop", "tests/causal-intelligence"]
+do_1 = "Implement ordered required-state and optional-recollection assembly under actual model context constraints and existing activation manifests."
+do_2 = "Record selected versus actually included IDs/revisions/lanes; refresh on new dependencies, corrections, revoked grants, or changed object/capability revisions."
+do_3 = "Exercise small context, missing/stale/conflicting bindings, large optional recall, unresolved effects, and correction closure; narrow or fetch instead of dropping required state."
+note = "Cases C04-C07, C19-C20; resolved required binding inclusion is measured at the provider boundary."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 4.2 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.4.3]
+title = "Add immutable predictions to admitted actions and experiments"
+status = "pending"
+wave = 4
+requires = ["2.4", "4.2"]
+reqs = ["15.1-15.5"]
+touches = ["crates/agent-types", "crates/tool-core", "crates/agent-loop", "crates/session", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Extend real model action proposals with compact expected predicates, supporting references, preconditions, uncertainty, deadlines, and task/operation/world linkage."
+do_2 = "Freeze and persist predictions through the existing attempt write before dispatch; preserve revisions and distinguish admission rejection from executed failure."
+do_3 = "Exercise malformed predictions, attempted post-result rewriting, stale prerequisites, diagnostic intent, and ordinary reads without an extra model round trip."
+note = "Cases C09, C11, C18; runtime-defined user-goal requirements cannot be replaced by easier model predicates."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 4.3 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.4.4]
+title = "Assess typed outcomes and recover delayed observations"
+status = "pending"
+wave = 4
+requires = ["2.5", "4.3"]
+reqs = ["16.1-16.5", "8.3", "23.3-23.4"]
+touches = ["crates/agent-loop", "crates/memory", "crates/session", "crates/scheduler", "crates/waiting", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Implement deterministic predicate assessment for file revision and operation-key/readback cases, with bounded semantic/review findings only where the goal requires them."
+do_2 = "Append assessment states/evidence/evaluator revisions, distinguish process/application/effect/latency/goal outcomes, and queue delayed checks through existing durable jobs."
+do_3 = "Prove evaluator exception/timeout/malformed output remains unresolved, delayed success survives restart, optional assessment failure preserves a valid final, and stop halts new follow-up dispatch."
+note = "Cases C09-C11, C18-C20; absent evidence never silently confirms success or absence."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 4.4 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.4.5]
+title = "Replace repeated failed mechanisms with bounded investigation"
+status = "pending"
+wave = 4
+requires = ["4.3", "4.4"]
+reqs = ["17.1-17.5", "1.3"]
+touches = ["crates/agent-loop", "crates/session", "crates/tool-core", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Add durable strategy accounting to the existing convergence owner, using task/target/effect/mechanism/preconditions and evidence roots rather than model-generated names."
+do_2 = "Require compact evidence-based revision at the experimental limits; count relevant disconfirmation and bound probes within existing budgets while immediately reconciling unknown effects."
+do_3 = "Exercise A/B argument cycles, known-equivalent alternate routes, compaction/new session, changed causal evidence, exhausted diagnostics, immediate user stop, and ordinary success."
+note = "Cases C12-C13, C18-C20; no respawn loop, global tool stripping, second final gate, or arbitrary unsafe third attempt."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 4.5 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.4.6]
+title = "Deliver DOCX, XLSX, PPTX, and PDF creation"
+status = "pending"
+wave = 4
+requires = ["3.4"]
+reqs = ["30.1-30.3", "30.5"]
+touches = ["packaging", "crates/artifacts", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Finish the first extracted writer and add the remaining document/sheet/deck codecs and writers through the same typed package entry point, preserving donor provenance and dependency pins."
+do_2 = "Commit bounded real output bytes through Keith with verified type/digest/profile access; represent supported features and conversion limitations explicitly."
+do_3 = "Inspect actual content/rendering for all four formats, including spreadsheet formula versus literal behavior, and exercise malformed input, missing libraries, cancellation, oversized output, and path escape."
+note = "Cases B02-B04, B10; authoring checks are followed by the live skill/UI/restart journey in 5.4."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 4.6 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.4.7]
+title = "Provide bounded output projection with full evidence access"
+status = "pending"
+wave = 4
+requires = ["1.4", "2.6", "3.4"]
+reqs = ["32.1-32.4", "27.5"]
+touches = ["crates/tool-core", "crates/artifacts", "crates/local-runtime", "packaging", "tests/causal-intelligence"]
+do_1 = "Compare current large-result behavior with donor log/diff/JSON/CSV projectors; adapt the minimum useful missing function or establish a fully proved existing equivalent."
+do_2 = "Retain raw-result storage/access in Keith and expose bounded previews with truthful truncation and authorized full-output retrieval."
+do_3 = "Use a real large-output turn to recover decisive application-error/correction evidence after projection, restart, and attempted cross-profile access."
+note = "Case B05 and C10/C19; never import Gideon's LRU result authority or treat a digest as authorization."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 4.7 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.5.1]
+title = "Prove the complete corrected-memory and lost-ack teaching loop"
+status = "pending"
+wave = 5
+requires = ["4.1", "4.2", "4.3", "4.4", "4.5", "2.5"]
+reqs = ["26.1-26.4", "1.4", "7.5"]
+touches = ["tests/causal-intelligence", "scripts/qualification/causal_intelligence.py", "evidence/causal-intelligence"]
+do_1 = "Run the exact endpoint-correction, 10000-distractor, fresh-paraphrase, real-context and authorized-write journey through a real isolated Keith daemon."
+do_2 = "Commit then drop acknowledgement in the separate durable service; compact/restart Keith, reconcile the operation, and independently count one effect with the expected digest."
+do_3 = "Assess existence and timing separately, retain an attributable conditional lesson record, and observe the truthful committed answer through the ordinary client."
+note = "First end-to-end teaching milestone. Generalized lesson selection and changed-condition transfer are completed in 5.3, not claimed from this single episode."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 5.1 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.5.2]
+title = "Index conditional experience and typed bounded relationships"
+status = "pending"
+wave = 5
+requires = ["4.1", "4.4", "2.6"]
+reqs = ["13.1-13.5", "5.4"]
+touches = ["crates/memory", "crates/retrieval", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Implement observation-meaning and action/precondition/outcome representations plus typed temporal/entity/task/evidential/procedural/causal/analogical edges."
+do_2 = "Fuse ranked canonical candidates with independent-root deduplication, bounded traversal, correction closure, and counterexample retrieval; preserve inferential classes."
+do_3 = "Measure useful additions over the initial view, test misleading analogies, edge cycles, bound exhaustion, deleted roots, and repeated evidence across representations."
+note = "Cases C14-C17; unvalidated extra views remain disabled and no dedicated graph database is required."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 5.2 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.5.3]
+title = "Learn conditional procedures and prove positive and negative transfer"
+status = "pending"
+wave = 5
+requires = ["5.1", "5.2"]
+reqs = ["18.1-18.5", "26.5"]
+touches = ["crates/evolution", "crates/memory", "crates/task-recipe", "crates/skills", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Retain conditions, independent episodes, outcomes, versions, applicability, counterexamples, and adoption history through existing experience/recipe owners."
+do_2 = "Implement tentative advice, broader-reuse eligibility, contradiction narrowing/suspension, and actual later-task utility recording without promoting lessons into authority."
+do_3 = "Prove unfamiliar incidental variation transfers, relevant causal changes reject/narrow reuse, repeated summaries do not increase support, and executable/code adoption still follows existing independent gates."
+note = "Cases C07, C14, C17; at least three independent episodes and changed-condition evidence precede broader reuse under initial settings."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 5.3 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.5.4]
+title = "Prove the first Gideon capability batch in the ordinary Web journey"
+status = "pending"
+wave = 5
+requires = ["3.5", "4.6", "4.7", "2.5"]
+reqs = ["29.4", "30.4", "28.5", "38.1", "38.3"]
+touches = ["apps/agent-web", "crates/ui-model", "tests/causal-intelligence", "evidence/causal-intelligence"]
+do_1 = "Have a real Keith turn select an enabled imported procedure, consume structured material, invoke the document capability, and commit the resulting artifact."
+do_2 = "Download and inspect real DOCX/XLSX/PPTX/PDF artifacts through normal UI; restart the daemon and reopen the same profile-scoped artifacts."
+do_3 = "Exercise cancellation, missing dependency, failed renderer, reconnect, and narrow-screen artifact access; confirm shared output projection remains useful and no Gideon runtime is present."
+note = "Cases B01-B05, B10; M1 additionally requires teaching transfer in 5.3 and its source-backed final result."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 5.4 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.5.5]
+title = "Add attributable document extraction"
+status = "pending"
+wave = 5
+requires = ["3.4", "4.6", "2.6"]
+reqs = ["31.1-31.4"]
+touches = ["crates/knowledge", "crates/artifacts", "crates/local-runtime", "packaging", "tests/causal-intelligence"]
+do_1 = "Adapt minimal reader/parser functions or qualify existing equivalents for DOCX/XLSX/PPTX/PDF; keep file access and store ownership with Keith."
+do_2 = "Attach source artifact/revision and supported page/sheet-cell/slide/paragraph coordinates, with explicit unsupported content, gaps, and lossy conversion metadata."
+do_3 = "Exercise real document reasoning plus malformed/compressed/oversized/traversal/symlink inputs and hostile document instructions through the bounded worker path."
+note = "Case B04 plus attributed actual-turn use; this is extraction support, not a promise of universal lossless import."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 5.5 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.5.6]
+title = "Connect one additional search and extraction capability"
+status = "pending"
+wave = 5
+requires = ["1.4", "2.3", "2.6", "4.3"]
+reqs = ["33.1-33.4"]
+touches = ["crates/web", "crates/provider-adapters", "crates/configuration", "crates/credentials", "crates/local-runtime", "apps/agent-web", "tests/causal-intelligence"]
+do_1 = "Choose the ledger's useful search gap and adapt only required provider logic behind current credential/network contracts; qualify an existing equivalent when it already supplies the behavior."
+do_2 = "Wire configuration and truthful readiness into the real tool path with cancellation, bounded output, attributed URLs/times, provider failures, and extraction limitations."
+do_3 = "Prove an actual user turn uses the result, while missing credentials, rate limits, hostile snippets, disallowed destinations, and cross-profile access fail correctly."
+note = "Case B06; unavailable live provider access remains blocked for live qualification."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 5.6 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.5.7]
+title = "Translate source monitoring onto existing durable scheduling"
+status = "pending"
+wave = 5
+requires = ["1.4", "4.1", "4.3", "4.4", "2.5"]
+reqs = ["34.1-34.4", "12.4"]
+touches = ["crates/scheduler", "crates/initiative", "crates/knowledge", "crates/web", "crates/delivery", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Translate two selected recipes, including a structured release/feed source, with profile ownership, durable cursors, meaningful item identities, and existing scheduling."
+do_2 = "Wire user create/inspect/pause/resume/remove commands and bounded delivery; do not import the Gideon trigger or workflow controller."
+do_3 = "Exercise duplicate fetch, changing page decoration, missed wake, transient errors, restart between detection and delivery, cancellation/removal, and recall during a fresh scheduled turn."
+note = "Case B07 and C04/C20; preserve exact notification guarantees supported by the delivery adapter."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 5.7 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.6.1]
+title = "Generate bounded labeled reconstruction with source checks"
+status = "pending"
+wave = 6
+requires = ["5.2", "5.3", "2.6"]
+reqs = ["19.1-19.5", "5.2-5.5"]
+touches = ["crates/memory", "crates/local-runtime", "crates/provider-core", "tests/causal-intelligence"]
+do_1 = "Generate optional connections from selected anchors with alternatives, gaps, generator/version, and permanent inferential origin; retain only as a hypothesis when requested by policy."
+do_2 = "Validate references/quotes/revisions and prohibited authority promotion, run bounded claim checks where useful, and fall back to anchor-only context/output when checks fail."
+do_3 = "Exercise compaction, repeated quotation/re-ingestion, invented identifiers/events, stale/deleted anchors, and missing evidence without laundering generated claims."
+note = "Cases C14-C15; shadow-only until the independent experiment in 7.2 justifies enablement."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 6.1 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.6.2]
+title = "Capture bounded signals and form revisable user patterns"
+status = "pending"
+wave = 6
+requires = ["5.2", "5.3", "2.6"]
+reqs = ["20.1-20.5", "22.5"]
+touches = ["crates/memory", "crates/profile", "crates/data-control", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Capture attributable sanitized recent signals under the seven-day/50-MiB experiment limits and stricter existing policy, without bulk transcript or media duplication."
+do_2 = "Build scoped competing hypotheses with independent roots, alternatives, counterexamples, review/expiry, explicit rejection, and self-caused interaction markers."
+do_3 = "Exercise work-versus-personal scope, misleading early patterns, correction, stronger forgetting, expiry, repeated generated signals, and partial source availability."
+note = "Cases C14-C16, C19; independent of reconstruction and not a prerequisite for ordinary task completion."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 6.2 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.6.3]
+title = "Implement optional importance selection and later utility measurement"
+status = "pending"
+wave = 6
+requires = ["6.2", "5.3"]
+reqs = ["21.1-21.5", "22.3-22.5"]
+touches = ["crates/memory", "crates/evolution", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Separate operational retention, protected evidence priority, and optional selection; implement the specified normalized fixed score with unknown utility zero and deterministic reasons/ties."
+do_2 = "Reserve the initial 20-percent optional quota for exceptions/rare/novel signals and record bounded redistribution; do not let selector scores remove required bindings or operational state."
+do_3 = "Record later correct use, avoided repeated questions/failures, and supported personalization without treating retrieval/exposure/silence as success; invalidate utility and dependents on deletion/correction."
+note = "Cases C05, C15-C16; shadow-only until the independent selector comparison in 7.1."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 6.3 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.6.4]
+title = "Integrate real transcription and speech output"
+status = "pending"
+wave = 6
+requires = ["1.4", "3.4", "4.3", "2.6"]
+reqs = ["35.1-35.4"]
+touches = ["crates/provider-adapters", "crates/kernel-broker", "crates/artifacts", "crates/local-runtime", "apps/agent-web", "packaging", "tests/causal-intelligence"]
+do_1 = "Select or qualify one transcription and one speech-output implementation, recording model/runtime/license, native dependencies, supported platforms, artifact footprint, and packaging."
+do_2 = "Use bounded existing execution/provider routes with explicit download/readiness and profile-scoped real audio artifacts; preserve existing installation/authority controls."
+do_3 = "Prove real audio input/output in the ordinary client, missing model/library, unsupported platform, cancellation, oversized input, restart, and denied cross-profile access."
+note = "Case B08/B03/B10; no placeholder audio or implied universal platform support."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 6.4 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.6.5]
+title = "Integrate one inbox/channel with existing account and delivery truth"
+status = "pending"
+wave = 6
+requires = ["1.4", "2.5", "4.3", "4.4", "2.6"]
+reqs = ["36.1-36.4"]
+touches = ["crates/channel-core", "crates/channel-adapters", "crates/credentials", "crates/delivery", "apps/channel-gateway", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Adapt only selected transport/parsing logic under existing account/profile/thread/credential boundaries and connection readiness."
+do_2 = "Wire attributable ingress/read and authorized send/reply through current tool admission, prediction, effect, and delivery paths with durable deduplication."
+do_3 = "Prove account/thread ownership, duplicate ingress, hostile message content, cancellation/restart, and lost-send acknowledgement against an authorized disposable target."
+note = "Case B09 and C09/C19/C20; absent credentials or send authorization blocks the real-send qualification."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 6.5 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.7.1]
+title = "Evaluate latent retention against equal-budget future-task baselines"
+status = "pending"
+wave = 7
+requires = ["6.3", "1.2"]
+reqs = ["21.5", "40.2-40.4"]
+touches = ["tests/causal-intelligence", "scripts/qualification/causal_intelligence.py", "evidence/causal-intelligence"]
+do_1 = "Hold retrieval/reasoning fixed and compare pattern retention with explicit-priority, recency, and frequency selectors on chronological held-out future tasks at equal storage/context/work budget."
+do_2 = "Include preference reversal, rare exceptions, misleading initial impressions, user correction, deleted signals, and self-caused feedback; run at least three stochastic replicates."
+do_3 = "Report all outcomes, later utility, repeated questions, inappropriate personalization, required-fact coverage, uncertainty, and resource usage; enable only with predeclared benefit and no material regression."
+note = "A completed negative/inconclusive experiment keeps the simpler selector. Unrun cases or unavailable providers do not count as an evaluated rejection."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 7.1 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.7.2]
+title = "Evaluate reconstruction, causal transfer, and contribution ablations"
+status = "pending"
+wave = 7
+requires = ["6.1", "5.3", "1.2"]
+reqs = ["19.5", "18.5", "40.2-40.4"]
+touches = ["tests/causal-intelligence", "scripts/qualification/causal_intelligence.py", "evidence/causal-intelligence"]
+do_1 = "Run A-E arms at matched model/context/work budget, including semantic-disabled and prediction-isolated comparisons where contribution is claimed."
+do_2 = "Evaluate held-out incidental and causal-condition variation, misleading analogies, unresolved/delayed outcomes, unsupported recollections, negative transfer, and ordinary task success with all replicates reported."
+do_3 = "Measure later behavior and supported claims rather than fluency; keep reconstruction disabled if it fails to earn the predeclared decision metric or materially regresses reliability."
+note = "Frozen held-out failures remain failures; no gate or corpus edits to make a candidate pass."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 7.2 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.7.3]
+title = "Qualify migration, deletion-aware restore, and independent feature controls"
+status = "pending"
+wave = 7
+requires = ["3.3", "4.4", "6.1", "6.3", "2.5"]
+reqs = ["39.1-39.5", "22.3-22.4", "8.4"]
+touches = ["crates/migration-suite", "crates/configuration", "crates/memory", "crates/retrieval", "crates/daemon-core", "crates/local-runtime", "tests/causal-intelligence", "docs/features"]
+do_1 = "Implement additive migration/backfill checkpoints and explicit compatible-reader/downgrade boundaries; preserve source authority and minimum operational state."
+do_2 = "Add independent semantic/assessment-work/reconstruction/pattern controls and recovery that preserve prediction records, unknown effects, corrections/deletions, grants, and final/delivery identity when optional features disable."
+do_3 = "Exercise upgrade, interrupted backfill, restart, generation rollback, old-binary compatibility rejection, and deletion-aware supported restore on real stores; document safe recovery and provider/hosting migration checks."
+note = "Case C15 and migration variants of C01-C09/C20; no actual deployment is part of this task."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 7.3 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.7.4]
+title = "Expose real-path health and bounded evidence observability"
+status = "pending"
+wave = 7
+requires = ["4.1", "4.2", "4.4", "5.3", "6.3", "5.4"]
+reqs = ["24.1-24.4", "10.3-10.4"]
+touches = ["crates/telemetry", "crates/ui-model", "crates/platform-contracts", "crates/daemon-core", "crates/local-runtime", "tests/causal-intelligence"]
+do_1 = "Expose independent chat/embedding/backlog/generation/source-coverage and actual-turn probe state through existing daemon projections."
+do_2 = "Correlate canonical commit, index, activation, actual context, attempt, assessment, lesson, final, and delivery with bounded IDs/metadata and redaction."
+do_3 = "Deliberately disconnect activation while leaving an encoder healthy and prove semantic-ready fails; test outage, lag, corrupt generation, and recovery without stopping ordinary conversation."
+note = "Cases C01-C04/C18; health must detect disconnected runtime wiring, not only transport failure."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 7.4 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.7.5]
+title = "Prove shared client projections and usable correction/artifact flows"
+status = "pending"
+wave = 7
+requires = ["7.4", "6.1", "6.3", "5.4", "5.5", "5.6", "5.7", "6.4", "6.5"]
+reqs = ["1.1-1.3", "38.1-38.5", "23.1-23.5"]
+touches = ["crates/platform-contracts", "crates/ui-model", "apps/agent-web", "apps/agent-tui", "apps/channel-gateway", "tests/causal-intelligence"]
+do_1 = "Use existing/minimal shared commands and projections to inspect anchors, generated connections, patterns, corrections, readiness, pending effects, and artifacts; keep all durable truth daemon-owned."
+do_2 = "Exercise actual Web interaction with pending/streaming/completed/failed/cancelled/reconnect/empty/narrow states, plus TUI/API/scheduled/channel representative journeys."
+do_3 = "Stop during action, disconnect, reopen another client, correct a fact or pattern, and restart; prove consistent committed answers, artifact access, memory revisions, and no unnecessary terminal/permission loops."
+note = "Cases C08/C15/C18-C20 and affected B cases; unsupported client controls remain explicit rather than being faked locally."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 7.5 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.7.6]
+title = "Reconcile the complete capability ledger with implemented behavior"
+status = "pending"
+wave = 7
+requires = ["5.4", "5.5", "5.6", "5.7", "6.4", "6.5"]
+reqs = ["27.1-27.5", "37.1-37.4"]
+touches = ["docs/architecture/causal-intelligence-capability-ledger.md", "docs/features", "tests/causal-intelligence", "evidence/causal-intelligence"]
+do_1 = "Update every donor family with exact extracted files, supported behavior/platforms, dependency/license provenance, actual changed boundaries, and observed integration effort."
+do_2 = "Cross-reference each implemented or equivalent capability to its real user-path evidence; mark remaining apps/providers and stateful Minutes/Growth/editor/sync/device work as scoped follow-ons."
+do_3 = "Check packaged dependencies and authority/state ownership for accidental Gideon controller/store/updater/installer imports and fix violations before acceptance."
+note = "Case B10 and inventory completeness; full Gideon product parity is not asserted by this feature."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 7.6 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.8.1]
+title = "Run the full causal, memory, capability, and adversarial corpus"
+status = "pending"
+wave = 8
+requires = ["7.1", "7.2", "7.3", "7.4", "7.5", "7.6"]
+reqs = ["25.3", "40.1-40.4", "22.1-22.5"]
+touches = ["tests/causal-intelligence", "scripts/qualification/causal_intelligence.py", "evidence/causal-intelligence"]
+do_1 = "Run all C01-C20 and B01-B10 deterministic/process/interaction cases against the integrated source revision with actual stores and required fault boundaries."
+do_2 = "Apply frozen required-binding, 200-query semantic, ordinary-success, provenance, isolation, duplicate-effect, unsupported-claim, and optional-layer gates; report sample counts and uncertainty."
+do_3 = "Verify hosted-export policy, hostile memory/tools/documents, correction/deletion closure, dispatch authority, stop/restart, and independently protected evaluation/promotion boundaries."
+note = "Passing this corpus does not substitute for live-provider or packaged-runtime qualification in 8.2 and 8.3."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 8.1 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.8.2]
+title = "Qualify real providers and independently observed disposable effects"
+status = "pending"
+wave = 8
+requires = ["8.1"]
+reqs = ["25.4", "40.5", "36.4", "26.1-26.5"]
+touches = ["tests/causal-intelligence", "scripts/qualification/causal_intelligence.py", "evidence/causal-intelligence"]
+do_1 = "Exercise actual supported chat multi-turn/tool/final grammar and the selected trained embedding adapter with sanitized isolated-profile data and real anchor-to-context recall."
+do_2 = "Repeat the teaching journey against an authorized disposable integration with independently observable operation identity and effect count; exercise live selected search/audio/inbox providers where required."
+do_3 = "Record provider/model/config versions, latency/cancellation/errors, and blocked credentials/authority explicitly; reject fake substitutes and carry unsupported adapter limits into the report."
+note = "No production mutation or external send is authorized by the existence of this task; use the actual session's existing authority and disposable targets."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 8.2 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.8.3]
+title = "Qualify packaged Keith, restart, and migration journeys"
+status = "pending"
+wave = 8
+requires = ["8.2", "7.3", "7.6"]
+reqs = ["28.5", "30.4", "39.1-39.5", "40.5"]
+touches = ["packaging", "apps/xtask", "tests/causal-intelligence", "evidence/causal-intelligence"]
+do_1 = "Build current release artifacts/images using existing repository wrappers and run the isolated daemon/worker/Web stack with required Python libraries/models or honest readiness errors."
+do_2 = "Repeat teaching, four-format artifact download/reopen, representative extended capabilities, profile isolation, cancellation, restart, and versioned migration/rollback on those exact binaries."
+do_3 = "Run applicable repository dependency/security/platform/release gates with source/image identity and exact results; record unqualified platforms and missing external journeys."
+note = "Package validation is local/isolated; this task does not deploy or certify a production environment."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 8.3 --spec spec/keith-causal-intelligence/spec.kvx"
+
+[task.8.4]
+title = "Publish the local evidence handoff and implementation adoption decision"
+status = "pending"
+wave = 8
+requires = ["8.1", "8.2", "8.3"]
+reqs = ["37.4", "39.5", "40.1-40.6"]
+touches = ["evidence/causal-intelligence", "docs/features", "spec/keith-causal-intelligence/spec.kvx"]
+do_1 = "Write the local implementation report linking every requirement/case/task to current evidence, actual call paths, measured improvements/regressions, and supported platforms/providers."
+do_2 = "Record default-on/off decisions for evaluated optional layers, unresolved or deferred breadth, schema/index rollback instructions, provider/hosting migration checklist, and exact next operational steps."
+do_3 = "Verify all required task evidence is current and complete before any done claim; distinguish source/focused/runtime/packaged/release status and leave blocked work incomplete."
+note = "Publish here means write the local handoff artifact. Any deployment, remote publication, push, or production adoption is a separately authorized action."
+verify_cmd = "python3 scripts/qualification/causal_intelligence.py verify --task 8.4 --spec spec/keith-causal-intelligence/spec.kvx"
