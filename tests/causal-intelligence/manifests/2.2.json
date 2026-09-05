@@ -37,35 +37,237 @@
     "/tmp/keith-causal-bindings-build/debug/agent-cli"
   ],
   "required_case_ids": [
-    "binding-store-contracts",
-    "binding-dispatch-contracts",
+    "agent-types-bindings",
+    "memory-exact-bindings",
+    "commitment-exact-scope",
+    "session-binding-admissions",
+    "agent-loop-admission",
+    "runtime-binding-dispatch",
     "live-binding-use",
-    "changed-package-checks"
+    "agent-types-strict-clippy",
+    "memory-strict-clippy",
+    "commitments-strict-clippy",
+    "session-store-strict-clippy",
+    "agent-loop-strict-clippy",
+    "local-runtime-strict-clippy",
+    "dependency-policy"
   ],
   "cases": [
     {
-      "id": "binding-store-contracts",
-      "kind": "unavailable",
-      "expected_case_count": 1,
-      "reason": "Task 2.2 interfaces and required proof implementation are in progress; no successful feature outcome is declared."
+      "id": "agent-types-bindings",
+      "kind": "cargo_test",
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "keith-agent-types",
+        "--locked"
+      ],
+      "expected_case_count": 14,
+      "timeout_seconds": 1800
     },
     {
-      "id": "binding-dispatch-contracts",
-      "kind": "unavailable",
-      "expected_case_count": 1,
-      "reason": "Task 2.2 interfaces and required proof implementation are in progress; no successful feature outcome is declared."
+      "id": "memory-exact-bindings",
+      "kind": "cargo_test",
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "keith-memory",
+        "--locked"
+      ],
+      "expected_case_count": 66,
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "commitment-exact-scope",
+      "kind": "cargo_test",
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "keith-commitments",
+        "--locked"
+      ],
+      "expected_case_count": 3,
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "session-binding-admissions",
+      "kind": "cargo_test",
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "keith-session-store",
+        "--locked"
+      ],
+      "expected_case_count": 35,
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "agent-loop-admission",
+      "kind": "cargo_test",
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "keith-agent-loop",
+        "--locked"
+      ],
+      "expected_case_count": 12,
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "runtime-binding-dispatch",
+      "kind": "cargo_test",
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "keith-local-runtime",
+        "--locked"
+      ],
+      "expected_case_count": 38,
+      "timeout_seconds": 1800
     },
     {
       "id": "live-binding-use",
-      "kind": "unavailable",
-      "expected_case_count": 1,
-      "reason": "Task 2.2 interfaces and required proof implementation are in progress; no successful feature outcome is declared."
+      "kind": "unittest",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/causal-intelligence",
+        "-p",
+        "test_runtime_bindings.py",
+        "-v"
+      ],
+      "expected_case_count": 3,
+      "timeout_seconds": 3600,
+      "required_artifacts": [
+        "bindings.json"
+      ]
     },
     {
-      "id": "changed-package-checks",
-      "kind": "unavailable",
+      "id": "agent-types-strict-clippy",
+      "kind": "cargo_clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "keith-agent-types",
+        "--all-targets",
+        "--no-deps",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
       "expected_case_count": 1,
-      "reason": "Task 2.2 interfaces and required proof implementation are in progress; no successful feature outcome is declared."
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "memory-strict-clippy",
+      "kind": "cargo_clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "keith-memory",
+        "--all-targets",
+        "--no-deps",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "expected_case_count": 1,
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "commitments-strict-clippy",
+      "kind": "cargo_clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "keith-commitments",
+        "--all-targets",
+        "--no-deps",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "expected_case_count": 1,
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "session-store-strict-clippy",
+      "kind": "cargo_clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "keith-session-store",
+        "--all-targets",
+        "--no-deps",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "expected_case_count": 1,
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "agent-loop-strict-clippy",
+      "kind": "cargo_clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "keith-agent-loop",
+        "--all-targets",
+        "--no-deps",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "expected_case_count": 1,
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "local-runtime-strict-clippy",
+      "kind": "cargo_clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "keith-local-runtime",
+        "--all-targets",
+        "--no-deps",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "expected_case_count": 1,
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "dependency-policy",
+      "kind": "dependency_policy",
+      "argv": [
+        "cargo",
+        "dependency-policy"
+      ],
+      "expected_case_count": 1,
+      "timeout_seconds": 1800
     }
   ]
 }

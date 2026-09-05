@@ -2,7 +2,13 @@
 
 mod activation;
 mod bindings;
-pub use bindings::{BindingAliasCandidate, BindingAliasCandidates, BindingAssociationOrigin, BindingCorrectionDraft, BindingDraft, BindingEntityTarget, BindingError, BindingFreshness, BindingLookupRequest, BindingMutation, BindingQuery, BindingResolution, BindingResolutionReason, BindingSourceSpan, BindingUsePolicy, BindingWriteReceipt, RequiredBindingResolution, ResolvedBinding};
+pub use bindings::{
+    BindingAliasCandidate, BindingAliasCandidates, BindingAssociationOrigin,
+    BindingCorrectionDraft, BindingDraft, BindingEntityTarget, BindingError, BindingFreshness,
+    BindingLookupRequest, BindingMutation, BindingQuery, BindingResolution,
+    BindingResolutionReason, BindingSourceSpan, BindingUsePolicy, BindingWriteReceipt,
+    RequiredBindingResolution, ResolvedBinding,
+};
 mod causal;
 mod ingestion;
 mod observatory;

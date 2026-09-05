@@ -370,7 +370,9 @@ pub enum ObservatoryError {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "mutation")]
 enum VaultMutation {
-    BindingAssociated { binding: crate::bindings::BindingRecord },
+    BindingAssociated {
+        binding: Box<crate::bindings::BindingRecord>,
+    },
     SourceCommitted {
         reference: CommittedSourceReference,
     },
@@ -521,7 +523,8 @@ impl MemoryObservatory {
         fs::create_dir_all(root.join(".keith"))?;
         let _file = vault_lock(&root)?;
         let (events, vault_tail_recovered) = load_vault(&root, profile_id)?;
-        let (evidence, source_index, commitments, bindings) = project_events(profile_id, &events, limits)?;
+        let (evidence, source_index, commitments, bindings) =
+            project_events(profile_id, &events, limits)?;
         let head = events.last().map(|event| event.digest.clone());
         let revision =
             u64::try_from(events.len()).map_err(|_| ObservatoryError::InvalidEvidence)?;
@@ -581,14 +584,33 @@ impl MemoryObservatory {
             u64,
         ) -> Result<Vec<ObservatoryMutation>, ObservatoryError>,
     {
-        self.apply_binding_snapshot(now, |evidence, commitments, _, revision| build(evidence, commitments, revision))
+        self.apply_binding_snapshot(now, |evidence, commitments, _, revision| {
+            build(evidence, commitments, revision)
+        })
     }
 
-    pub(crate) fn apply_binding_snapshot<F>(&self, now: UtcTimestamp, build: F) -> Result<u64, ObservatoryError>
-    where F: FnOnce(&EvidenceMap, &SourceCommitments, &crate::bindings::BindingIndex, u64) -> Result<Vec<ObservatoryMutation>, ObservatoryError> {
+    pub(crate) fn apply_binding_snapshot<F>(
+        &self,
+        now: UtcTimestamp,
+        build: F,
+    ) -> Result<u64, ObservatoryError>
+    where
+        F: FnOnce(
+            &EvidenceMap,
+            &SourceCommitments,
+            &crate::bindings::BindingIndex,
+            u64,
+        ) -> Result<Vec<ObservatoryMutation>, ObservatoryError>,
+    {
         let mut state = self.lock()?;
-        let revision = u64::try_from(state.events.len()).map_err(|_| ObservatoryError::InvalidEvidence)?;
-        let mutations = build(&state.evidence, &state.commitments, &state.bindings, revision)?;
+        let revision =
+            u64::try_from(state.events.len()).map_err(|_| ObservatoryError::InvalidEvidence)?;
+        let mutations = build(
+            &state.evidence,
+            &state.commitments,
+            &state.bindings,
+            revision,
+        )?;
         let prepared = prepare_events(&self.profile_id, &state, mutations, now, self.limits)?;
         if prepared.is_empty() {
             return u64::try_from(state.events.len())
@@ -632,19 +654,31 @@ impl MemoryObservatory {
         Ok(revision)
     }
 
-    pub(crate) fn binding_snapshot(&self, recorded_as_of: Option<u64>) -> Result<crate::bindings::BindingSnapshot, ObservatoryError> {
+    pub(crate) fn binding_snapshot(
+        &self,
+        recorded_as_of: Option<u64>,
+    ) -> Result<crate::bindings::BindingSnapshot, ObservatoryError> {
         let state = self.lock()?;
-        let revision = u64::try_from(state.events.len()).map_err(|_| ObservatoryError::InvalidEvidence)?;
+        let revision =
+            u64::try_from(state.events.len()).map_err(|_| ObservatoryError::InvalidEvidence)?;
         let requested = recorded_as_of.unwrap_or(revision);
-        if requested > revision { return Err(ObservatoryError::InvalidQuery); }
+        if requested > revision {
+            return Err(ObservatoryError::InvalidQuery);
+        }
         let (evidence, index) = if requested == revision {
             (state.evidence.clone(), state.bindings.clone())
         } else {
             let end = usize::try_from(requested).map_err(|_| ObservatoryError::InvalidQuery)?;
-            let (evidence, _, _, index) = project_events(&self.profile_id, &state.events[..end], self.limits)?;
+            let (evidence, _, _, index) =
+                project_events(&self.profile_id, &state.events[..end], self.limits)?;
             (evidence, index)
         };
-        Ok(crate::bindings::BindingSnapshot { evidence, current: state.evidence.clone(), index, revision })
+        Ok(crate::bindings::BindingSnapshot {
+            evidence,
+            current: state.evidence.clone(),
+            index,
+            revision,
+        })
     }
 
     /// Synchronizes durable-memory records into evidence without making Markdown or the atlas
@@ -875,13 +909,20 @@ impl MemoryObservatory {
         &self,
         request: &AtlasSearchRequest,
     ) -> Result<(Vec<AtlasSearchResult>, AtlasCoverage), ObservatoryError> {
+        struct ScoredEvidence<'a> {
+            record: &'a EvidenceRecord,
+            lexical_score: f32,
+            trigram_score: f32,
+            merged_score: f32,
+        }
+
         validate_query(&request.query, request.limit, self.limits)?;
         let state = self.lock()?;
         let normalized_query = normalize(&request.query);
         let query_terms = terms(&normalized_query);
         let query_trigrams = trigrams(&normalized_query);
         let mut inspected = 0;
-        let mut results = Vec::new();
+        let mut candidates = Vec::new();
         for record in state.evidence.values().filter(|record| {
             visible_record(record, request.max_sensitivity, request.include_disputed)
         }) {
@@ -893,24 +934,37 @@ impl MemoryObservatory {
                 continue;
             }
             let merged_score = lexical_score.mul_add(0.6, trigram_score * 0.4);
-            results.push(AtlasSearchResult {
-                evidence: record.clone(),
+            candidates.push(ScoredEvidence {
+                record,
                 lexical_score,
                 trigram_score,
                 merged_score,
-                matched_nodes: matched_nodes(&state.atlas, &record.id, &query_terms),
-                excerpt: excerpt(&record.text, &query_terms, self.limits.max_excerpt_chars),
             });
         }
-        results.sort_by(|left, right| {
+        candidates.sort_by(|left, right| {
             right
                 .merged_score
                 .total_cmp(&left.merged_score)
-                .then_with(|| left.evidence.occurred_at.cmp(&right.evidence.occurred_at))
-                .then_with(|| left.evidence.id.cmp(&right.evidence.id))
+                .then_with(|| left.record.occurred_at.cmp(&right.record.occurred_at))
+                .then_with(|| left.record.id.cmp(&right.record.id))
         });
-        let matched = results.len();
-        results.truncate(request.limit.min(self.limits.max_results));
+        let matched = candidates.len();
+        candidates.truncate(request.limit.min(self.limits.max_results));
+        let results = candidates
+            .into_iter()
+            .map(|candidate| AtlasSearchResult {
+                evidence: candidate.record.clone(),
+                lexical_score: candidate.lexical_score,
+                trigram_score: candidate.trigram_score,
+                merged_score: candidate.merged_score,
+                matched_nodes: matched_nodes(&state.atlas, &candidate.record.id, &query_terms),
+                excerpt: excerpt(
+                    &candidate.record.text,
+                    &query_terms,
+                    self.limits.max_excerpt_chars,
+                ),
+            })
+            .collect::<Vec<_>>();
         let coverage = AtlasCoverage {
             total_active: count_validity(&state.evidence, EvidenceValidity::Active),
             inspected,
@@ -1300,7 +1354,13 @@ fn normalize_mutation(
     limits: ObservatoryLimits,
 ) -> Result<Option<VaultMutation>, ObservatoryError> {
     Ok(Some(match mutation {
-        ObservatoryMutation::Binding(value) => VaultMutation::BindingAssociated { binding: value.0 },
+        ObservatoryMutation::Binding(value) => {
+            validate_evidence(profile_id, &value.0.memory, limits)?;
+            if projected.len() >= limits.max_evidence_records {
+                return Err(ObservatoryError::InvalidEvidence);
+            }
+            VaultMutation::BindingAssociated { binding: value.0 }
+        }
         ObservatoryMutation::CommitSource(reference) => {
             validate_commitment(profile_id, commitments, &reference)?;
             if commitments.contains_key(&(reference.session_id.clone(), reference.entry_id.clone()))
@@ -1522,7 +1582,15 @@ fn project_events(
     profile_id: &ProfileId,
     events: &[VaultEvent],
     limits: ObservatoryLimits,
-) -> Result<(EvidenceMap, SourceIndex, SourceCommitments, crate::bindings::BindingIndex), ObservatoryError> {
+) -> Result<
+    (
+        EvidenceMap,
+        SourceIndex,
+        SourceCommitments,
+        crate::bindings::BindingIndex,
+    ),
+    ObservatoryError,
+> {
     if events.len() > limits.max_evidence_records.saturating_mul(8) {
         return Err(ObservatoryError::InvalidEvidence);
     }
@@ -1531,6 +1599,9 @@ fn project_events(
     let mut commitments = BTreeMap::new();
     let mut bindings = crate::bindings::BindingIndex::default();
     for event in events {
+        if let VaultMutation::BindingAssociated { binding } = &event.mutation {
+            validate_evidence(profile_id, &binding.memory, limits)?;
+        }
         apply_event(
             profile_id,
             &mut evidence,
@@ -1575,7 +1646,48 @@ fn apply_event(
         return Err(ObservatoryError::Incompatible);
     }
     match &event.mutation {
-        VaultMutation::BindingAssociated { binding } => bindings.apply(profile_id, evidence, binding, event.sequence)?,
+        VaultMutation::BindingAssociated { binding } => {
+            let owner = &binding.memory;
+            if owner.id != binding.owner_memory_id
+                || owner.content_digest != binding.owner_memory_digest
+                || evidence.contains_key(&owner.id)
+                || sources.contains_key(&owner.source_identity)
+                || owner.validity != EvidenceValidity::Active
+                || owner.superseded_by.is_some()
+            {
+                return Err(ObservatoryError::InvalidEvidence);
+            }
+            let mut owner = owner.clone();
+            if let Some(previous) = &binding.prior {
+                let previous = bindings
+                    .records
+                    .get(&previous.binding_id)
+                    .filter(|record| record.reference == *previous)
+                    .ok_or(ObservatoryError::MissingEvidence)?;
+                let prior_id = crate::bindings::current_binding_owner(evidence, previous)
+                    .map_err(|_| ObservatoryError::MissingEvidence)?
+                    .id
+                    .clone();
+                let prior = evidence
+                    .get_mut(&prior_id)
+                    .ok_or(ObservatoryError::MissingEvidence)?;
+                if !matches!(
+                    prior.validity,
+                    EvidenceValidity::Active | EvidenceValidity::Disputed
+                ) || owner.supersedes.as_ref() != Some(&prior.id)
+                {
+                    return Err(ObservatoryError::MissingEvidence);
+                }
+                prior.validity = EvidenceValidity::Superseded;
+                prior.superseded_by = Some(owner.id.clone());
+                owner.supersedes = Some(prior.id.clone());
+            } else if owner.supersedes.is_some() {
+                return Err(ObservatoryError::InvalidEvidence);
+            }
+            sources.insert(owner.source_identity.clone(), owner.id.clone());
+            evidence.insert(owner.id.clone(), owner);
+            bindings.apply(profile_id, evidence, binding, event.sequence)?;
+        }
         VaultMutation::SourceCommitted { reference } => {
             validate_commitment(profile_id, commitments, reference)?;
             commitments.insert(
@@ -2018,10 +2130,9 @@ fn insert_node(
         evidence_ids: Vec::new(),
     });
     if let Some(evidence_id) = evidence_id
-        && !node.evidence_ids.contains(&evidence_id)
+        && let Err(position) = node.evidence_ids.binary_search(&evidence_id)
     {
-        node.evidence_ids.push(evidence_id);
-        node.evidence_ids.sort();
+        node.evidence_ids.insert(position, evidence_id);
     }
 }
 
@@ -2612,6 +2723,63 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn search_limit_preserves_ranked_payloads_and_full_candidate_coverage() {
+        let root = tempdir().unwrap();
+        let profile = ProfileId::new();
+        let session = SessionId::new();
+        let text = format!(
+            "Cobalt endpoint {}",
+            "unchanged supporting context ".repeat(12)
+        );
+        let entries = (0..64)
+            .map(|index| user_entry(&text, index % 3))
+            .collect::<Vec<_>>();
+        crate::test_sources::ingest(
+            root.path(),
+            &profile,
+            &session,
+            &entries,
+            UtcTimestamp::from_unix_millis(3),
+        );
+        let observatory = MemoryObservatory::open(
+            root.path(),
+            &profile,
+            ObservatoryLimits {
+                max_excerpt_chars: 24,
+                ..ObservatoryLimits::default()
+            },
+            UtcTimestamp::from_unix_millis(3),
+        )
+        .unwrap();
+        let mut request = AtlasSearchRequest {
+            query: "Cobalt endpoint".into(),
+            limit: 64,
+            max_sensitivity: Sensitivity::Personal,
+            include_disputed: false,
+        };
+        let (all, full_coverage) = observatory.search(&request).unwrap();
+        assert_eq!(all.len(), 64);
+        assert!(all.windows(2).all(|pair| {
+            (&pair[0].evidence.occurred_at, &pair[0].evidence.id)
+                <= (&pair[1].evidence.occurred_at, &pair[1].evidence.id)
+        }));
+        assert!(
+            all.iter()
+                .all(|result| !result.matched_nodes.is_empty() && result.excerpt.ends_with("..."))
+        );
+        request.limit = 4;
+        let (limited, coverage) = observatory.search(&request).unwrap();
+        assert_eq!(limited, all[..4]);
+        assert_eq!(coverage.total_active, full_coverage.total_active);
+        assert_eq!(coverage.inspected, full_coverage.inspected);
+        assert_eq!(coverage.matched, full_coverage.matched);
+        assert_eq!(coverage.matched, 64);
+        assert_eq!(coverage.returned, 4);
+        assert!(coverage.truncated);
+        assert!(!full_coverage.truncated);
     }
 
     #[test]

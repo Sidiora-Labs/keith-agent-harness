@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
 mod bindings;
+mod bindings_schema;
+#[cfg(test)]
+mod bindings_tests;
 mod memory_intake;
 #[cfg(test)]
 mod memory_intake_tests;
@@ -25,9 +28,9 @@ use keith_agent_loop::{
     CompactionProgress, ContextCompactor, NoSteering,
 };
 use keith_agent_types::{
-    ActionId, BindingTaskScope, CURRENT_SCHEMA_VERSION, ClientId, EntityId, EntryId, Generation, KernelId, MessageId,
-    ProfileId, Revision, RootTreeId, SessionId, TimeZoneName, ToolEffectState, ToolFailure, TurnId,
-    UtcTimestamp, WorkerId, WorkspaceId,
+    ActionId, BindingTaskScope, CURRENT_SCHEMA_VERSION, ClientId, EntityId, EntryId, Generation,
+    KernelId, MessageId, ProfileId, Revision, RootTreeId, SessionId, TimeZoneName, ToolEffectState,
+    ToolFailure, TurnId, UtcTimestamp, WorkerId, WorkspaceId,
 };
 use keith_artifacts::{
     ArtifactLimits, ArtifactReference, ArtifactScope, ArtifactService, ArtifactSource,
@@ -340,6 +343,7 @@ struct RuntimeContextCompactor<'a> {
     credentials: &'a dyn CredentialResolver,
     task: &'a str,
     active_user_source_id: Option<&'a str>,
+    binding_scope: &'a BindingTaskScope,
 }
 
 impl ContextCompactor for RuntimeContextCompactor<'_> {
@@ -396,7 +400,8 @@ impl ContextCompactor for RuntimeContextCompactor<'_> {
                         "active user metadata disappeared while rebuilding after compaction".into(),
                     )
                 })?;
-            self.runtime
+            let mut rebuilt = self
+                .runtime
                 .model_request(
                     self.profile,
                     &session.manifest().session_id,
@@ -407,7 +412,18 @@ impl ContextCompactor for RuntimeContextCompactor<'_> {
                     Some(&request.context.active_user_entry_id),
                     self.active_user_source_id,
                 )
-                .map_err(|error| AgentLoopError::Compaction(error.to_string()))?
+                .map_err(|error| AgentLoopError::Compaction(error.to_string()))?;
+            self.runtime
+                .prepare_binding_context(
+                    self.profile,
+                    self.binding_scope,
+                    &turn_id,
+                    session,
+                    &mut rebuilt,
+                    self.task,
+                )
+                .map_err(|error| AgentLoopError::Compaction(error.to_string()))?;
+            rebuilt
         } else {
             request.clone()
         };
@@ -2014,6 +2030,7 @@ impl LocalRuntime {
         let turn_id = assigned_turn_id.clone().unwrap_or_else(TurnId::new);
         let obligation_action_id = action_id.clone().unwrap_or_else(ActionId::new);
         let binding_scope = self.binding_task_scope(&manifest, &obligation_action_id)?;
+        let binding_modules = self.profile_modules(&profile)?;
         let tools = self.tool_manager(&profile, session_id, text, &binding_scope)?;
         let definitions = tools
             .discover()?
@@ -2136,24 +2153,31 @@ impl LocalRuntime {
             let _ = modules.memory.ingest_committed_entry(source, accepted_at);
         }
         self.schedule_memory_intake(session_id);
-        let request = match self.model_request(
-            &profile,
-            session_id,
-            &turn_id,
-            &writer.active_ancestry()?,
-            definitions,
-            text,
-            match ingress {
-                TurnIngress::User { .. } => Some(&ingress_entry.id),
-                TurnIngress::Controller { .. } => None,
-            },
-            matches!(ingress, TurnIngress::User { .. }).then_some(ingress_source_id.as_str()),
-        ).and_then(|mut request| {
-            self.prepare_binding_context(
-                &profile, &binding_scope, &turn_id, &mut writer, &mut request, text,
-            )?;
-            Ok(request)
-        }) {
+        let request = match self
+            .model_request(
+                &profile,
+                session_id,
+                &turn_id,
+                &writer.active_ancestry()?,
+                definitions,
+                text,
+                match ingress {
+                    TurnIngress::User { .. } => Some(&ingress_entry.id),
+                    TurnIngress::Controller { .. } => None,
+                },
+                matches!(ingress, TurnIngress::User { .. }).then_some(ingress_source_id.as_str()),
+            )
+            .and_then(|mut request| {
+                self.prepare_binding_context(
+                    &profile,
+                    &binding_scope,
+                    &turn_id,
+                    &mut writer,
+                    &mut request,
+                    text,
+                )?;
+                Ok(request)
+            }) {
             Ok(request) => request,
             Err(error) => {
                 return self.finalize_accepted_failure(
@@ -2200,10 +2224,10 @@ impl LocalRuntime {
             task: text,
             active_user_source_id: matches!(ingress, TurnIngress::User { .. })
                 .then_some(ingress_source_id.as_str()),
+            binding_scope: &binding_scope,
         };
-        let binding_executor = bindings::BindingExecutor::new(
-            binding_scope.clone(), self.profile_modules(&profile)?, &tools,
-        );
+        let binding_executor =
+            bindings::BindingExecutor::new(binding_scope.clone(), binding_modules, &tools, text);
         let mut agent_loop = AgentLoop::new(
             &self.models,
             &manifest.profile_id,
@@ -2214,7 +2238,8 @@ impl LocalRuntime {
             &NoSteering,
             &mut writer,
             AgentLoopConfig::default(),
-        ).with_tool_admission(&binding_executor);
+        )
+        .with_tool_admission(&binding_executor);
         agent_loop.subscribe(|event: &AgentEvent| {
             last_event_sequence = event.sequence;
             let kind =
@@ -6458,6 +6483,7 @@ impl LocalRuntime {
             "memory_context",
             "skill_manage",
             "commitment_create",
+            "commitment_get",
             "plan_create",
             "review_content",
             "refinement_propose",
@@ -6544,6 +6570,10 @@ impl LocalRuntime {
             Arc::clone(&self.system_modules.commitments),
             profile.profile.id.clone(),
             session_id.clone(),
+        )))?;
+        manager.register(Arc::new(bindings::CommitmentGetTool::new(
+            Arc::clone(&self.system_modules.commitments),
+            profile.profile.id.clone(),
         )))?;
         manager.register(Arc::new(PlanCreateTool::new(Arc::clone(
             &self.system_modules.plans,
@@ -8188,7 +8218,7 @@ impl ReadTool {
             definition: tool_definition(
                 "read",
                 "Read a UTF-8 or binary file inside the workspace",
-                serde_json::json!({"path": {"type": "string"}}),
+                serde_json::json!({"path": {"type": "string"}, "object_binding": bindings::key_schema()}),
                 &["path"],
                 ToolBehavior::READ_ONLY,
             ),
@@ -8506,7 +8536,13 @@ impl ManagedTool for MemoryTool {
                     facets: memory_facets_argument(invocation)?,
                     sensitivity: optional_memory_sensitivity_argument(invocation)?,
                 };
-                bindings::correct_memory(&self.modules.memory, &self.scope, request, invocation, now)
+                bindings::correct_memory(
+                    &self.modules.memory,
+                    &self.scope,
+                    request,
+                    invocation,
+                    now,
+                )
             }
             MemoryToolKind::Forget => {
                 let evidence_id = string_argument(invocation, "evidence_id")?
@@ -8531,7 +8567,10 @@ impl ManagedTool for MemoryTool {
             MemoryToolKind::Context => {
                 if invocation.arguments.get("required_bindings").is_some() {
                     return bindings::required_memory_context(
-                        &self.modules.memory, &self.scope, invocation, now,
+                        &self.modules.memory,
+                        &self.scope,
+                        invocation,
+                        now,
                     );
                 }
                 let bundle = self
@@ -8583,7 +8622,7 @@ fn memory_tool_definition(kind: MemoryToolKind) -> ToolDefinition {
     match kind {
         MemoryToolKind::Create => tool_definition(
             "memory_create",
-            "Create one durable, exact-source-cited memory after interpreting the user's meaning. Use kind preferred_name only when the user explicitly chose how Keith should address them; set preferred_name to only the exact chosen name (for example, Rowan), not a sentence.",
+            "Create one durable, exact-source-cited memory after interpreting the user's meaning. For a bound write, the returned evidence.id is the saved memory owner; binding.evidence_id is its original quoted source. Keep both identities distinct when correcting it. Use kind preferred_name only when the user explicitly chose how Keith should address them; set preferred_name to only the exact chosen name (for example, Rowan), not a sentence.",
             merge_tool_properties(
                 write_source,
                 serde_json::json!({
@@ -8619,11 +8658,11 @@ fn memory_tool_definition(kind: MemoryToolKind) -> ToolDefinition {
         ),
         MemoryToolKind::Correct => tool_definition(
             "memory_correct",
-            "Supersede an existing memory with a newly source-cited correction",
+            "Supersede an existing memory with a newly source-cited correction. For bound memory, replace the current owning memory and preserve the complete expected_binding reference; the owner, original source, and new correction source have separate identities.",
             merge_tool_properties(
                 write_source,
                 serde_json::json!({
-                    "evidence_id": {"type": "string"},
+                    "evidence_id": {"type": "string", "description": "Current saved-memory owner to replace: use owner_memory_id from exact binding lookup or evidence.id from the binding write receipt. Do not use expected_binding.evidence_id (the original source) or source_entry_id (the new correction source entry)."},
                     "replacement": {"type": "string"},
                     "facets": facets,
                     "sensitivity": sensitivity,
@@ -8655,7 +8694,8 @@ fn memory_tool_definition(kind: MemoryToolKind) -> ToolDefinition {
             serde_json::json!({
                 "query": {"type": "string"},
                 "token_budget": {"type": "integer", "minimum": 128, "maximum": 16000},
-                "deep": {"type": "boolean"}
+                "deep": {"type": "boolean"},
+                "required_bindings": bindings::requirements_schema()
             }),
             &["query"],
             ToolBehavior::READ_ONLY,
@@ -9144,7 +9184,7 @@ impl WebFetchTool {
             definition: tool_definition(
                 "web_fetch",
                 "Fetch a public HTTP or HTTPS resource with DNS, redirect, type, time, and size controls",
-                serde_json::json!({"url": {"type": "string"}}),
+                serde_json::json!({"url": {"type": "string"}, "object_binding": bindings::key_schema()}),
                 &["url"],
                 ToolBehavior {
                     reads_state: true,

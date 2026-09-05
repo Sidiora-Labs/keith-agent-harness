@@ -114,6 +114,30 @@ impl SteeringSource for NoSteering {
     }
 }
 
+/// Runtime-owned checks performed with the already-held session writer before
+/// handing a tool to its executor. Implementations persist any frozen admission
+/// through this writer and must not acquire a second session writer.
+pub trait ToolAdmission: Send + Sync {
+    /// # Errors
+    ///
+    /// A rejection becomes a durable not-started tool result. Persistence errors
+    /// stop scheduling; a failed admission never hands the call to an executor.
+    fn admit(
+        &self,
+        session: &mut SessionWriter,
+        turn_id: &TurnId,
+        invocation: &ToolInvocation,
+    ) -> Result<(), ToolAdmissionError>;
+}
+
+#[derive(Debug, Error)]
+pub enum ToolAdmissionError {
+    #[error("tool admission rejected: {0:?}")]
+    Rejected(Box<ToolFailure>),
+    #[error("tool admission persistence failed: {0}")]
+    Persistence(#[from] SessionStoreError),
+}
+
 pub trait ContextCompactor: Send + Sync {
     /// # Errors
     ///
@@ -231,6 +255,8 @@ pub struct AgentLoop<'a> {
     compactor: &'a dyn ContextCompactor,
     steering: &'a dyn SteeringSource,
     session: &'a mut SessionWriter,
+    tool_admission: Option<&'a dyn ToolAdmission>,
+    dispatched_calls: BTreeSet<ToolCallId>,
     subscribers: Vec<Box<dyn AgentEventSubscriber + 'a>>,
     config: AgentLoopConfig,
     sequence: u64,
@@ -258,10 +284,18 @@ impl<'a> AgentLoop<'a> {
             compactor,
             steering,
             session,
+            tool_admission: None,
+            dispatched_calls: BTreeSet::new(),
             subscribers: Vec::new(),
             config,
             sequence: 0,
         }
+    }
+
+    #[must_use]
+    pub fn with_tool_admission(mut self, admission: &'a dyn ToolAdmission) -> Self {
+        self.tool_admission = Some(admission);
+        self
     }
 
     pub fn subscribe(&mut self, subscriber: impl AgentEventSubscriber + 'a) {
@@ -277,6 +311,7 @@ impl<'a> AgentLoop<'a> {
         mut request: ModelRequest,
         cancellation: &CancellationToken,
     ) -> Result<AgentRunResult, AgentLoopError> {
+        self.dispatched_calls.clear();
         let durable_turn_id = request
             .context
             .messages
@@ -628,38 +663,22 @@ impl<'a> AgentLoop<'a> {
                     })
                     .map_or(calls.len(), |offset| index + offset);
                 for chunk in calls[index..end].chunks(self.config.max_parallel_reads.max(1)) {
-                    for call in chunk {
-                        self.emit(AgentEventKind::ToolStarted {
-                            turn_id: turn_id.clone(),
-                            call_id: call.call_id.clone(),
-                            name: call.name.clone(),
-                        })?;
-                    }
-                    let results = std::thread::scope(|scope| {
-                        chunk
-                            .iter()
-                            .map(|call| scope.spawn(|| self.tools.execute(call, cancellation)))
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .map(|handle| {
-                                handle
-                                    .join()
-                                    .map_err(|_| AgentLoopError::ToolWorkerPanicked)
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                    })?;
-                    for (call, result) in chunk.iter().zip(results) {
-                        outcomes.push(self.finish_tool(turn_id, call, result)?);
-                    }
+                    outcomes.extend(self.execute_read_chunk(turn_id, chunk, cancellation)?);
                 }
                 index = end;
             } else {
                 let call = &calls[index];
+                if let Some(rejected) = self.admit_tool(turn_id, call)? {
+                    outcomes.push(rejected);
+                    index += 1;
+                    continue;
+                }
                 self.emit(AgentEventKind::ToolStarted {
                     turn_id: turn_id.clone(),
                     call_id: call.call_id.clone(),
                     name: call.name.clone(),
                 })?;
+                self.dispatched_calls.insert(call.call_id.clone());
                 let result =
                     catch_unwind(AssertUnwindSafe(|| self.tools.execute(call, cancellation)))
                         .map_err(|_| AgentLoopError::ToolWorkerPanicked)?;
@@ -668,6 +687,78 @@ impl<'a> AgentLoop<'a> {
             }
         }
         Ok(outcomes)
+    }
+
+    fn admit_tool(
+        &mut self,
+        turn_id: &TurnId,
+        call: &ToolInvocation,
+    ) -> Result<Option<ToolOutcome>, AgentLoopError> {
+        let Some(admission) = self.tool_admission else {
+            return Ok(None);
+        };
+        match admission.admit(self.session, turn_id, call) {
+            Ok(()) => Ok(None),
+            Err(ToolAdmissionError::Persistence(error)) => Err(error.into()),
+            Err(ToolAdmissionError::Rejected(mut failure)) => {
+                failure.status = ToolFailureStatus::NotStarted;
+                failure.success = false;
+                failure.effect_state = ToolEffectState::NotStarted;
+                self.finish_tool(turn_id, call, Err(ToolExecutionError::typed(*failure)))
+                    .map(Some)
+            }
+        }
+    }
+
+    fn execute_read_chunk(
+        &mut self,
+        turn_id: &TurnId,
+        chunk: &[ToolInvocation],
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<ToolOutcome>, AgentLoopError> {
+        let tools = self.tools;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            let mut outcomes = Vec::new();
+            let mut failure = None;
+            for call in chunk {
+                match self.admit_tool(turn_id, call) {
+                    Ok(Some(rejected)) => {
+                        outcomes.push(rejected);
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
+                    }
+                }
+                if let Err(error) = self.emit(AgentEventKind::ToolStarted {
+                    turn_id: turn_id.clone(),
+                    call_id: call.call_id.clone(),
+                    name: call.name.clone(),
+                }) {
+                    failure = Some(error);
+                    break;
+                }
+                self.dispatched_calls.insert(call.call_id.clone());
+                handles.push((call, scope.spawn(move || tools.execute(call, cancellation))));
+            }
+            // Even when a later admission fails, join every already-dispatched
+            // read and retain its real outcome before propagating the error.
+            for (call, handle) in handles {
+                let outcome = handle
+                    .join()
+                    .map_err(|_| AgentLoopError::ToolWorkerPanicked)
+                    .and_then(|result| self.finish_tool(turn_id, call, result));
+                match outcome {
+                    Ok(outcome) => outcomes.push(outcome),
+                    Err(error) if failure.is_none() => failure = Some(error),
+                    Err(_) => {}
+                }
+            }
+            failure.map_or(Ok(outcomes), Err)
+        })
     }
 
     fn finish_tool(
@@ -731,15 +822,28 @@ impl<'a> AgentLoop<'a> {
             .iter()
             .filter(|call| !completed.contains(&call.call_id))
         {
-            let mut failure = ToolFailure::execution(
-                "the tool scheduler stopped before a terminal result became durable",
-                false,
-            );
-            failure.error.code = "TOOL_OUTCOME_UNKNOWN".into();
-            failure.error.reason = "tool_outcome_unknown".into();
-            failure.retry.reason =
-                "Inspect external state before deciding whether the operation can be retried"
-                    .into();
+            let failure = if self.dispatched_calls.contains(&call.call_id) {
+                let mut failure = ToolFailure::execution(
+                    "the tool scheduler stopped before a terminal result became durable",
+                    false,
+                );
+                failure.error.code = "TOOL_OUTCOME_UNKNOWN".into();
+                failure.error.reason = "tool_outcome_unknown".into();
+                failure.retry.reason =
+                    "Inspect external state before deciding whether the operation can be retried"
+                        .into();
+                failure
+            } else {
+                let mut failure = ToolFailure::not_committed(
+                    ToolErrorCategory::Execution,
+                    "TOOL_NOT_STARTED",
+                    "scheduler_stopped_before_dispatch",
+                    "tool call was durably requested but the scheduler stopped before dispatch",
+                );
+                failure.status = ToolFailureStatus::NotStarted;
+                failure.effect_state = ToolEffectState::NotStarted;
+                failure
+            };
             self.finish_tool(turn_id, call, Err(ToolExecutionError::typed(failure)))?;
         }
         Ok(())
@@ -1183,6 +1287,8 @@ fn add_usage(total: &mut Usage, next: Usage) {
 
 #[cfg(test)]
 mod tests {
+    mod admission;
+
     use std::collections::VecDeque;
     use std::fs;
     use std::io::{Read, Write};

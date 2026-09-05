@@ -759,7 +759,10 @@ impl MemoryService {
     }
 }
 
-pub(crate) fn source_digest_for(record: &EvidenceRecord, entry_id: &EntryId) -> Result<String, MemoryError> {
+pub(crate) fn source_digest_for(
+    record: &EvidenceRecord,
+    entry_id: &EntryId,
+) -> Result<String, MemoryError> {
     record
         .source_entries
         .iter()

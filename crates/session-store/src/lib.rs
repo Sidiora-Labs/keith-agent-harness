@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-mod committed;
 mod bindings;
+mod committed;
 
 pub use bindings::{
     FrozenBindingAdmission, FrozenObjectBindingUse, MAX_REQUIRED_OBJECT_BINDINGS,
@@ -739,6 +739,8 @@ impl SessionIndex {
                 | SessionEntryPayload::AssistantFinal { .. }
                 | SessionEntryPayload::ControllerGuidance { .. }
                 | SessionEntryPayload::TurnObligation { .. }
+                | SessionEntryPayload::RequiredObjectBindings { .. }
+                | SessionEntryPayload::BindingAdmission { .. }
                 | SessionEntryPayload::StepBoundary { .. }
                 | SessionEntryPayload::ToolCall { .. }
                 | SessionEntryPayload::ToolResult { .. }

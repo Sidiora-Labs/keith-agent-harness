@@ -5,14 +5,15 @@ use std::collections::BTreeSet;
 
 use keith_agent_types::{
     BindingTargetSlot, BindingTaskScope, CURRENT_SCHEMA_VERSION, ObjectBindingKey,
-    ObjectBindingReference, SchemaVersion, ToolCallId, TurnId, UtcTimestamp,
-    canonical_json_bytes,
+    ObjectBindingReference, SchemaVersion, ToolCallId, TurnId, UtcTimestamp, canonical_json_bytes,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{HISTORY_FILE, SessionEntry, SessionEntryPayload, SessionStoreError, SessionWriter,
-    parse_complete_history};
+use crate::{
+    HISTORY_FILE, SessionEntry, SessionEntryPayload, SessionStoreError, SessionWriter,
+    TurnObligationState, parse_complete_history,
+};
 
 pub const MAX_REQUIRED_OBJECT_BINDINGS: usize = 128;
 
@@ -55,8 +56,13 @@ pub struct FrozenBindingAdmission {
 /// # Errors
 ///
 /// Returns an error if arguments cannot be represented as canonical JSON.
-pub fn binding_arguments_digest(arguments: &serde_json::Value) -> Result<String, SessionStoreError> {
-    Ok(format!("{:x}", Sha256::digest(canonical_json_bytes(arguments)?)))
+pub fn binding_arguments_digest(
+    arguments: &serde_json::Value,
+) -> Result<String, SessionStoreError> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(canonical_json_bytes(arguments)?)
+    ))
 }
 
 fn invalid(reason: &str) -> SessionStoreError {
@@ -71,8 +77,12 @@ fn checked_requirements(
     }
     let mut result = BTreeSet::new();
     for item in required {
-        item.key.validate().map_err(|_| invalid("invalid required key"))?;
-        item.target.validate().map_err(|_| invalid("invalid target slot"))?;
+        item.key
+            .validate()
+            .map_err(|_| invalid("invalid required key"))?;
+        item.target
+            .validate()
+            .map_err(|_| invalid("invalid target slot"))?;
         if !result.insert(item.clone()) {
             return Err(invalid("required binding set contains duplicates"));
         }
@@ -82,8 +92,13 @@ fn checked_requirements(
 
 impl SessionWriter {
     fn validate_binding_scope(&self, scope: &BindingTaskScope) -> Result<(), SessionStoreError> {
-        scope.validate_for(&self.manifest.profile_id, &self.manifest.workspace_id,
-            &self.manifest.session_id).map_err(|_| invalid("binding scope does not match session"))
+        scope
+            .validate_for(
+                &self.manifest.profile_id,
+                &self.manifest.workspace_id,
+                &self.manifest.session_id,
+            )
+            .map_err(|_| invalid("binding scope does not match session"))
     }
 
     /// Reads the union from complete committed history, including compacted branches.
@@ -129,8 +144,12 @@ impl SessionWriter {
         at: UtcTimestamp,
     ) -> Result<SessionEntry, SessionStoreError> {
         self.ensure_writable()?;
-        let mut union = self.required_object_bindings(&scope)?.into_iter().collect::<BTreeSet<_>>();
-        union.extend(checked_requirements(&required)?);
+        let mut union = self
+            .required_object_bindings(&scope)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        checked_requirements(&required)?;
+        union.extend(required);
         if union.len() > MAX_REQUIRED_OBJECT_BINDINGS {
             return Err(invalid("durable required binding union exceeds its bound"));
         }
@@ -139,8 +158,11 @@ impl SessionWriter {
             scope,
             required: union.into_iter().collect(),
         };
-        self.append(self.manifest.active_leaf.clone(), at,
-            SessionEntryPayload::RequiredObjectBindings { record })
+        self.append(
+            self.manifest.active_leaf.clone(),
+            at,
+            SessionEntryPayload::RequiredObjectBindings { record },
+        )
     }
 
     /// Freezes selected binding references against the actual durable tool intent.
@@ -162,64 +184,139 @@ impl SessionWriter {
             return Err(invalid("unsupported binding admission version"));
         }
         let required = checked_requirements(&admission.required)?;
-        let durable = self.required_object_bindings(&admission.scope)?.into_iter().collect::<BTreeSet<_>>();
+        let durable = self
+            .required_object_bindings(&admission.scope)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         if required != durable {
-            return Err(invalid("admission omitted or invented a durable requirement"));
+            return Err(invalid(
+                "admission omitted or invented a durable requirement",
+            ));
         }
         if admission.bindings.len() > MAX_REQUIRED_OBJECT_BINDINGS {
             return Err(invalid("frozen binding use exceeds its bound"));
         }
         let mut slots = BTreeSet::new();
+        let mut argument_slots = BTreeSet::new();
         for used in &admission.bindings {
-            used.reference.validate().map_err(|_| invalid("invalid binding reference"))?;
-            used.target.validate().map_err(|_| invalid("invalid frozen target slot"))?;
+            used.reference
+                .validate()
+                .map_err(|_| invalid("invalid binding reference"))?;
+            used.target
+                .validate()
+                .map_err(|_| invalid("invalid frozen target slot"))?;
             if used.target.tool_name != admission.tool_name
                 || !required.contains(&RequiredObjectBinding {
-                    key: used.reference.key.clone(), target: used.target.clone(),
+                    key: used.reference.key.clone(),
+                    target: used.target.clone(),
                 })
                 || !slots.insert(used.target.clone())
+                || !argument_slots.insert((&used.target.tool_name, &used.target.argument_name))
             {
-                return Err(invalid("frozen use does not select a unique required adapter slot"));
+                return Err(invalid(
+                    "frozen use does not select a unique required adapter slot",
+                ));
             }
         }
-        if admission.bindings.is_empty()
-            && required.iter().any(|item| item.target.tool_name == admission.tool_name)
-        {
-            return Err(invalid("dependent tool has no selected binding"));
+        let required_slots = required
+            .iter()
+            .filter(|item| item.target.tool_name == admission.tool_name)
+            .map(|item| item.target.clone())
+            .collect::<BTreeSet<_>>();
+        if slots != required_slots {
+            return Err(invalid("dependent tool omitted a required adapter slot"));
         }
         let index = parse_complete_history(&self.directory.join(HISTORY_FILE))?;
-        let call = index.entries.values().find(|entry| matches!(&entry.payload,
-            SessionEntryPayload::ToolCall { call_id, .. } if call_id == &admission.call_id))
+        let mut calls = index.entries.values().filter(|entry| {
+            matches!(&entry.payload,
+            SessionEntryPayload::ToolCall { call_id, .. } if call_id == &admission.call_id)
+        });
+        let call = calls
+            .next()
             .ok_or_else(|| invalid("admission does not reference a durable tool call"))?;
-        let SessionEntryPayload::ToolCall { name, arguments, .. } = &call.payload else { unreachable!() };
-        if name != &admission.tool_name || binding_arguments_digest(arguments)? != admission.arguments_digest {
-            return Err(invalid("admission arguments differ from the durable tool call"));
+        if calls.next().is_some() {
+            return Err(invalid(
+                "tool call identity is not unique in committed history",
+            ));
+        }
+        let SessionEntryPayload::ToolCall {
+            name, arguments, ..
+        } = &call.payload
+        else {
+            unreachable!()
+        };
+        if name != &admission.tool_name
+            || binding_arguments_digest(arguments)? != admission.arguments_digest
+        {
+            return Err(invalid(
+                "admission arguments differ from the durable tool call",
+            ));
         }
         if !index.entries.values().any(|entry| matches!(&entry.payload,
-            SessionEntryPayload::TurnObligation { action_id, turn_id, .. }
+            SessionEntryPayload::TurnObligation { action_id, turn_id, state: TurnObligationState::Accepted, .. }
                 if action_id == &admission.scope.action_id && turn_id == &admission.turn_id))
         {
             return Err(invalid("admission does not match the accepted action and turn"));
         }
+        if index.entries.values().any(|entry| matches!(&entry.payload,
+            SessionEntryPayload::TurnObligation { turn_id, state: TurnObligationState::Finalized { .. }, .. }
+                if turn_id == &admission.turn_id))
+        {
+            return Err(invalid("binding admission cannot reopen a finalized turn"));
+        }
+        let active = self
+            .manifest
+            .active_leaf
+            .as_ref()
+            .ok_or_else(|| invalid("binding admission requires an active tool intent"))?;
+        if !index
+            .ancestry(active)?
+            .iter()
+            .any(|entry| entry.id == call.id)
+        {
+            return Err(invalid(
+                "tool intent is not on the current committed branch",
+            ));
+        }
         let ancestry = index.ancestry(&call.id)?;
-        let call_turn = ancestry.iter().rev().find_map(|entry| match &entry.payload {
-            SessionEntryPayload::AssistantActivity { turn_id, .. } => Some(turn_id),
-            _ => None,
-        });
+        let call_turn = ancestry
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.payload {
+                SessionEntryPayload::AssistantActivity { turn_id, .. } => Some(turn_id),
+                _ => None,
+            });
         if call_turn != Some(&admission.turn_id) {
             return Err(invalid("tool intent belongs to a different assistant turn"));
         }
-        if let Some(existing) = index.entries.values().find(|entry| matches!(&entry.payload,
+        if let Some(existing) = index.entries.values().find(|entry| {
+            matches!(&entry.payload,
             SessionEntryPayload::BindingAdmission { admission: prior }
-                if prior.call_id == admission.call_id))
-        {
-            let SessionEntryPayload::BindingAdmission { admission: prior } = &existing.payload else { unreachable!() };
+                if prior.call_id == admission.call_id)
+        }) {
+            let SessionEntryPayload::BindingAdmission { admission: prior } = &existing.payload
+            else {
+                unreachable!()
+            };
             let mut retry = admission.clone();
             retry.admitted_at = prior.admitted_at;
-            if prior != &retry { return Err(invalid("tool call has a conflicting frozen admission")); }
+            if prior != &retry {
+                return Err(invalid("tool call has a conflicting frozen admission"));
+            }
             return Ok(existing.clone());
         }
-        self.append(self.manifest.active_leaf.clone(), admission.admitted_at,
-            SessionEntryPayload::BindingAdmission { admission })
+        if index.entries.values().any(|entry| {
+            matches!(&entry.payload,
+            SessionEntryPayload::ToolResult { call_id, .. } if call_id == &admission.call_id)
+        }) {
+            return Err(invalid(
+                "binding admission cannot follow an existing tool result",
+            ));
+        }
+        self.append(
+            self.manifest.active_leaf.clone(),
+            admission.admitted_at,
+            SessionEntryPayload::BindingAdmission { admission },
+        )
     }
 }

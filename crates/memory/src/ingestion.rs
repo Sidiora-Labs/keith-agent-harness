@@ -885,6 +885,10 @@ fn project_entry(
                     "memory_correct",
                     "memory_context",
                     "memory_forget",
+                    // Commitment existence/status is read through its typed owner;
+                    // descriptions returned by these tools can be model-authored.
+                    "commitment_create",
+                    "commitment_get",
                 ]
                 .iter()
                 .any(|name| {

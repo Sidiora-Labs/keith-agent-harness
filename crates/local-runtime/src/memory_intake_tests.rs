@@ -206,8 +206,16 @@ fn current_user_receipt_remains_usable_ahead_of_historical_replay() {
         .unwrap();
     assert_eq!(current.authority, EvidenceAuthority::UserAsserted);
     let profile = runtime.profile(&session.profile_id).unwrap();
+    let binding_scope = runtime
+        .binding_task_scope(&session, &ActionId::new())
+        .unwrap();
     let tools = runtime
-        .tool_manager(&profile, &session.session_id, "save preference")
+        .tool_manager(
+            &profile,
+            &session.session_id,
+            "save preference",
+            &binding_scope,
+        )
         .unwrap();
     let mut invocation = ToolInvocation {
         call_id: keith_agent_types::ToolCallId::new(),
