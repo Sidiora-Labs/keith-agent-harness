@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 chrono.workspace = true
-hmac = "0.12.1"
+hmac = "0.13.0"
 keith-agent-types = { path = "../agent-types" }
 keith-channel-core = { path = "../channel-core" }
 keith-credentials = { path = "../credentials" }
