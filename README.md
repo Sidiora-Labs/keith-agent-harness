@@ -12,11 +12,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Sidiora-Labs/keith-agent/actions/workflows/ci.yml"><img src="https://github.com/Sidiora-Labs/keith-agent/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/Sidiora-Labs/keith-agent/releases/latest"><img src="https://img.shields.io/github/v/release/Sidiora-Labs/keith-agent?display_name=tag" alt="Latest release"></a>
-  <a href="https://github.com/Sidiora-Labs/keith-agent/stargazers"><img src="https://img.shields.io/github/stars/Sidiora-Labs/keith-agent?style=flat" alt="GitHub stars"></a>
+  <a href="https://github.com/Sidiora-Labs/keith-agent-harness/actions/workflows/ci.yml"><img src="https://github.com/Sidiora-Labs/keith-agent-harness/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/Sidiora-Labs/keith-agent-harness/releases/latest"><img src="https://img.shields.io/github/v/release/Sidiora-Labs/keith-agent-harness?display_name=tag" alt="Latest release"></a>
+  <a href="https://github.com/Sidiora-Labs/keith-agent-harness/stargazers"><img src="https://img.shields.io/github/stars/Sidiora-Labs/keith-agent-harness?style=flat" alt="GitHub stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="License: Apache-2.0"></a>
-  <a href="https://github.com/Sidiora-Labs/keith-agent/pkgs/container/keith-agent"><img src="https://img.shields.io/badge/container-GHCR-blue" alt="GHCR image"></a>
+  <a href="https://github.com/Sidiora-Labs/keith-agent-harness/pkgs/container/keith-agent"><img src="https://img.shields.io/badge/container-GHCR-blue" alt="GHCR image"></a>
 </p>
 
 <p align="center">
@@ -35,7 +35,7 @@
 
 > [!IMPORTANT]
 > Keith is pre-release software. The core system is working, but interfaces,
-> storage, and packaging can still change before 1.0.
+> storage, and packaging can still change before 1.0. Keith is part of Sidiora's Experimental Harness development program
 
 ## Try it
 
@@ -188,7 +188,7 @@ providers, and release signing. Never post credentials or unredacted traces in
 a public issue.
 
 Report vulnerabilities privately through GitHub's
-[security advisory form](https://github.com/Sidiora-Labs/keith-agent/security/advisories/new).
+[security advisory form](https://github.com/Sidiora-Labs/keith-agent-harness/security/advisories/new).
 Read [SECURITY.md](SECURITY.md) for the trust model, scope, and reporting rules.
 
 ## Deploy
@@ -241,9 +241,9 @@ user paths you actually exercised.
 ## Community
 
 - Ask questions and share ideas in
-  [GitHub Discussions](https://github.com/Sidiora-Labs/keith-agent/discussions).
+  [GitHub Discussions](https://github.com/Sidiora-Labs/keith-agent-harness/discussions).
 - Report reproducible bugs through the
-  [issue forms](https://github.com/Sidiora-Labs/keith-agent/issues/new/choose).
+  [issue forms](https://github.com/Sidiora-Labs/keith-agent-harness/issues/new/choose).
 - Report security problems privately, never in a public issue.
 - Follow the [Code of Conduct](CODE_OF_CONDUCT.md) in every project space.
 
