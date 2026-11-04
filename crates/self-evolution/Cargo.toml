@@ -14,7 +14,7 @@ fault-injection = []
 workspace = true
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 keith-agent-types = { path = "../agent-types" }
 keith-evolution = { path = "../evolution" }
 keith-meta-harness = { path = "../meta-harness" }
